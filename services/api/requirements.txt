@@ -1,6 +1,6 @@
 # M0 floor versions. M1 replaces this with a hash-pinned lockfile (supply-chain row in the design doc).
 fastapi>=0.115
-uvicorn[standard]>=0.30
+uvicorn[standard]>=0.54.0
 httpx>=0.27
 psycopg[binary]>=3.2
 pyjwt[crypto]>=2.9
