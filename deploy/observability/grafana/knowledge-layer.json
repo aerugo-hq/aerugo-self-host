@@ -1,0 +1,84 @@
+{
+  "uid": "knowledge-layer",
+  "title": "knowledge-layer",
+  "description": "Latency, policy decisions, model use, and the worker. Every label is an id; telemetry never carries content.",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["knowledge-layer"],
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "ACL drift drops (1h)",
+      "description": "Rows the index allowed but OpenFGA denied. Each one was dropped and audited; a rising number means permissions are out of sync.",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(increase(kl_acl_drift_drops_total[1h])) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] } } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Egress withholds (1h)",
+      "description": "Sources kept from a model that may not receive their classification.",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(increase(kl_egress_withheld_total[1h])) or vector(0)" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Rejected webhooks (1h)",
+      "description": "Unsigned, forged, malformed, or oversized deliveries.",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(increase(kl_webhooks_rejected_total[1h])) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 10 }] } } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Queued jobs",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max(kl_jobs_queue_depth{kind=\"all\"}) or vector(0)" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Request latency p95 by route",
+      "gridPos": { "x": 0, "y": 5, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "legendFormat": "{{method}} {{route}}",
+                    "expr": "histogram_quantile(0.95, sum by (le, route, method) (rate(kl_http_server_duration_seconds_bucket[5m])))" }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Requests per second by status",
+      "gridPos": { "x": 12, "y": 5, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "legendFormat": "{{status}}", "expr": "sum by (status) (rate(kl_http_server_duration_seconds_count[5m]))" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Model tokens by team",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "legendFormat": "{{workspace}} {{model}} {{kind}}", "expr": "sum by (workspace, model, kind) (increase(kl_model_tokens_total[15m]))" }]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Job outcomes",
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "legendFormat": "{{kind}} {{outcome}}", "expr": "sum by (kind, outcome) (increase(kl_jobs_total[15m]))" }]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Sync lag by connection",
+      "description": "Seconds since each connection last synced. The scheduler re-syncs anything older than its window.",
+      "gridPos": { "x": 0, "y": 23, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "legendFormat": "{{connection}}", "expr": "max by (connection) (kl_sync_lag_seconds)" }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Policy decisions by surface",
+      "gridPos": { "x": 12, "y": 23, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "drift {{surface}}", "expr": "sum by (surface) (increase(kl_acl_drift_drops_total[15m]))" },
+        { "refId": "B", "legendFormat": "withheld {{surface}}", "expr": "sum by (surface) (increase(kl_egress_withheld_total[15m]))" }
+      ]
+    }
+  ]
+}

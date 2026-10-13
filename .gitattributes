@@ -1,0 +1,16 @@
+# Keep LF everywhere. These files run inside Linux containers, and Git for Windows would otherwise check
+# them out with CRLF, which breaks shell scripts and Dockerfile commands ("\r: command not found").
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.pptx binary
+*.xlsx binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

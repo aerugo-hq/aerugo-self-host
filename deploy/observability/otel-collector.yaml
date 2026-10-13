@@ -1,0 +1,37 @@
+# OpenTelemetry Collector for the dev cell (slice G, ADR 0003).
+# Services send OTLP over HTTP here. Traces go to Jaeger, metrics are exposed for Prometheus, and both
+# are also written to a file that `make smoke` inspects for canary strings (the content rule). The file
+# rotates, so it stays bounded however many runs write to it.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 2s
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  file:
+    path: /telemetry/otel.jsonl
+    rotation:   # bounded on disk: the current file and three older ones, 100 MB each (smoke reads them line by line)
+      max_megabytes: 100
+      max_backups: 3
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, file]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, file]

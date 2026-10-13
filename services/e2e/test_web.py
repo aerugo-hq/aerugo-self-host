@@ -1,0 +1,234 @@
+"""Browser tests (slice D5): the web app, used as people use it, and always within their permissions."""
+import re
+import uuid
+import zipfile
+
+from playwright.sync_api import expect
+
+from conftest import WEB, sign_in
+
+# The seed runbook, by its id: readable by the payments group only. Found by id, not title, because a copy synced from
+# GitHub can share its title (and alice, linked to GitHub, may read that copy too).
+RUNBOOK = 'a.result[href="#/concepts/pay-runbook"]'
+
+
+def search(page, q: str):
+    page.goto(f"{WEB}/#/search")
+    box = page.get_by_placeholder("Search by keyword or by meaning")
+    box.fill(q)
+    box.press("Enter")
+    expect(page.locator(".results-meta")).to_be_visible(timeout=30_000)
+    return page.locator(".result-title")
+
+
+def panel(page, heading: str):
+    return page.locator("section.panel").filter(has=page.get_by_role("heading", name=heading, exact=True))
+
+
+def test_signing_in_lands_on_home(page):
+    sign_in(page, "alice")
+    expect(page.get_by_role("link", name="Home", exact=True)).to_have_attribute("aria-current", "page")
+    expect(page.get_by_role("heading", name="Your teams")).to_be_visible()
+
+
+def test_search_finds_alice_her_teams_runbook(page):
+    sign_in(page, "alice")
+    search(page, "incident")
+    expect(page.locator(RUNBOOK)).to_have_count(1)
+
+
+def test_search_never_shows_bob_another_teams_runbook(page):
+    sign_in(page, "bob")
+    search(page, "incident")
+    expect(page.locator(RUNBOOK)).to_have_count(0)
+
+
+def test_compliance_is_for_org_admins(page):
+    sign_in(page, "bob")
+    expect(page.get_by_role("link", name="Compliance")).to_have_count(0)
+    page.goto(f"{WEB}/#/compliance")
+    expect(page.get_by_text("Compliance settings are for org admins.")).to_be_visible()
+
+
+def test_alice_imports_a_notion_export_and_finds_it(page, tmp_path):
+    tag = uuid.uuid4().hex[:8]
+    name, title = f"e2e-{tag}", f"E2E wiki {tag}"
+    export = tmp_path / "export.zip"
+    with zipfile.ZipFile(export, "w") as z:
+        z.writestr(f"{title} {uuid.uuid4().hex}.md", f"# {title}\n\nImported through the browser, {tag}.")
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/admin/sources")
+    imports = panel(page, "Imports")
+    imports.get_by_label("Export (zip)").set_input_files(str(export))
+    imports.get_by_label("Import name").fill(name)
+    imports.get_by_label("group:payments").check()
+    imports.get_by_role("button", name="Import", exact=True).click()
+    expect(imports.locator("tr", has_text=name)).to_contain_text("1 page, 1 changed, 0 removed", timeout=120_000)
+    try:
+        expect(search(page, tag).filter(has_text=title)).to_have_count(1)
+    finally:
+        page.goto(f"{WEB}/#/admin/sources")
+        panel(page, "Imports").locator("tr", has_text=name).get_by_role("button", name="Remove").click()
+        page.get_by_role("alertdialog").get_by_role("button", name="Remove import").click()
+        expect(panel(page, "Imports").locator("tr", has_text=name)).to_have_count(0)
+
+
+def test_olivia_sets_up_and_removes_google_sign_in(page):
+    sign_in(page, "olivia")
+    page.goto(f"{WEB}/#/compliance/platform")
+    google = panel(page, "Google sign-in")
+    expect(google).to_contain_text(f"{WEB}/link/google/callback")
+    google.get_by_label("Client ID").fill("e2e.apps.googleusercontent.com")
+    google.get_by_label("Client secret").fill("e2e-secret")
+    google.get_by_role("button", name=re.compile(r"^(Save|Replace)$")).click()
+    expect(google).to_contain_text("e2e.apps.googleusercontent.com")
+    google.get_by_role("button", name="Remove").click()
+    page.get_by_role("alertdialog").get_by_role("button", name="Remove sign-in").click()
+    expect(google).to_contain_text("Not set up")
+
+
+def test_connected_accounts_offers_linking(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/accounts")
+    expect(page.get_by_role("button", name="Link GitHub").first).to_be_visible()
+
+
+def test_the_command_palette_reaches_a_section_in_one_step(page):
+    sign_in(page, "olivia")
+    page.keyboard.press("Control+k")
+    palette = page.get_by_role("dialog", name="Command palette")
+    palette.get_by_role("combobox", name="Command").fill("people's data")
+    page.keyboard.press("Enter")
+    expect(page).to_have_url(re.compile(r"#/compliance/people$"))
+    expect(page.get_by_role("link", name="People's data")).to_have_attribute("aria-current", "page")
+    expect(palette).to_have_count(0)
+
+
+def test_the_palette_offers_only_what_you_can_use(page):
+    sign_in(page, "bob")
+    page.keyboard.press("Control+k")
+    palette = page.get_by_role("dialog", name="Command palette")
+    palette.get_by_role("combobox", name="Command").fill("compliance")
+    expect(palette.get_by_role("option", name=re.compile(r"^Compliance"))).to_have_count(0)
+    expect(palette.get_by_role("option", name=re.compile(r"^Search for"))).to_have_count(1)
+    page.keyboard.press("Escape")
+    expect(palette).to_have_count(0)
+
+
+def test_g_then_a_letter_goes_there(page):
+    sign_in(page, "alice")
+    page.evaluate("document.activeElement && document.activeElement.blur()")  # shortcuts never fire while typing
+    page.keyboard.press("g")
+    page.keyboard.press("a")
+    expect(page).to_have_url(re.compile(r"#/admin$"))
+    expect(page.get_by_role("link", name="Sources")).to_have_attribute("aria-current", "page")
+
+
+def test_the_ask_workspace_opens_with_your_history(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/ask")
+    expect(page.get_by_role("heading", name="New conversation")).to_be_visible()
+    expect(page.get_by_role("textbox", name="Question")).to_be_visible()
+    expect(page.get_by_role("complementary", name="Your conversations")).to_be_visible()
+    expect(page.get_by_role("complementary", name="Knowledge behind the answer")).to_contain_text("Ask a question to see")
+
+
+def test_search_hands_asking_to_the_ask_workspace(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/search")
+    page.get_by_role("tab", name="Ask").click()
+    expect(page).to_have_url(re.compile(r"#/ask$"))
+    expect(page.get_by_role("link", name="Ask", exact=True)).to_have_attribute("aria-current", "page")
+
+
+def test_typing_at_focuses_a_question_on_a_document(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/ask")
+    box = page.get_by_role("textbox", name="Question")
+    box.click()
+    box.press_sequentially("who owns @Payments")
+    option = page.get_by_role("option", name="Payments API incident response").first  # synced copies share the title
+    expect(option).to_be_visible()
+    option.click()
+    chips = page.get_by_role("group", name="Answering from")
+    expect(chips).to_contain_text("@ Payments API incident response")
+    expect(box).to_have_value("who owns ")
+    chips.get_by_role("button", name="Stop focusing on Payments API incident response").click()
+    expect(chips).to_have_count(0)
+
+
+def test_documents_opens_a_document_and_asks_about_it(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/documents")
+    expect(page.get_by_role("heading", name="Documents", exact=True)).to_be_visible()
+    page.get_by_role("button", name=re.compile("Payments API incident response")).first.click()  # synced copies share the title
+    panel = page.get_by_role("complementary", name="About Payments API incident response")
+    expect(panel).to_be_visible()
+    panel.get_by_role("link", name="Ask about this").click()
+    expect(page).to_have_url(re.compile(r"#/ask/focus:"))
+    expect(page.get_by_role("group", name="Answering from")).to_contain_text("@ Payments API incident response")
+
+
+def test_a_team_admin_sees_its_pipeline(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/admin/pipeline")
+    expect(page.get_by_role("heading", name="Pipeline", exact=True)).to_be_visible()
+    expect(page.get_by_role("link", name="Pipeline", exact=True)).to_have_attribute("aria-current", "page")
+
+
+def test_a_team_admin_sees_its_costs(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/admin/costs")
+    expect(page.get_by_role("heading", name="This month")).to_be_visible()
+    expect(page.get_by_role("heading", name="Last 30 days")).to_be_visible()
+    expect(page.get_by_role("link", name="Costs", exact=True)).to_have_attribute("aria-current", "page")
+
+
+def test_the_developer_page_runs_a_read_with_your_session(page):
+    sign_in(page, "alice")
+    expect(page.get_by_text("All systems working")).to_be_visible()
+    page.goto(f"{WEB}/#/developer")
+    expect(page.get_by_role("heading", name="Connect an AI assistant")).to_be_visible()
+    page.get_by_role("button", name="Run GET /v1/whoami").click()
+    expect(page.locator(".op-result").first).to_contain_text("alice")
+
+
+def test_a_team_scope_follows_you_everywhere(page):
+    sign_in(page, "alice")
+    page.locator(".scope > summary").click()
+    page.locator(".scope-menu").get_by_role("link", name=re.compile("payments", re.I)).click()
+    expect(page).to_have_url(re.compile(r"#/t/payments/home$"))
+    team_pages = page.get_by_role("navigation", name=re.compile(r"^Pages in "))
+    team_pages.get_by_role("link", name="Documents", exact=True).click()
+    expect(page).to_have_url(re.compile(r"#/t/payments/documents$"))
+    expect(page.get_by_role("navigation", name=re.compile(r"^Documents in "))).to_be_visible()
+    expect(page.get_by_role("navigation", name="Breadcrumb")).to_contain_text("Documents")
+    team_pages.get_by_role("link", name="Map", exact=True).click()
+    expect(page).to_have_url(re.compile(r"#/t/payments/map$"))
+
+
+def test_a_document_opens_in_its_space_at_its_own_address(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/t/payments/documents")
+    tree = page.get_by_role("navigation", name=re.compile(r"^Documents in "))
+    tree.get_by_role("link").first.click()
+    expect(page).to_have_url(re.compile(r"#/t/payments/documents/.+"))
+    expect(page.locator(".reader-title")).to_be_visible()
+    expect(page.get_by_role("link", name="Ask about this")).to_be_visible()
+    expect(tree.locator('a[aria-current="page"]')).to_have_count(1)
+    page.go_back()
+    expect(page).to_have_url(re.compile(r"#/t/payments/documents$"))
+    expect(page.get_by_role("heading", name="Recently added")).to_be_visible()
+
+
+def test_the_theme_follows_your_choice_and_stays(page):
+    sign_in(page, "alice")
+    expect(page.locator("html")).to_have_attribute("data-theme", "light")  # light-first
+    page.locator(".tb-account > summary").click()
+    page.get_by_role("group", name="Theme").get_by_role("button", name="Dark").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+    page.reload()
+    expect(page.locator("html")).to_have_attribute("data-theme", "dark")  # the server rendered it from the cookie
+    page.locator(".tb-account > summary").click()
+    page.get_by_role("group", name="Theme").get_by_role("button", name="System").click()
+    expect(page.locator("html")).not_to_have_attribute("data-theme", re.compile(".*"))  # the operating system decides

@@ -1,0 +1,381 @@
+# M0 dev stack. Every port binds to 127.0.0.1 and every credential is dev-only.
+name: kl
+
+x-api-build: &api-build
+  build:
+    context: ./services/api
+
+services:
+  postgres:
+    build: ./deploy/postgres-image   # pgvector plus pgBackRest: encrypted backups and WAL archiving (slice I4, ADR 0006)
+    image: kl-postgres:pg17
+    command: ["postgres", "-c", "archive_mode=on", "-c", "archive_command=pgbackrest --stanza=kl archive-push %p",
+              "-c", "archive_timeout=300"]
+    environment:
+      POSTGRES_DB: kl
+      POSTGRES_USER: kl_owner
+      POSTGRES_PASSWORD: ${KL_OWNER_PASSWORD:-owner-dev-only}
+      KL_APP_PASSWORD: ${KL_APP_PASSWORD:-app-dev-only}
+      KL_INGEST_PASSWORD: ${KL_INGEST_PASSWORD:-ingest-dev-only}
+      KL_FGA_PASSWORD: ${KL_FGA_PASSWORD:-fga-dev-only}
+      PGBACKREST_REPO1_CIPHER_PASS: ${KL_BACKUP_CIPHER_PASS:-backup-dev-only}   # set a long random value off a laptop
+      PGBACKREST_PG1_USER: kl_owner
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres:/docker-entrypoint-initdb.d:ro
+      - kl-pgbackrest:/var/lib/pgbackrest
+    ports:
+      - "127.0.0.1:${KL_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      # Must go over TCP. On first boot Postgres runs init scripts on a temporary server that
+      # only listens on its unix socket, so a socket check reports "ready" mid-init. Connecting
+      # as kl_fga to the openfga database also proves the init scripts finished.
+      test: ["CMD-SHELL", "PGPASSWORD=$$KL_FGA_PASSWORD psql -h 127.0.0.1 -U kl_fga -d openfga -tAc 'select 1' > /dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+
+  pg-drill:   # restore drill (slice I4): the newest backup, restored into a throwaway database; see `make restore-drill`
+    image: kl-postgres:pg17
+    profiles: ["drill"]
+    entrypoint: ["/usr/local/bin/kl-restore-drill"]
+    environment:
+      PGBACKREST_REPO1_CIPHER_PASS: ${KL_BACKUP_CIPHER_PASS:-backup-dev-only}
+    volumes:
+      - kl-pgbackrest:/var/lib/pgbackrest:ro   # read-only: a drill can't change the backups
+    healthcheck:
+      test: ["CMD", "pg_isready", "-q", "-h", "127.0.0.1"]
+      interval: 2s
+      timeout: 3s
+      retries: 150   # restoring and replaying the log take a while
+
+  openfga-migrate:
+    image: openfga/openfga:v1.11.1
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://kl_fga:${KL_FGA_PASSWORD:-fga-dev-only}@postgres:5432/openfga?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  openfga:
+    image: openfga/openfga:v1.11.1
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://kl_fga:${KL_FGA_PASSWORD:-fga-dev-only}@postgres:5432/openfga?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: "false"
+    # Not published to the host: the API and provision reach it as openfga:8080 inside the network.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=openfga:8081"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+
+  openbao:
+    image: openbao/openbao:2.6.2
+    # A dev server that keeps secrets and encryption keys across restarts (slice I3a): see deploy/openbao/start.sh.
+    user: "0:0"   # dev only: owns its volume
+    entrypoint: ["/bin/sh", "/openbao/start/start.sh"]
+    environment:
+      KL_DEV_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+    volumes:
+      - ./deploy/openbao/dev.hcl:/openbao/config/dev.hcl:ro
+      - ./deploy/openbao/start.sh:/openbao/start/start.sh:ro
+      - kl-openbao:/openbao/data
+    cap_add: [IPC_LOCK]
+    healthcheck:   # healthy once unsealed, with the services' token working and Transit mounted
+      test: ["CMD-SHELL", "BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$$KL_DEV_TOKEN bao secrets list | grep -q '^transit/'"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    ports:
+      - "127.0.0.1:${KL_OPENBAO_PORT:-8200}:8200"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin-dev-only}
+      # Fixed issuer no matter which hostname a client uses (localhost from your browser,
+      # keycloak:8080 from inside the network). The API validates against this exact issuer.
+      KC_HOSTNAME: http://localhost:${KL_KEYCLOAK_PORT:-8081}
+      KL_REALM_REVISION: "6"   # bump when realm-acme.json changes: recreates Keycloak so it re-imports the realm
+    volumes:
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+      - ./deploy/keycloak/themes/kl:/opt/keycloak/themes/kl:ro   # the sign-in pages in the app's design system
+    ports:
+      - "127.0.0.1:${KL_KEYCLOAK_PORT:-8081}:8080"
+
+  provision:
+    <<: *api-build
+    command: ["python", "-m", "kl.provision"]
+    environment:
+      KL_OPENFGA_URL: http://openfga:8080
+      KL_OPENFGA_STORE: kl-dev
+      KL_OPENBAO_URL: http://openbao:8200
+      KL_OPENBAO_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+      KL_OWNER_DATABASE_URL: postgresql://kl_owner:${KL_OWNER_PASSWORD:-owner-dev-only}@postgres:5432/kl
+      KL_ORG_SLUG: acme
+      KL_DEV_GITHUB_LOGIN: ${KL_DEV_GITHUB_LOGIN:-}
+      KL_SEED_KNOWLEDGE_DIR: /seed-knowledge   # dev only: provision enqueues indexing of the sandbox bundles
+    volumes:
+      - ./authz:/app/authz:ro
+      - ./.secrets:/run/kl-secrets:ro   # GitHub App credentials, loaded into OpenBao
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openfga:
+        condition: service_healthy
+      openbao:
+        condition: service_healthy   # unsealed, token and Transit ready (slice I3a)
+    restart: "no"
+
+  api:
+    <<: *api-build
+    environment: &api-env
+      KL_DATABASE_URL: postgresql://kl_app:${KL_APP_PASSWORD:-app-dev-only}@postgres:5432/kl
+      KL_ORG_SLUG: acme
+      KL_OPENFGA_URL: http://openfga:8080
+      KL_OPENFGA_STORE: kl-dev
+      KL_OPENBAO_URL: http://openbao:8200
+      KL_OPENBAO_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+      KL_OIDC_ISSUER: http://localhost:${KL_KEYCLOAK_PORT:-8081}/realms/acme
+      KL_OIDC_JWKS_URL: http://keycloak:8080/realms/acme/protocol/openid-connect/certs
+      KL_OIDC_AUDIENCE: kl-api
+      # Telemetry (slice G): off unless `make obs` sets KL_OTEL_ENDPOINT in .env. Shared through this anchor
+      # with the worker, the MCP server, and smoke (which uses it to know whether to check the export).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${KL_OTEL_ENDPOINT:-}
+      OTEL_METRIC_EXPORT_INTERVAL: "5000"
+      KL_PURGE_DELAY_SECONDS: ${KL_PURGE_DELAY_SECONDS:-10}   # dev: 10s to cancel a team purge; production defaults to an hour
+      KL_WEB_URL: http://localhost:3000   # where GitHub sends people back after they prove a login (identity links)
+      # CI issuers trusted for pipeline pushes (slice J1); the fake one exists only while smoke runs.
+      KL_PIPELINE_ISSUERS: ${KL_PIPELINE_ISSUERS:-https://token.actions.githubusercontent.com,http://fake-llm:8080/oidc}
+      # Google API addresses Drive connections may use (slice F2); the fake one exists only while smoke runs.
+      KL_GOOGLE_API_BASES: ${KL_GOOGLE_API_BASES:-https://www.googleapis.com,http://fake-llm:8080/google}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets a probe reach Ollama or vLLM on your machine
+    ports:
+      - "127.0.0.1:${KL_API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      provision:
+        condition: service_completed_successfully
+      openbao:
+        condition: service_healthy   # unsealed, token and Transit ready (slice I3a)
+      keycloak:
+        condition: service_started
+
+  worker:
+    <<: *api-build
+    command: ["python", "-m", "kl.worker"]
+    environment:
+      <<: *api-env
+      KL_INGEST_DATABASE_URL: postgresql://kl_ingest:${KL_INGEST_PASSWORD:-ingest-dev-only}@postgres:5432/kl
+      KL_RESYNC_MINUTES: ${KL_RESYNC_MINUTES:-10}       # every connection re-syncs at least this often
+      KL_SCHEDULER_SECONDS: ${KL_SCHEDULER_SECONDS:-15}  # how often the worker looks for stale ones
+      KL_SEED_KNOWLEDGE_DIR: /seed-knowledge   # dev only: sandbox bundles standing in for knowledge repos
+      OTEL_SERVICE_NAME: kl-worker
+    volumes:
+      - ./sandbox/knowledge:/seed-knowledge:ro
+    depends_on:
+      provision:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  smoke:
+    <<: *api-build
+    build:
+      context: ./services/api
+      target: test   # the only stage that has smoke and the fake model in it
+    profiles: ["smoke"]
+    command: ["python", "-m", "kl.smoke"]
+    environment:
+      <<: *api-env
+      KL_API_URL: http://api:8000
+      KL_TOKEN_URL: http://keycloak:8080/realms/acme/protocol/openid-connect/token
+      KL_APP_DATABASE_URL: postgresql://kl_app:${KL_APP_PASSWORD:-app-dev-only}@postgres:5432/kl
+      KL_OWNER_DATABASE_URL: postgresql://kl_owner:${KL_OWNER_PASSWORD:-owner-dev-only}@postgres:5432/kl
+      KL_INGEST_DATABASE_URL: postgresql://kl_ingest:${KL_INGEST_PASSWORD:-ingest-dev-only}@postgres:5432/kl
+      KL_SMOKE_PROVIDER: ${KL_SMOKE_PROVIDER:-}
+      KL_SMOKE_MODEL: ${KL_SMOKE_MODEL:-}
+      KL_SMOKE_BASE_URL: ${KL_SMOKE_BASE_URL:-}
+      KL_SMOKE_API_KEY: ${KL_SMOKE_API_KEY:-}
+      KL_EVAL_ASK_MODEL: ${KL_EVAL_ASK_MODEL:-}            # answer grading in make eval (slice M2)
+      KL_EVAL_JUDGE_PROVIDER: ${KL_EVAL_JUDGE_PROVIDER:-openai_compatible}
+      KL_EVAL_JUDGE_MODEL: ${KL_EVAL_JUDGE_MODEL:-}
+      KL_EVAL_JUDGE_BASE_URL: ${KL_EVAL_JUDGE_BASE_URL:-}
+      KL_EVAL_JUDGE_API_KEY: ${KL_EVAL_JUDGE_API_KEY:-}
+      KL_EVAL_JUDGE_CLASSIFICATIONS: ${KL_EVAL_JUDGE_CLASSIFICATIONS:-public,internal}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      KL_DEV_GITHUB_LOGIN: ${KL_DEV_GITHUB_LOGIN:-}
+    volumes:
+      - ./.secrets:/run/kl-secrets:ro
+      - ./sandbox/knowledge:/seed-knowledge:ro   # so smoke can run knowledge CI on the seed bundles
+      - kl-telemetry:/telemetry:ro                # so smoke can check exported telemetry for canaries
+    depends_on:
+      api:
+        condition: service_started
+      worker:
+        condition: service_started
+      fake-llm:
+        condition: service_started
+      mcp:
+        condition: service_started
+
+  mcp:
+    <<: *api-build
+    command: ["python", "-m", "kl.mcp_server"]
+    environment:
+      <<: *api-env
+      KL_MCP_AUDIENCE: kl-mcp   # only tokens issued for the MCP server are accepted here
+      KL_MCP_PUBLIC_URL: http://localhost:${KL_MCP_PORT:-8090}
+      OTEL_SERVICE_NAME: kl-mcp
+    ports:
+      - "127.0.0.1:${KL_MCP_PORT:-8090}:8090"
+    depends_on:
+      provision:
+        condition: service_completed_successfully
+
+  # The web app (slice D2), in its own profile so `make up` and `make smoke` never depend on its build.
+  # Start it with `make web`. It signs users in with PKCE and keeps their tokens server-side.
+  web:
+    build: ./services/web
+    profiles: ["web"]
+    environment:
+      KL_API_URL: http://api:8000
+      KL_WEB_URL: http://localhost:3000   # must match the kl-web redirect URI in deploy/keycloak/realm-acme.json
+      KL_OIDC_PUBLIC_ISSUER: http://localhost:${KL_KEYCLOAK_PORT:-8081}/realms/acme
+      KL_OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/acme
+      KL_OIDC_CLIENT_ID: kl-web
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_started
+
+  e2e:   # browser tests (slice D5): `make e2e` runs Chromium through the web app as people use it
+    build: ./services/e2e
+    profiles: ["e2e"]
+    shm_size: "1gb"   # Chromium needs more shared memory than Docker's 64 MB default
+    environment:
+      KL_KEYCLOAK_PORT: ${KL_KEYCLOAK_PORT:-8081}
+    volumes:
+      - ./services/e2e/results:/results   # screenshots and traces of failures
+    depends_on:
+      web:
+        condition: service_started
+      keycloak:
+        condition: service_started
+
+  fake-llm:
+    <<: *api-build
+    build:
+      context: ./services/api
+      target: test
+    profiles: ["smoke"]
+    command: ["python", "-m", "kl.fake_llm"]   # test-only model that records every prompt it receives
+
+  github-app-setup:
+    <<: *api-build
+    profiles: ["tools"]
+    command: ["python", "-m", "kl.github_app_setup"]
+    environment:
+      GITHUB_ORG: ${ORG:-}   # from `make github-app ORG=<org>`
+      KL_SETUP_PORT: ${KL_SETUP_PORT:-8765}
+    ports:
+      - "127.0.0.1:${KL_SETUP_PORT:-8765}:8765"
+    volumes:
+      - ./.secrets:/run/kl-secrets
+
+  # Lockfiles (`make lock`): hash-pinned Python and npm dependencies, resolved inside containers so this
+  # works the same on every machine. Commit what they write; the images install from them.
+  lock-python:
+    image: python:3.12-slim
+    profiles: ["tools"]
+    working_dir: /src
+    volumes:
+      - ./services/api:/src
+    command: ["sh", "-c", "pip install -q --root-user-action=ignore uv && uv pip compile --generate-hashes --python-version 3.12 -o requirements.lock requirements.txt"]
+
+  lock-web:
+    image: node:22-alpine
+    profiles: ["tools"]
+    working_dir: /app
+    volumes:
+      - ./services/web:/app
+    command: ["npm", "install", "--package-lock-only", "--no-audit", "--no-fund"]
+
+  # Observability (slice G, ADR 0003), started by `make obs`. Every label is an id; content never leaves.
+  telemetry-init:   # the collector's export, readable by smoke (slice G): rotation keeps each file's mode, so set it here
+    image: busybox:1.36
+    profiles: ["observability"]
+    user: "0"
+    command: ["sh", "-c", "touch /telemetry/otel.jsonl && chmod 0644 /telemetry/otel*.jsonl"]
+    volumes:
+      - kl-telemetry:/telemetry
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    profiles: ["observability"]
+    user: "0"   # dev only: writes the file export into the shared volume
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - kl-telemetry:/telemetry
+    depends_on:
+      jaeger:
+        condition: service_started
+      telemetry-init:
+        condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    profiles: ["observability"]
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.66.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${KL_GRAFANA_PASSWORD:-admin-dev-only}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"   # dev only: open dashboards without signing in
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DATABASE_WAL: "true"   # far faster SQLite writes, so first-boot migrations don't take minutes
+    volumes:
+      - kl-grafana:/var/lib/grafana   # kept across recreates, so the migrations run once
+      - ./deploy/observability/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/kl.yaml:ro
+      - ./deploy/observability/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/kl.yaml:ro
+      - ./deploy/observability/grafana/knowledge-layer.json:/var/lib/grafana/dashboards/knowledge-layer.json:ro
+    ports:
+      - "127.0.0.1:${KL_GRAFANA_PORT:-3001}:3000"   # on Windows, pick another if 3001 is in a reserved range
+    depends_on:
+      prometheus:
+        condition: service_started
+
+volumes:
+  pgdata:
+  kl-openbao:
+  kl-pgbackrest:
+  kl-telemetry:
+  kl-grafana:

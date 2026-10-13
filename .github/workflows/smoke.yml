@@ -1,0 +1,37 @@
+# Release gate: the M0 smoke suite (and later the full leak suite) must pass on every push and PR.
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Provision the stack
+        run: make up
+
+      - name: Smoke suite
+        run: make smoke
+
+      - name: Service logs
+        if: failure()
+        run: docker compose --profile smoke logs --no-color --tail=300
+
+      - name: Tear down
+        if: always()
+        run: make reset

@@ -1,0 +1,25 @@
+# Knowledge CI: every pull request and every push to main runs the knowledge-layer validator over this
+# bundle (OKF v0.2, the x-kl profile, links, unique ids, secrets and PII). A failing check blocks the
+# merge once you require it in branch protection. The validator is copied in by `make sandbox-github`.
+name: knowledge-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  okf-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate the bundle
+        run: |
+          python3 -m venv /tmp/okf
+          /tmp/okf/bin/pip install --quiet pyyaml==6.0.2
+          /tmp/okf/bin/python .github/knowledge-ci/okf.py check . --knowledge

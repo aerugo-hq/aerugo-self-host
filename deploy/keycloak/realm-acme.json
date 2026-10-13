@@ -1,0 +1,298 @@
+{
+  "realm": "acme",
+  "loginTheme": "kl",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 900,
+  "groups": [
+    {
+      "name": "payments"
+    },
+    {
+      "name": "finance"
+    },
+    {
+      "name": "legal"
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-kl-terraform",
+      "enabled": true,
+      "serviceAccountClientId": "kl-terraform"
+    },
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@acme.test",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Payments",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/payments"
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@acme.test",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Finance",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/finance"
+      ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@acme.test",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Crossteam",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/payments",
+        "/finance"
+      ]
+    },
+    {
+      "username": "dave",
+      "enabled": true,
+      "email": "dave@acme.test",
+      "emailVerified": true,
+      "firstName": "Dave",
+      "lastName": "Legal",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dave-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/legal"
+      ]
+    },
+    {
+      "username": "olivia",
+      "enabled": true,
+      "email": "olivia@acme.test",
+      "emailVerified": true,
+      "firstName": "Olivia",
+      "lastName": "Admin",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "olivia-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": []
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "kl-terraform",
+      "name": "Terraform (service account)",
+      "description": "Development only: a machine client for the Terraform provider (ADR 0009). Its own tokens work only once an org admin registers it as a service account (slice T1).",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "kl-terraform-dev-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "audience-kl-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": { "included.custom.audience": "kl-api", "id.token.claim": "false", "access.token.claim": "true" }
+        }
+      ]
+    },
+    {
+      "clientId": "kl-cli",
+      "name": "kl CLI and smoke tests (dev only: password grant)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience-kl-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+          "included.custom.audience": "kl-api",
+          "id.token.claim": "false",
+          "access.token.claim": "true"
+          }
+          }
+          ]
+          },
+            {
+        "clientId": "kl-mcp-cli",
+        "name": "MCP test client (dev only: password grant). Tokens are for the MCP server alone.",
+        "enabled": true,
+        "publicClient": true,
+        "standardFlowEnabled": false,
+        "directAccessGrantsEnabled": true,
+        "protocol": "openid-connect",
+        "protocolMappers": [
+          {
+            "name": "username",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-usermodel-property-mapper",
+            "consentRequired": false,
+            "config": {
+              "user.attribute": "username",
+              "claim.name": "preferred_username",
+              "jsonType.label": "String",
+              "id.token.claim": "true",
+              "access.token.claim": "true",
+              "userinfo.token.claim": "true"
+            }
+          },
+          {
+            "name": "groups",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-group-membership-mapper",
+            "consentRequired": false,
+            "config": {
+              "claim.name": "groups",
+              "full.path": "false",
+              "id.token.claim": "true",
+              "access.token.claim": "true",
+              "userinfo.token.claim": "true"
+            }
+          },
+          {
+            "name": "audience-kl-mcp",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "consentRequired": false,
+            "config": {
+              "included.custom.audience": "kl-mcp",
+              "id.token.claim": "false",
+              "access.token.claim": "true"
+            }
+          }
+        ]
+      },
+      {
+        "clientId": "kl-web",
+        "name": "Web app: authorization code with PKCE, exchanged by the web server, so browsers never hold tokens",
+        "enabled": true,
+        "publicClient": true,
+        "standardFlowEnabled": true,
+        "directAccessGrantsEnabled": false,
+        "implicitFlowEnabled": false,
+        "redirectUris": ["http://localhost:3000/auth/callback"],
+        "webOrigins": ["http://localhost:3000"],
+        "attributes": {
+          "pkce.code.challenge.method": "S256",
+          "post.logout.redirect.uris": "http://localhost:3000/"
+        },
+        "protocol": "openid-connect",
+        "protocolMappers": [
+          {
+            "name": "username",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-usermodel-property-mapper",
+            "consentRequired": false,
+            "config": {
+              "user.attribute": "username",
+              "claim.name": "preferred_username",
+              "jsonType.label": "String",
+              "id.token.claim": "true",
+              "access.token.claim": "true",
+              "userinfo.token.claim": "true"
+            }
+          },
+          {
+            "name": "groups",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-group-membership-mapper",
+            "consentRequired": false,
+            "config": {
+              "claim.name": "groups",
+              "full.path": "false",
+              "id.token.claim": "true",
+              "access.token.claim": "true",
+              "userinfo.token.claim": "true"
+            }
+          },
+          {
+            "name": "audience-kl-api",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "consentRequired": false,
+            "config": {
+              "included.custom.audience": "kl-api",
+              "id.token.claim": "false",
+              "access.token.claim": "true"
+            }
+          }
+        ]
+      }
+    ]
+}

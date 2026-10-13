@@ -1,0 +1,112 @@
+/* knowledge-layer's sign-in pages, in the app's design system. Borders and tint only, no shadows;
+   indigo for the primary action and focus rings, nothing else. Keycloak's base templates supply the
+   markup (the class names come from theme.properties); this file is the only stylesheet. */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono&display=swap");
+
+:root {
+  --bg: #f7f8fa; --surface: #ffffff; --border: #e3e6ea; --border-strong: #cdd2d9;
+  --fg: #0b0e14; --muted: #6b7280; --faint: #9aa1ab; --tint: #f1f3f5;
+  --accent: #4338ca; --accent-hover: #3730a3; --accent-press: #312e81;
+  --success: #15803d; --warning: #d29922; --danger: #b91c1c;
+  --ease: 150ms ease;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 400 14px/20px "Geist", "Hanken Grotesk", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--fg); text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; transition: text-decoration-color var(--ease); }
+a:hover { text-decoration-color: var(--fg); }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* One column, near the top of the screen: brand, then the card. */
+.kl-login { width: 100%; max-width: 400px; margin: 0 auto; padding: 12vh 16px 48px; }
+.kl-header { margin-bottom: 16px; }
+.kl-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+.kl-brand::before {
+  content: "kl"; width: 24px; height: 24px; border-radius: 6px; background: var(--fg); color: var(--surface);
+  display: grid; place-items: center; font: 600 12px/1 "JetBrains Mono", monospace;
+}
+.kl-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; }
+.kl-card-head { margin-bottom: 20px; }
+#kc-page-title { margin: 0; font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em; }
+.kl-locale, #kc-locale { display: none; }  /* one language for now */
+
+/* Fields */
+.kl-field { margin-bottom: 16px; }
+.kl-label { display: block; margin-bottom: 6px; font-size: 13px; line-height: 16px; font-weight: 500; color: var(--fg); }
+.kl-input-group { display: flex; }
+.kl-input {
+  width: 100%; height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--fg); font: inherit; transition: border-color var(--ease);
+}
+.kl-input::placeholder { color: var(--faint); }
+.kl-input:hover { border-color: var(--border-strong); }
+.kl-input:focus-visible, .kl-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.kl-input[aria-invalid="true"] { border-color: var(--danger); }
+.kl-input:disabled { background: var(--bg); color: var(--faint); }
+.kl-input-group .kl-input { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.kl-reveal {
+  flex: none; height: 36px; padding: 0 12px; border: 1px solid var(--border); border-left: 0; border-radius: 0 6px 6px 0;
+  background: var(--surface); color: var(--muted); font: 500 13px/1 "Geist", "Hanken Grotesk", sans-serif; cursor: pointer;
+  transition: background var(--ease), color var(--ease);
+}
+.kl-reveal:hover { background: var(--tint); color: var(--fg); }
+.kl-reveal i { display: none; }  /* the base theme's icon font isn't loaded; the button says what it does instead */
+.kl-reveal::before { content: "Show"; }
+.kl-reveal[aria-label="Hide password"]::before { content: "Hide"; }
+.kl-field-error { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--danger); }
+.kl-field-error::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); flex: none; }
+.kl-hint { margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--muted); }
+
+.kl-options { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+.kl-options label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.kl-options input[type="checkbox"], .kl-checkbox { accent-color: var(--fg); width: 14px; height: 14px; margin: 0; }
+
+/* Buttons */
+.kl-buttons { margin-top: 20px; margin-bottom: 0; }
+.kl-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--fg);
+  font: 500 14px/1 "Geist", "Hanken Grotesk", sans-serif; cursor: pointer; text-decoration: none;
+  transition: background var(--ease), border-color var(--ease);
+}
+.kl-btn:hover { background: var(--tint); border-color: var(--border-strong); }
+.kl-btn:active { background: #e9ecef; }
+.kl-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.kl-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.kl-btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.kl-btn-primary:active { background: var(--accent-press); border-color: var(--accent-press); }
+.kl-btn-block { width: 100%; }
+.kl-buttons .kl-btn + .kl-btn { margin-top: 8px; }
+
+/* Messages: a dot and a sentence, on a quiet tint */
+.kl-alert { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 16px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.kl-alert.alert-error { border-color: #f1c7c7; background: #fdf6f6; }
+.kl-alert.alert-warning { border-color: #ecd9a9; background: #fdfaf2; }
+.kl-alert.alert-success { border-color: #c4e3cf; background: #f5faf7; }
+.kl-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; flex: none; display: inline-block; }
+.kl-dot-bad { background: var(--danger); } .kl-dot-warn { background: var(--warning); }
+.kl-dot-ok { background: var(--success); } .kl-dot-idle { background: var(--faint); }
+.kl-alert .kc-feedback-text { flex: 1; }
+
+/* Secondary content: registration links, "try another way", social sign-in */
+.kl-info, .kl-signup { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+.kl-social { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; }
+#kc-content-wrapper > p, .instruction { color: var(--muted); }
+
+@media (max-width: 480px) {
+  .kl-login { padding-top: 32px; }
+  .kl-card { padding: 20px 16px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition-duration: 0s !important; } }
+
+/* Markup details of the base templates */
+#kc-form-buttons { margin: 20px 0 0; }
+.kl-options:not(:has(input, a)) { display: none; }  /* no remember-me or reset link: no empty row */
+.pf-c-alert__icon { display: flex; }
+.kl-alert-title, .kc-feedback-text { flex: 1; }

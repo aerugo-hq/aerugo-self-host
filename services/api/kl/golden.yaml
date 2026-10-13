@@ -1,0 +1,59 @@
+# The golden set (slice M): questions people actually ask, who asks them, and which documents are right
+# answers. `make eval` and the smoke gate run every question through /v1/search as its user and score
+# where the first right answer lands. `relevant` lists every acceptable answer (evidence or the curated
+# concept built from it); `must_not` lists documents that user must never see, so quality runs double as
+# leak checks. A question with `facts` is also asked through /v1/ask when `make eval` has a model, and its
+# answer is graded: does it cite a right source, state the facts, and say only what its sources support?
+# `question` is how a person would ask it, when that differs from the search phrase. Raise the version
+# whenever questions or thresholds change, so stored runs stay comparable.
+version: "2026-10-2"
+
+thresholds:          # a run below any of these fails CI
+  hit_at_1: 0.7      # share of questions whose first result is a right answer
+  mrr: 0.8           # mean of 1 / rank of the first right answer
+  found_at_5: 1.0    # share of questions with a right answer in the top five
+
+answer_thresholds:   # applied only when a model answers (KL_EVAL_ASK_MODEL) and a judge grades (KL_EVAL_JUDGE_*)
+  cited_right: 1.0   # share of answers citing at least one right source
+  faithfulness: 0.9  # mean share of an answer's claims that its cited sources support
+  facts: 0.8         # share of key facts the answers state
+
+cases:
+  # Title-only words: the document's title says it, its text never does (the resume case).
+  - user: bob
+    query: checklist
+    relevant: [fin-close]
+  - user: dave
+    query: hold procedure
+    relevant: [legal-hold]
+
+  # Plain questions answered by the body.
+  - user: bob
+    query: month-end close
+    relevant: [fin-close]
+  - user: alice
+    query: replication lag before failing over
+    question: What should I check before failing over the payments API?
+    relevant: [pay-runbook, kb-ledger, kb-sev1-playbook]
+    facts: [ledger-db replication lag]
+  - user: alice
+    query: page the payments on-call
+    question: Who do I page when payments are down?
+    relevant: [pay-runbook, kb-sev1-playbook]
+    facts: [page the payments on-call, open an incident channel]
+  - user: carol
+    query: report a security incident
+    question: How quickly must a security incident be reported, and to whom?
+    relevant: [handbook, kb-incident-comms]
+    facts: [within one hour of discovery, the security team]
+  - user: dave
+    query: litigation hold
+    relevant: [legal-hold, kb-legal-escalation]
+
+  # Permission guards: right answers exist, but not for this user.
+  - user: bob
+    query: payments incident response
+    must_not: [pay-runbook, pay-drift, kb-sev1-playbook, kb-ledger]
+  - user: alice
+    query: legacy payments runbook
+    must_not: [pay-drift, legal-hold]

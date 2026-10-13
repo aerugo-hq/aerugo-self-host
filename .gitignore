@@ -1,0 +1,27 @@
+# Secrets: never in Git (invariant 5). .env.example is the only env file that belongs here.
+.env
+.env.*
+!.env.example
+.secrets/*
+!.secrets/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Web
+node_modules/
+.next/
+# Browser tests: screenshots and traces of failures
+services/e2e/results/
+
+# Editors, OS, and logs
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
