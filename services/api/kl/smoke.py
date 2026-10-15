@@ -2831,6 +2831,7 @@ def pipelines_push_with_their_own_identity():
 # ------------------------------------------------------------------ Google Drive (slice F2)
 FAKE_GOOGLE = "http://fake-llm:8080/google"  # a fake Drive and OAuth token endpoint, inside the fake model (smoke only)
 FAKE_JIRA = "http://fake-llm:8080/jira"  # a fake Jira Cloud, inside the fake model (smoke only)
+FAKE_JIRA_B = "http://fake-llm:8080/jira-b"  # a second fake Jira site, whose keys may repeat the first's
 FAKE_OKTA = "http://fake-llm:8080/okta"  # a fake Okta, inside the fake model (smoke only)
 FAKE_GCP = "http://fake-llm:8080/gcp"  # a fake GCP Secret Manager, inside the fake model (smoke only)
 FAKE_CONFLUENCE = "http://fake-llm:8080/confluence"  # a fake Confluence Cloud, inside the fake model (smoke only)
@@ -2997,6 +2998,77 @@ def jira_issues_carry_jiras_own_permissions():
     finally:
         api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
         fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag.lower()}",))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def a_connection_never_touches_another_connections_documents():
+    """A connection's documents are its own: another team's connection to another Jira site with the same project key and the same issue keys deletes none of the first connection's issues, overwrites neither their content nor their readers, and doesn't rename their project; each team keeps its own issues and readers, and removing the second connection leaves the first's alone"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    key = f"EDP{tag}"  # one project key on both sites, as two companies' Jira sites can share one
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    bob = {"accountId": f"557058:bob{tag.lower()}", "emailAddress": "bob@acme.test", "displayName": "Bob"}
+    issue = lambda n, summary: {"key": f"{key}-{n}", "summary": f"{summary} {tag}", "description": f"{summary}, in detail {tag}."}
+    sites = {FAKE_JIRA: {key: {"name": f"Orders {tag}", "browsers": [alice], "issues": [issue(1, "Cutover plan"), issue(2, "Rollback plan")]}},
+             FAKE_JIRA_B: {key: {"name": f"Elsewhere {tag}", "browsers": [bob], "issues": [issue(1, "Stranger plan"), issue(3, "Stranger extra")]}}}
+    for site, projects in sites.items():  # issue 1 is on both sites, with the same updated time (the version)
+        assert httpx.post(f"{site}/setup", json={"projects": projects}, timeout=10).status_code == 200
+    principal = lambda acct: f"ext:atlassian.{acct['accountId'].replace(':', '.')}"
+    links = {(f"user:{u}", "owner", f"identity:{principal(acct)[4:]}") for u, acct in (("alice", alice), ("bob", bob))}
+    stranger_admin = ("user:bob", "admin", "workspace:finance")  # no seed user administers finance
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, acct in (("alice", alice), ("bob", bob)):  # each has linked their account on their own site
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(acct), f"user:{u}"))
+    fga.write(writes=links | {stranger_admin})
+    first, second = f"jira-{tag.lower()}-a", f"jira-{tag.lower()}-b"
+    body = {"api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key], "every_minutes": 60}
+
+    def finds(user, issue_key):
+        hits = api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]
+        return f"jira-{issue_key}" in {h["id"] for h in hits}
+
+    def until(found, seconds=120):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not found():
+            time.sleep(3)
+        return found()
+
+    def project_name(user, issue_key):
+        docs = api("GET", "/v1/documents", user, params={"scope": "org", "key": f"jira-{issue_key}"}).json()["documents"]
+        return docs[0]["container"]["name"] if docs else None
+
+    try:
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={**body, "name": first})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: finds("alice", f"{key}-1") and finds("alice", f"{key}-2")), "payments' issues never arrived"
+        r = api("POST", "/v1/workspaces/finance/connections/jira", "bob", json={**body, "name": second, "api_base": FAKE_JIRA_B})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: finds("bob", f"{key}-3")), "the second site's own issue never arrived"
+        touched = {"payments' rollback issue was deleted": not finds("alice", f"{key}-2"),
+                   "alice lost payments' cutover issue": not finds("alice", f"{key}-1"),
+                   "bob reads payments' cutover issue": finds("bob", f"{key}-1")}
+        assert not any(touched.values()), f"the other site's connection touched payments' documents: {[t for t, v in touched.items() if v]}"
+        with psycopg.connect(OWNER_DB) as conn:
+            held = conn.execute(
+                """SELECT d.source_uri, array_agg(w.slug ORDER BY w.slug) FROM kl.documents d
+                   JOIN kl.workspace_documents wd ON wd.document_id = d.id JOIN kl.workspaces w ON w.id = wd.workspace_id
+                   WHERE d.external_key = %s GROUP BY d.source_uri""", (f"jira-{key}-1",)).fetchall()
+        assert held == [(f"{FAKE_JIRA}/browse/{key}-1", ["payments"])], f"payments' issue changed hands: {held}"
+        assert not finds("alice", f"{key}-3"), "the second site's issue leaked to the first's reader"
+        assert project_name("alice", f"{key}-1") == f"Orders {tag}", "payments' issue is named by the other site's project"
+        assert project_name("bob", f"{key}-3") == f"Elsewhere {tag}", "the second site's issue isn't named by its own project"
+        assert api("DELETE", f"/v1/workspaces/finance/connections/{second}", "bob").status_code == 202
+        assert until(lambda: not finds("bob", f"{key}-3")), "the removed connection's issue stayed"
+        assert finds("alice", f"{key}-1") and finds("alice", f"{key}-2"), "removing the other connection took payments' issues"
+    finally:
+        api("DELETE", f"/v1/workspaces/finance/connections/{second}", "bob")
+        api("DELETE", f"/v1/workspaces/payments/connections/{first}", "alice")
+        fga.write(deletes=links | {stranger_admin})
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag.lower()}",))
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))

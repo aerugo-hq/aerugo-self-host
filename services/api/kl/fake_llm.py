@@ -62,6 +62,9 @@ SIGNIN_CODES: dict[str, dict] = {}  # code -> who signed in; smoke sets these th
 # REST calls the connector makes, as its service account (an email and API token), so smoke proves the permission mapping.
 JIRA: dict = {"projects": {}}
 JIRA_AUTH = "jira-bot@acme.test:smoke-jira-token"
+# A second site at /jira-b, set through POST /jira-b/setup: another company's Jira, whose project and issue keys may be
+# the same as the first's, as two real sites' can be.
+JIRA_SITES = {"jira": JIRA, "jira-b": {"projects": {}}}
 # A fake Confluence Cloud (S1): spaces, their pages and blog posts, and who may read each (the space's grants, each page's
 # restrictions, and groups' members), which smoke sets through POST /confluence/setup. It answers the calls the
 # connector makes, at Confluence's own paths (/confluence/wiki/...).
@@ -174,8 +177,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._drive(urlparse(self.path))
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
             return self._json(200, ci_jwks())
-        if self.path.startswith("/jira/rest/api/3/"):
-            return self._jira(urlparse(self.path))
+        site = self.path.split("/")[1]
+        if site in JIRA_SITES and self.path.startswith(f"/{site}/rest/api/3/"):
+            return self._jira(urlparse(self.path), JIRA_SITES[site])
         if self.path.startswith("/confluence/wiki/"):
             return self._confluence(urlparse(self.path))
         if self.path.startswith("/okta/api/v1/users"):
@@ -279,12 +283,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"results": [{"title": t} for t in c.get("attachments", [])], "_links": {}})
         return self._json(404, {"message": "Not found"})
 
-    def _jira(self, url):
+    def _jira(self, url, site: dict):
         import base64
         if self.headers.get("Authorization") != "Basic " + base64.b64encode(JIRA_AUTH.encode()).decode():
             return self._json(401, {"errorMessages": ["Client must be authenticated to access this resource."]})
-        q, rest = {k: v[0] for k, v in parse_qs(url.query).items()}, url.path[len("/jira/rest/api/3/"):]
-        projects = JIRA["projects"]
+        q, rest = {k: v[0] for k, v in parse_qs(url.query).items()}, url.path.split("/rest/api/3/", 1)[1]
+        projects = site["projects"]
         doc = lambda text: {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}
         if rest == "myself":
             return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
@@ -364,9 +368,10 @@ class Handler(BaseHTTPRequestHandler):
             CONFLUENCE.clear()
             CONFLUENCE.update({"spaces": {}, "groups": {}, "users": {}, **self._body()})
             return self._json(200, {})
-        if path == "/jira/setup":  # smoke sets the fake Jira's projects, issues, and who may see each
-            JIRA.clear()
-            JIRA.update({"projects": {}, **self._body()})
+        if path in ("/jira/setup", "/jira-b/setup"):  # smoke sets a fake Jira site's projects, issues, and who may see each
+            site = JIRA_SITES[path.split("/")[1]]
+            site.clear()
+            site.update({"projects": {}, **self._body()})
             return self._json(200, {})
         if path == "/google/files":  # smoke sets a shared drive's files (and who each is shared with)
             request = self._body()

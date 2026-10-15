@@ -2035,9 +2035,11 @@ TEAM_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 DOCUMENTS_SQL = """
 SELECT d.external_key, d.title, d.tier, d.classification, d.source_kind, d.source_uri, d.created_at, d.audience,
        d.container_ref, d.source_path,
-       -- the container's own name (spaces by name): a connection's, an import's or a pipeline's, or a curated bundle's
+       -- the container's own name (spaces by name): a connection's, an import's or a pipeline's, or a curated bundle's;
+       -- a document a connection owns is named by that connection's container, never another site's of the same key
        coalesce((SELECT cc.display_name FROM connection_containers cc
-                 WHERE cc.external_id = d.container_ref AND cc.display_name IS NOT NULL LIMIT 1),
+                 WHERE cc.external_id = d.container_ref AND cc.display_name IS NOT NULL
+                   AND (d.connection_id IS NULL OR cc.connection_id = d.connection_id) LIMIT 1),
                 (SELECT i.name FROM imports i WHERE d.container_ref = 'import:' || i.id::text),
                 (SELECT p.name FROM pipelines p WHERE d.container_ref = 'pipeline:' || p.id::text),
                 substring(d.container_ref FROM '^(?:seed|scenario/[^/]+)/(.+)$')) AS container_name,

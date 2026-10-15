@@ -316,6 +316,10 @@ Clusters keep their colors across reloads (derived from a stable cluster id), an
 
 - **The shared sync loop puts a container's documents in `team_for(connection, container)`:** a routed container's
   team, not always the connection's own. Anything that touches "this connection's documents" must use it.
+- **A container ref or key is unique per site, not per org:** two sites can both have project `EDP` and issue
+  `EDP-1`. A connection's documents carry its `connection_id` (migration 0040), and `sync_container` reads and updates
+  only those. A source that writes documents outside it (as Drive's `sync_drive` does) must match `connection_id` too,
+  unless its ids are global.
 - **Jobs in Kubernetes can't be changed in place:** `deploy/k8s/up.ps1` deletes and re-creates them.
 - **A new setting needs three places:** `config.py`, `docker-compose.yml` (dev default, fakes included), and the
   production override (`deploy/gcp/compose.gcp.yml`), which must clear any dev fake.

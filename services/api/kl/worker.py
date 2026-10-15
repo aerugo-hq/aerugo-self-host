@@ -486,7 +486,9 @@ def handle_connection_retire(conn, job) -> dict:
     """A removed connection's knowledge goes with it (slice T2), as a removed pipeline's does: authorization first, then
     the rows. Team membership never grants a document (its viewers come from the source), so a document another team
     still holds through its own source keeps its tuples and only loses this team's link; a repository's own tuples go
-    once no connection brings it in. Its Google secret and token, if any, are destroyed."""
+    once no connection brings it in. Its Google secret and token, if any, are destroyed. Another connection's own
+    documents in a same-named container (migration 0040) are never touched: the removed connection's lost its id with
+    its row (SET NULL), and theirs still carry theirs."""
     p = job["payload"]
     kinds = SOURCE_KINDS.get(p["kind"], [])
     result = {"unlinked": 0, "documents": 0, "tuples": 0, "secrets": 0}
@@ -495,7 +497,7 @@ def handle_connection_retire(conn, job) -> dict:
             """SELECT d.id, d.external_key,
                       EXISTS (SELECT 1 FROM workspace_documents o WHERE o.document_id = d.id AND o.workspace_id <> %s) AS elsewhere
                FROM documents d JOIN workspace_documents wd ON wd.document_id = d.id AND wd.workspace_id = %s
-               WHERE d.container_ref = %s AND d.source_kind = ANY(%s)""",
+               WHERE d.container_ref = %s AND d.source_kind = ANY(%s) AND d.connection_id IS NULL""",
             (ct["workspace_id"], ct["workspace_id"], ct["external_id"], kinds)).fetchall()
         only_here = [r for r in rows if not r["elsewhere"]]
         doomed = set()

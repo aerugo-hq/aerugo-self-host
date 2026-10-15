@@ -30,10 +30,12 @@ def viewer_tuples(key: str, acl: list[str]) -> set:
 
 def sync_container(conn, connection: dict, container: str, source_kind: str, items: list[Item],
                    classification: str = "internal") -> dict:
+    """A connection's documents are its own (migration 0040): container refs and keys are unique per site, not per org,
+    so another connection's same-named container or same key is never read, updated, or deleted here."""
     org_id, team = connection["org_id"], team_for(connection, container)
     existing = {r["external_key"]: r for r in conn.execute(
-        "SELECT id, external_key, content_hash FROM documents WHERE source_kind = %s AND container_ref = %s",
-        (source_kind, container))}
+        "SELECT id, external_key, content_hash FROM documents WHERE source_kind = %s AND container_ref = %s AND connection_id = %s",
+        (source_kind, container, connection["id"]))}
     keep, changed, unreadable, writes, deletes = set(), 0, [], set(), set()
     for item in items:
         if not item.acl:  # nobody may read it: it isn't indexed at all
@@ -48,16 +50,17 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
                     continue
                 row = conn.execute(
                     """INSERT INTO documents (org_id, source_kind, source_uri, source_version, external_key, title,
-                                              content_hash, classification, acl_principals, container_ref, source_path)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                              content_hash, classification, acl_principals, container_ref, source_path,
+                                              connection_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (org_id, external_key) DO UPDATE SET
                          source_uri = EXCLUDED.source_uri, source_version = EXCLUDED.source_version, title = EXCLUDED.title,
                          content_hash = EXCLUDED.content_hash, acl_principals = EXCLUDED.acl_principals, acl_synced_at = now()
-                       WHERE documents.container_ref = EXCLUDED.container_ref
+                       WHERE documents.connection_id = EXCLUDED.connection_id AND documents.container_ref = EXCLUDED.container_ref
                        RETURNING id""",
                     (org_id, source_kind, item.uri, item.version, item.key, (title or item.title)[:300], item.version,
-                     classification, item.acl, container, item.path[:500])).fetchone()
-                if not row:  # the key belongs to another container: never take it over
+                     classification, item.acl, container, item.path[:500], connection["id"])).fetchone()
+                if not row:  # the key belongs to another connection, or another container: never take it over
                     continue
                 doc_id = row["id"]
                 conn.execute("DELETE FROM chunks WHERE document_id = %s", (doc_id,))
