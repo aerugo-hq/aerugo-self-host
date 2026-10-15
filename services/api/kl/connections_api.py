@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import config, confluence, directory, gcp_secrets, gdrive, jira, microsoft365, slack
+from . import config, confluence, directory, gcp_secrets, gdrive, jira, microsoft365, notion, slack
 from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
@@ -342,6 +342,53 @@ def create_slack_connection(ws: str, body: SlackConnectionIn, caller: Caller = D
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
+class NotionConnectionIn(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+    token: str | None = Field(default=None, min_length=20, max_length=300, repr=False)  # an internal integration's secret
+    credential_ref: str | None = Field(default=None, max_length=300)
+    api_base: str = notion.NOTION_API
+    every_minutes: int | None = Field(default=None, ge=5, le=10080)
+
+
+@router.post("/connections/notion", status_code=201)
+def create_notion_connection(ws: str, body: NotionConnectionIn, caller: Caller = Depends(authenticate),
+                             managed: tuple | None = Depends(managed_header)):
+    """Connect Notion live to a team (S6, ADR 0011): an internal integration's token, handed over once or referenced.
+    Notion doesn't say who can read a page, so what's shared with the integration is readable by this team's members
+    only, as the team holds them, never wider (the whole org never counts). Its admins only."""
+    require_workspace_admin(caller, ws)
+    if not notion.allowed_base(body.api_base):
+        raise HTTPException(422, "that Notion API address isn't allowed here")
+    if bool(body.token) == bool(body.credential_ref):
+        raise HTTPException(422, "give the integration's token, or a credential reference: one, not both")
+    if body.token and not body.token.startswith(("ntn_", "secret_")):
+        raise HTTPException(422, "that isn't an internal integration's token (ntn_... or secret_...)")
+    if body.credential_ref and not team_secret(ws, body.credential_ref):
+        raise HTTPException(422, ref_rule(ws))
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
+        if not ws_row:
+            raise HTTPException(404, "workspace not found")
+        if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
+            raise HTTPException(409, "a connection with that name already exists in this workspace")
+        cid = uuid.uuid4()
+        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", {"token": body.token})
+        row = conn.execute(
+            """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
+               VALUES (%s, %s, %s, 'notion', %s, %s, %s, %s) RETURNING id, name, kind, status""",
+            (cid, org_id, ws_row["id"], body.name, Jsonb({"api_base": body.api_base.rstrip("/"), "every_minutes": body.every_minutes}),
+             ref, caller.username),
+        ).fetchone()
+        note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
+                     (org_id, Jsonb({"connection_id": str(row["id"])})))
+        audit(conn, org_id, caller.username, "connection.create", [ws],
+              {"name": body.name, "kind": "notion", "readers": "the team's members",
+               "credential": "reference" if body.credential_ref else "stored"})
+    return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
+
+
 class MicrosoftConnectionIn(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
     tenant_id: str = Field(max_length=36)
@@ -624,6 +671,7 @@ class ConnectionPatch(BaseModel):
     sites: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Microsoft 365: the sites it reads
     history_days: int | None = Field(default=None, ge=1, le=3650)     # Slack: how far back it reads
     bot_token: str | None = Field(default=None, min_length=10, max_length=300, repr=False)  # Slack: a rotation
+    token: str | None = Field(default=None, min_length=20, max_length=300, repr=False)  # Notion: a rotation
     every_minutes: int | None = Field(default=None, ge=5, le=10080)   # how often it syncs (ADR 0011)
     api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # Jira, Okta: a rotation
     email: str | None = Field(default=None, min_length=3, max_length=254)  # Jira: the account, with a new token
@@ -710,10 +758,14 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if rotating:  # a new version of its secret; the connection reads the new one from now on
             ref = vault.put(f"kl/connections/{c['id']}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token})
             changed.append("credentials")
-        if body.api_token or body.email or body.service_account_key or body.certificate or body.bot_token:  # a new secret for one Aerugo stored
+        if body.api_token or body.email or body.service_account_key or body.certificate or body.bot_token or body.token:  # a new secret for one Aerugo stored
             if not stored_secret(c["id"], ref):
                 raise HTTPException(422, "this connection reads a secret the team keeps (or GitHub's app): rotate it there")
-            if body.bot_token:
+            if body.token:
+                if c["kind"] != "notion" or not body.token.startswith(("ntn_", "secret_")):
+                    raise HTTPException(422, "only a Notion connection takes an integration token (ntn_... or secret_...)")
+                secret = {"token": body.token}
+            elif body.bot_token:
                 secret = {"bot_token": body.bot_token}
             elif body.certificate:
                 if not (c["kind"] == "microsoft" or (c["kind"] == "directory" and (c["config"] or {}).get("provider") == "entra")):

@@ -77,9 +77,9 @@ baseline is already in place (only its golden-set part is left), so each source 
 - [x] Permissions: each item's sharing (people, groups through Entra, links), mirrored
 
 ### S6. Notion, live
-- [ ] An internal integration's token; the pages and databases shared with it
-- [ ] The page hierarchy; a database's rows as documents; blocks to text
-- [ ] Readers: Notion's API doesn't say who can read a page, so decide and document what Aerugo does (as exports do
+- [x] An internal integration's token; the pages and databases shared with it
+- [x] The page hierarchy; a database's rows as documents; blocks to text
+- [x] Readers: Notion's API doesn't say who can read a page, so decide and document what Aerugo does (as exports do
       today: the connecting team only), and never widen it
 
 ### S7. Data catalogs

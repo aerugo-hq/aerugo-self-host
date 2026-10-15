@@ -55,3 +55,13 @@ such choice took the narrower, fail-closed option and is listed here, with its a
 2. **SharePoint site groups grant nothing,** as the build plan says, so a file shared only with a site's Members
    isn't indexed. That's most of SharePoint by default: share with Entra groups to have files indexed.
 3. **A site the app wasn't granted is skipped,** not an error, so one site's missing grant doesn't stop the others.
+
+## S6. Notion, live
+
+1. **Touches invariant 12. Please confirm before merging.** Notion's API has no permissions, so a live page's readers
+   are the connecting team's members (its `group:` and `user:` principals), as the roadmap decided and as exports
+   already do. The invariant says synced content carries only the source's permissions and never group principals;
+   live Notion can't, so this is the one connector that breaks that rule, on purpose, and says so in its form and
+   page. *Alternative:* don't connect Notion live until Notion's API reports who can read a page.
+2. **The whole org never counts,** even for a team the whole org may join (an `org:` principal holding a role on the
+   team is left out), so connecting Notion never makes a page org-wide. Narrower than exports, which may name the org.

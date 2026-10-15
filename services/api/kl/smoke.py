@@ -2861,6 +2861,7 @@ FAKE_GCP = "http://fake-llm:8080/gcp"  # a fake GCP Secret Manager, inside the f
 FAKE_CONFLUENCE = "http://fake-llm:8080/confluence"  # a fake Confluence Cloud, inside the fake model (smoke only)
 FAKE_MICROSOFT = "http://fake-llm:8080/microsoft"  # a fake Microsoft Graph and Entra token endpoint (smoke only)
 FAKE_SLACK = "http://fake-llm:8080/slack"  # a fake Slack workspace (its Web API at /api), inside the fake model (smoke only)
+FAKE_NOTION = "http://fake-llm:8080/notion"  # a fake Notion (its API at /v1), inside the fake model (smoke only)
 
 
 @check
@@ -3297,6 +3298,80 @@ def microsoft_365_files_carry_their_own_sharing():
         fga.write(deletes=links)
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
+
+
+@check
+def notion_pages_reach_only_the_connecting_team():
+    """S6, Notion live: what's shared with an integration (pages, child pages under their parents, a data source's rows) is readable by the connecting team's members and no one else, never the whole org, since Notion doesn't say who can read a page; a page in the trash or never shared isn't read; a page unshared leaves on the next sync; an export's copy of a page the live connector reads is retired; a token that isn't an integration's, an internal address, and another team's secret are refused"""
+    import io
+    import zipfile
+    tag = secrets.token_hex(3)
+    pid = lambda n: f"{int(tag, 16) * 100 + n:08x}-0000-4000-8000-{n:012x}"
+    hexid = lambda n: pid(n).replace("-", "")
+    text = lambda kind, s: {"id": str(uuid.uuid4()), "type": kind, kind: {"rich_text": [{"plain_text": s}]}, "has_children": False}
+    pages = lambda child_shared=True: {
+        pid(1): {"title": f"Runbook {tag}", "shared": True, "blocks": [text("heading_1", "Steps"), text("paragraph", f"Page the on-call {tag}.")]},
+        pid(2): {"title": f"Escalation {tag}", "shared": child_shared, "parent": {"type": "page_id", "page_id": pid(1)},
+                 "blocks": [text("bulleted_list_item", f"Then the lead {tag}")]},
+        pid(3): {"title": f"Trashed {tag}", "shared": True, "in_trash": True, "blocks": [text("paragraph", f"gone {tag}")]},
+        pid(4): {"title": f"Private {tag}", "shared": False, "blocks": [text("paragraph", f"not shared {tag}")]},
+        pid(5): {"title": f"Decision {tag}", "parent": {"type": "data_source_id", "data_source_id": pid(50)},
+                 "blocks": [text("paragraph", f"We chose Q3 {tag}.")]}}
+    sources = {pid(50): {"title": f"Decisions {tag}", "shared": True, "rows": [pid(5)]}}
+    name, iname = f"notion-live-{tag}", f"notion-export-{tag}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    body = {"name": name, "api_base": f"{FAKE_NOTION}/v1", "token": "ntn_smoke_notion_integration_token", "every_minutes": 60}
+
+    def hits(u):
+        return {h["id"] for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def exported_copies():
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.documents WHERE container_ref LIKE 'import:%%' AND source_uri = %s",
+                                (f"https://www.notion.so/{hexid(1)}",)).fetchone()[0]
+
+    def until(test, seconds=120):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(3)
+        return test()
+
+    try:
+        export = io.BytesIO()  # an export of the same workspace, imported first: the live connector will take its page over
+        with zipfile.ZipFile(export, "w") as z:
+            z.writestr(f"Export/Runbook {tag} {hexid(1)}.md", f"# Runbook {tag}\n\nThe exported runbook {tag}.")
+        r = api("POST", "/v1/workspaces/payments/imports", "alice", data={"name": iname, "readers": "group:payments"},
+                files={"file": ("export.zip", export.getvalue(), "application/zip")})
+        assert r.status_code == 202, r.text[:200]
+        assert until(lambda: exported_copies() == 1), "the export's copy of the page never arrived"
+        assert httpx.post(f"{FAKE_NOTION}/setup", json={"pages": pages(), "sources": sources}, timeout=10).status_code == 200
+        refusals = {"a token that isn't an integration's was accepted": {**body, "token": "xoxb-not-notion-at-all-123456"},
+                    "an internal address was accepted": {**body, "api_base": "http://10.0.0.5"},
+                    "a reference to another team's secret was accepted": {**body, "token": None,
+                                                                         "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}}
+        for problem, attempt in refusals.items():
+            assert api("POST", "/v1/workspaces/payments/connections/notion", "alice", json=attempt).status_code == 422, problem
+        r = api("POST", "/v1/workspaces/payments/connections/notion", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        key = lambda n: f"notion-{hexid(n)}"
+        assert until(lambda: key(2) in hits("alice")), "Notion's pages never arrived"
+        alice, carol, bob, dave = (hits(u) for u in ("alice", "carol", "bob", "dave"))
+        assert {key(1), key(2), key(5)} <= alice and {key(1), key(2), key(5)} <= carol, "the connecting team's members can't read what's shared"
+        assert not ({key(1), key(2), key(5)} & (bob | dave)), "a Notion page reached someone outside the connecting team"
+        assert not ({key(3), key(4)} & alice), "a page in the trash, or never shared, was read"
+        doc = api("GET", "/v1/documents", "alice", params={"scope": "org", "key": key(2)}).json()["documents"]
+        assert doc and doc[0]["path"] == f"Runbook {tag}", f"a child page isn't placed under its parent: {doc}"
+        row = api("GET", "/v1/documents", "alice", params={"scope": "org", "key": key(5)}).json()["documents"]
+        assert row and row[0]["path"] == f"Decisions {tag}", f"a data source's row isn't placed under it: {row}"
+        assert until(lambda: exported_copies() == 0), "the export's copy of a page the live connector reads stayed indexed"
+
+        assert httpx.post(f"{FAKE_NOTION}/setup", json={"pages": pages(child_shared=False), "sources": sources}, timeout=10).status_code == 200
+        assert api("POST", path + "/refresh", "alice").status_code == 202
+        assert until(lambda: key(2) not in hits("alice")), "a page unshared from the integration stayed indexed"
+        assert key(1) in hits("alice"), "a page still shared left"
+    finally:
+        api("DELETE", path, "alice")
+        api("DELETE", f"/v1/workspaces/payments/imports/{iname}", "alice")
 
 
 @check
