@@ -109,7 +109,7 @@ def test_an_org_admin_connects_entra_with_a_certificate(page):
     form.get_by_label("Directory").select_option("entra")
     expect(form.get_by_label("Tenant ID")).to_be_visible()
     expect(form.get_by_label("Application (client) ID")).to_be_visible()
-    expect(form.get_by_label("Certificate", exact=True)).to_be_visible()
+    expect(form.get_by_label(re.compile(r"^Certificate"))).to_be_visible()  # its name includes its hint
     expect(form.get_by_label("API token")).to_have_count(0)  # it signs in with its certificate, never a secret
     expect(form.get_by_role("button", name="Connect Microsoft Entra")).to_be_visible()
 
