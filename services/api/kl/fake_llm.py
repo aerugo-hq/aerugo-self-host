@@ -58,6 +58,51 @@ DRIVES: dict[str, dict] = {}  # drive id -> {"name": ..., "files": {file id: the
 DRIVE_REFRESH, DRIVE_TOKEN = "smoke-refresh", "fake-drive-token"
 GOOGLE = os.environ.get("KL_FAKE_GOOGLE", "http://fake-llm:8080/google")  # the issuer of its sign-in ID tokens (slice F2b)
 SIGNIN_CODES: dict[str, dict] = {}  # code -> who signed in; smoke sets these through POST /google/signin
+# A fake Jira Cloud (ADR 0011): projects, issues, and who may see each, which smoke sets through POST /jira/setup, and the
+# REST calls the connector makes, as its service account (an email and API token), so smoke proves the permission mapping.
+JIRA: dict = {"projects": {}}
+JIRA_AUTH = "jira-bot@acme.test:smoke-jira-token"
+# A fake Confluence Cloud (S1): spaces, their pages and blog posts, and who may read each (the space's grants, each page's
+# restrictions, and groups' members), which smoke sets through POST /confluence/setup. It answers the calls the
+# connector makes, at Confluence's own paths (/confluence/wiki/...).
+CONFLUENCE: dict = {"spaces": {}, "groups": {}, "users": {}}
+CONFLUENCE_AUTH = "confluence-bot@acme.test:smoke-confluence-token"
+# Service accounts and shared folders (ADR 0011): smoke mints an account's key through POST /google/service-account (its
+# token_uri points somewhere unreachable, so a worker that followed it would fail) and sets folders through POST
+# /google/folders, each shared with the account or not.
+SA_KEYS: dict = {}  # an account's email -> the public half of its key
+FOLDERS: dict[str, dict] = {}  # folder id -> {"name", "shared": with the service account, "files": [files and subfolders]}
+FOLDER_TYPE = "application/vnd.google-apps.folder"
+# A fake Okta (ADR 0011: directories): users smoke sets through POST /okta/setup. Like Okta, its user list leaves the
+# deprovisioned out unless they're searched for by status, so a directory has to ask for leavers to find them.
+OKTA: dict = {"users": []}
+OKTA_TOKEN = "smoke-okta-token"
+# A fake GCP (ADR 0011): the metadata server's token, for the runner's own workload identity, and Secret Manager's
+# access endpoint, holding the secrets smoke sets through POST /gcp/secrets as JSON objects.
+GCP_SECRETS: dict = {}
+GCP_TOKEN = "fake-gcp-workload-token"
+
+
+def new_service_account(email: str) -> dict:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    SA_KEYS[email] = key.public_key()
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    return {"type": "service_account", "client_email": email, "private_key": pem, "token_uri": "http://10.255.255.1/steal"}
+
+
+def service_account_token(assertion: str) -> tuple[int, dict]:
+    """Google's token endpoint for a service account: a JWT the account signed, for read-only Drive, aimed at this endpoint."""
+    import jwt as pyjwt
+    try:
+        iss = pyjwt.decode(assertion, options={"verify_signature": False}).get("iss")
+        claims = pyjwt.decode(assertion, SA_KEYS[iss], algorithms=["RS256"], audience=f"{GOOGLE}/token")
+    except Exception:  # noqa: BLE001 - any bad assertion is a refused grant
+        return 400, {"error": "invalid_grant"}
+    if claims.get("scope") != "https://www.googleapis.com/auth/drive.readonly":
+        return 400, {"error": "invalid_scope"}
+    return 200, {"access_token": DRIVE_TOKEN, "token_type": "Bearer", "expires_in": 3600}
 
 
 def google_id_token(client_id: str, who: dict) -> str:
@@ -129,6 +174,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._drive(urlparse(self.path))
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
             return self._json(200, ci_jwks())
+        if self.path.startswith("/jira/rest/api/3/"):
+            return self._jira(urlparse(self.path))
+        if self.path.startswith("/confluence/wiki/"):
+            return self._confluence(urlparse(self.path))
+        if self.path.startswith("/okta/api/v1/users"):
+            if self.headers.get("Authorization") != f"SSWS {OKTA_TOKEN}":
+                return self._json(401, {"errorCode": "E0000011", "errorSummary": "Invalid token provided"})
+            search = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}.get("search", "")
+            gone = 'status eq "DEPROVISIONED"' in search
+            return self._json(200, [u for u in OKTA["users"] if (u.get("status") == "DEPROVISIONED") == gone])
+        if self.path == "/gcp-metadata/computeMetadata/v1/instance/service-accounts/default/token":
+            if self.headers.get("Metadata-Flavor") != "Google":  # as the real metadata server insists
+                return self._json(403, {"error": "Missing Metadata-Flavor: Google"})
+            return self._json(200, {"access_token": GCP_TOKEN, "expires_in": 3599, "token_type": "Bearer"})
+        if self.path.startswith("/gcp/v1/projects/") and self.path.endswith(":access"):
+            if self.headers.get("Authorization") != f"Bearer {GCP_TOKEN}":
+                return self._json(401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}})
+            import base64
+            parts = self.path.split("/")  # /gcp/v1/projects/<p>/secrets/<s>/versions/<v>:access
+            value = GCP_SECRETS.get(parts[6]) if len(parts) == 9 and parts[3] == "projects" and parts[5] == "secrets" else None
+            if value is None:
+                return self._json(404, {"error": {"code": 404, "status": "NOT_FOUND"}})
+            return self._json(200, {"name": self.path[len("/gcp/v1/"):-len(":access")],
+                                    "payload": {"data": base64.b64encode(json.dumps(value).encode()).decode()}})
         self._json(404, {})
 
     def _drive(self, url):
@@ -138,10 +207,17 @@ class Handler(BaseHTTPRequestHandler):
         if rest == "drives":
             return self._json(200, {"drives": [{"id": d, "name": v["name"]} for d, v in DRIVES.items()]})
         if rest == "files":
-            files = DRIVES.get(q.get("driveId", ""), {"files": {}})["files"].values()
+            query = q.get("q", "")
+            if "sharedWithMe = true" in query:  # folders shared with the service account
+                files = [{"id": fid, "name": f["name"], "mimeType": FOLDER_TYPE} for fid, f in FOLDERS.items() if f.get("shared")]
+            elif "' in parents" in query:  # one folder's children: its files and its subfolders
+                files = FOLDERS.get(query.split("'")[1], {"files": []})["files"]
+            else:
+                files = DRIVES.get(q.get("driveId", ""), {"files": {}})["files"].values()
             return self._json(200, {"files": [{k: v for k, v in f.items() if k != "text"} for f in files]})
         parts = rest.split("/")  # files/<id> or files/<id>/export
-        spec = next((d["files"][parts[1]] for d in DRIVES.values() if len(parts) > 1 and parts[1] in d["files"]), None)
+        spec = next((d["files"][parts[1]] for d in DRIVES.values() if len(parts) > 1 and parts[1] in d["files"]), None) or \
+            next((f for d in FOLDERS.values() for f in d["files"] if len(parts) > 1 and f.get("id") == parts[1] and f.get("mimeType") != FOLDER_TYPE), None)
         if parts[0] != "files" or spec is None:
             return self._json(404, {"error": {"message": "file not found"}})
         body = drive_export(spec, q.get("mimeType", "")) if parts[-1] == "export" else spec.get("text", "").encode()
@@ -149,6 +225,96 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _confluence(self, url):
+        import base64
+        if self.headers.get("Authorization") != "Basic " + base64.b64encode(CONFLUENCE_AUTH.encode()).decode():
+            return self._json(401, {"message": "Unauthorized"})
+        params = parse_qs(url.query)
+        q = {k: v[0] for k, v in params.items()}
+        rest = url.path[len("/confluence/wiki/"):]
+        parts = rest.split("/")
+        spaces, groups, users = CONFLUENCE["spaces"], CONFLUENCE["groups"], CONFLUENCE["users"]
+        by_id = {str(s["id"]): (k, s) for k, s in spaces.items()}
+        content = {str(c["id"]): c for s in spaces.values() for kind in ("pages", "blogposts") for c in s.get(kind, [])}
+        person = lambda a: {"accountId": a, "accountType": "atlassian", "email": (users.get(a) or {}).get("email"),
+                            "displayName": (users.get(a) or {}).get("name") or a}
+        read = lambda kind, who: {"principal": {"type": kind, "id": who}, "operation": {"key": "read", "targetType": "space"}}
+        if rest == "rest/api/user/current":
+            return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
+        if rest == "api/v2/spaces":
+            keys = set(q["keys"].split(",")) if q.get("keys") else None
+            return self._json(200, {"results": [{"id": str(s["id"]), "key": k, "name": s["name"]} for k, s in spaces.items()
+                                                if keys is None or k in keys], "_links": {}})
+        if len(parts) == 5 and parts[:3] == ["api", "v2", "spaces"] and parts[3] in by_id:
+            key, s = by_id[parts[3]]
+            if parts[4] in ("pages", "blogposts"):
+                return self._json(200, {"results": [
+                    {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"), "version": {"number": c.get("version", 1)},
+                     "body": {"storage": {"value": c.get("body", "")}}, "_links": {"webui": f"/spaces/{key}/pages/{c['id']}"}}
+                    for c in s.get(parts[4], [])], "_links": {}})
+            if parts[4] == "permissions":
+                grants = [read("user", a) for a in s.get("users", [])] + [read("group", g) for g in s.get("groups", [])]
+                return self._json(200, {"results": grants + ([read("anonymous", None)] if s.get("anonymous") else []), "_links": {}})
+        if len(parts) == 7 and parts[:3] == ["rest", "api", "content"] and parts[4:] == ["restriction", "byOperation", "read"]:
+            c = content.get(parts[3])
+            if c is None:
+                return self._json(404, {"message": "No content found"})
+            return self._json(200, {"operation": "read", "restrictions": {
+                "user": {"results": [person(a) for a in c.get("restricted_users", [])]},
+                "group": {"results": [{"id": g, "name": (groups.get(g) or {}).get("name", g)} for g in c.get("restricted_groups", [])]}}})
+        if len(parts) == 5 and parts[:3] == ["rest", "api", "group"] and parts[4] == "membersByGroupId":
+            if parts[3] not in groups:
+                return self._json(404, {"message": "No group found"})
+            return self._json(200, {"results": [person(a) for a in groups[parts[3]].get("members", [])]})
+        if rest == "rest/api/group/by-id":
+            g = groups.get(q.get("id", ""))
+            return self._json(200, {"id": q.get("id"), "name": g["name"]}) if g else self._json(404, {"message": "No group found"})
+        if rest == "rest/api/user/bulk":
+            return self._json(200, {"results": [person(a) for a in params.get("accountId", []) if a in users]})
+        if len(parts) == 5 and parts[:2] == ["api", "v2"] and parts[2] in ("pages", "blogposts") and parts[4] in ("labels", "attachments"):
+            c = content.get(parts[3]) or {}
+            if parts[4] == "labels":
+                return self._json(200, {"results": [{"name": label} for label in c.get("labels", [])], "_links": {}})
+            return self._json(200, {"results": [{"title": t} for t in c.get("attachments", [])], "_links": {}})
+        return self._json(404, {"message": "Not found"})
+
+    def _jira(self, url):
+        import base64
+        if self.headers.get("Authorization") != "Basic " + base64.b64encode(JIRA_AUTH.encode()).decode():
+            return self._json(401, {"errorMessages": ["Client must be authenticated to access this resource."]})
+        q, rest = {k: v[0] for k, v in parse_qs(url.query).items()}, url.path[len("/jira/rest/api/3/"):]
+        projects = JIRA["projects"]
+        doc = lambda text: {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}
+        if rest == "myself":
+            return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
+        if rest == "project/search":
+            return self._json(200, {"values": [{"id": k, "key": k, "name": p["name"]} for k, p in projects.items()], "isLast": True})
+        if rest == "search/jql":
+            key = q.get("jql", "").split("=", 1)[-1].split(" ORDER", 1)[0].strip()
+            issues = [{"id": i["key"], "key": i["key"], "fields": {
+                "summary": i["summary"], "description": doc(i.get("description", "")), "updated": i.get("updated", "2026-10-01T10:00:00.000+0000"),
+                "security": i.get("security"), "issuetype": {"name": "Task"}, "status": {"name": "To Do"}, "labels": [],
+                "assignee": None, "reporter": {"displayName": "Smoke"},
+                "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": "2026-10-01T10:00:00.000+0000",
+                                          "body": doc(c["body"])} for c in i.get("comments", [])]}}}
+                for i in projects.get(key, {}).get("issues", [])]
+            return self._json(200, {"issues": issues, "isLast": True})
+        parts = rest.split("/")
+        if len(parts) == 3 and parts[0] == "project" and parts[2] == "permissionscheme" and parts[1] in projects:
+            holder = "applicationRole" if projects[parts[1]].get("company_wide") else "projectRole"
+            return self._json(200, {"permissions": [{"permission": "BROWSE_PROJECTS", "holder": {"type": holder}}]})
+        if rest == "user/permission/search":
+            if q.get("issueKey"):
+                issue = next((i for p in projects.values() for i in p.get("issues", []) if i["key"] == q["issueKey"]), None)
+                if issue is None:
+                    return self._json(404, {"errorMessages": ["Issue does not exist"]})
+                key = issue["key"].rsplit("-", 1)[0]
+                users = issue.get("viewers") if issue.get("security") else projects[key].get("browsers", [])
+            else:
+                users = projects.get(q.get("projectKey", ""), {}).get("browsers", [])
+            return self._json(200, [{"active": True, **u} for u in users or []])
+        self._json(404, {"errorMessages": ["not found"]})
 
     def do_DELETE(self):
         if self.path == "/requests":  # a clean slate: both logs, and honest answers again
@@ -167,6 +333,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"token": ci_token(self._body())})
         if path == "/google/token":  # OAuth, as Google's token endpoint does
             form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+            if form.get("grant_type", [""])[0] == "urn:ietf:params:oauth:grant-type:jwt-bearer":  # a service account (ADR 0011)
+                return self._json(*service_account_token(form.get("assertion", [""])[0]))
             if form.get("grant_type", [""])[0] == "authorization_code":  # sign-in: a one-time code for an ID token
                 who = SIGNIN_CODES.pop(form.get("code", [""])[0], None)
                 if not who:
@@ -180,6 +348,26 @@ class Handler(BaseHTTPRequestHandler):
             code = secrets.token_urlsafe(24)
             SIGNIN_CODES[code] = self._body()
             return self._json(200, {"code": code})
+        if path == "/google/service-account":  # smoke mints a service account's JSON key
+            return self._json(200, new_service_account(self._body()["email"]))
+        if path == "/google/folders":  # smoke sets folders, and which are shared with the service account
+            FOLDERS.clear()
+            FOLDERS.update(self._body()["folders"])
+            return self._json(200, {})
+        if path == "/gcp/secrets":  # smoke sets the fake Secret Manager's secrets, each a JSON object
+            GCP_SECRETS.update(self._body()["secrets"])
+            return self._json(200, {})
+        if path == "/okta/setup":  # smoke sets the fake Okta's users
+            OKTA["users"] = self._body()["users"]
+            return self._json(200, {})
+        if path == "/confluence/setup":  # smoke sets the fake Confluence's spaces, pages, groups, and people
+            CONFLUENCE.clear()
+            CONFLUENCE.update({"spaces": {}, "groups": {}, "users": {}, **self._body()})
+            return self._json(200, {})
+        if path == "/jira/setup":  # smoke sets the fake Jira's projects, issues, and who may see each
+            JIRA.clear()
+            JIRA.update({"projects": {}, **self._body()})
+            return self._json(200, {})
         if path == "/google/files":  # smoke sets a shared drive's files (and who each is shared with)
             request = self._body()
             DRIVES[request["drive"]] = {"name": request.get("name", request["drive"]), "files": {f["id"]: f for f in request["files"]}}

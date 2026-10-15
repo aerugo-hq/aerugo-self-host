@@ -159,6 +159,28 @@ Everything here is dev-only:
 
 M1 replaces these with production patterns (AppRole or Kubernetes auth for OpenBao, authorization code with PKCE for humans, workload identity for services). The invariants in [`CLAUDE.md`](CLAUDE.md) already apply.
 
+## Try Ask with a local model
+
+Ask needs a model to answer. Without an API key, run one inside the stack:
+
+```
+make up
+make llm        # downloads qwen2.5:1.5b once (about 1 GB), checks it answers, registers it in every team
+make demo       # optional: the migration company, so there's something real to ask about
+make web
+```
+
+Then open Ask, choose `<your team>/local` as the model, and ask. The model runs in an Ollama container (`--profile llm`); nothing sent to it leaves your machine, so it may receive sources up to `confidential`. On a laptop CPU the first answer takes longest while the model loads, and later ones take roughly 10 to 60 seconds, depending on how many sources a question draws on.
+
+For better answers, pick a bigger model; running `make llm` again switches every team to it:
+
+```
+make llm LLM_MODEL=qwen2.5:3b    # about 2 GB
+make llm LLM_MODEL=llama3.2:3b   # about 2 GB
+```
+
+A small model is a useful test in itself: watch whether it cites its sources. An answer that cites nothing is marked low confidence, whatever it says.
+
 ## License
 
 Proposed Apache-2.0 with a CLA (decision D12 in the design doc). Not yet chosen; don't accept outside contributions until it is.

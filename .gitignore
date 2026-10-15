@@ -16,8 +16,19 @@ __pycache__/
 # Web
 node_modules/
 .next/
+# Brand icons (`make brand-icons`): each mark is its owner's trademark, fetched by every checkout, never committed
+services/web/public/brand/
+# The GCP deployment: what deploy.sh generates on the VM, and Terraform's local files and your values
+deploy/gcp/keycloak/
+deploy/gcp/authz/
+deploy/gcp/openbao/
+deploy/gcp/terraform/.terraform/
+deploy/gcp/terraform/*.tfstate*
+deploy/gcp/terraform/*.tfvars
 # Browser tests: screenshots and traces of failures
 services/e2e/results/
+# The evaluation set's baseline while it's being recorded (make eval-baseline): only a finished run becomes the file
+services/api/kl/evals_baseline.tmp
 
 # Editors, OS, and logs
 .idea/

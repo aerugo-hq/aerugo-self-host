@@ -22,3 +22,23 @@ PIPELINE_ISSUERS = [i.strip().rstrip("/") for i in _env("KL_PIPELINE_ISSUERS", "
 PIPELINE_AUDIENCE = "kl-ingest"
 # Google API addresses a Drive connection may use (slice F2, ADR 0008); a connection can name no other server.
 GOOGLE_API_BASES = [b.strip().rstrip("/") for b in _env("KL_GOOGLE_API_BASES", "https://www.googleapis.com").split(",") if b.strip()]
+# Jira addresses a connection may use besides Jira Cloud sites (https://<site>.atlassian.net, always allowed): in dev,
+# the fake one smoke runs. Anything else is refused, so a team admin can't point the worker at an internal host.
+JIRA_API_BASES = [b.strip().rstrip("/") for b in _env("KL_JIRA_API_BASES", "").split(",") if b.strip()]
+# Okta addresses a directory connection may use besides Okta orgs (https://<org>.okta.com, always allowed): in dev, the
+# fake one smoke runs.
+OKTA_API_BASES = [b.strip().rstrip("/") for b in _env("KL_OKTA_API_BASES", "").split(",") if b.strip()]
+# Confluence sites a connection may use beyond Confluence Cloud's own (https://<site>.atlassian.net, always allowed):
+# in dev, the fake one smoke runs.
+CONFLUENCE_API_BASES = [b.strip().rstrip("/") for b in _env("KL_CONFLUENCE_API_BASES", "").split(",") if b.strip()]
+# GCP Secret Manager credential references (ADR 0011): the projects a reference may name (none unless set), and where
+# Google's APIs are (in dev, the fake ones smoke runs). On GCP the runner signs in as its own workload identity, through
+# the metadata server; elsewhere with a service account key file (GOOGLE_APPLICATION_CREDENTIALS).
+GCP_SECRET_PROJECTS = [p.strip() for p in _env("KL_GCP_SECRET_PROJECTS", "").split(",") if p.strip()]
+GCP_SECRETS_BASE = _env("KL_GCP_SECRETS_BASE", "https://secretmanager.googleapis.com").rstrip("/")
+GCP_METADATA_BASE = _env("KL_GCP_METADATA_BASE", "http://metadata.google.internal").rstrip("/")
+GCP_TOKEN_URL = _env("KL_GCP_TOKEN_URL", "https://oauth2.googleapis.com/token")
+GCP_CREDENTIALS_FILE = _env("GOOGLE_APPLICATION_CREDENTIALS", "")
+# The email domains the company declares as its own (ADR 0011). Identity matching links a person to source accounts by
+# their SSO-verified email only within these; empty means no automatic matching at all.
+ORG_EMAIL_DOMAINS = [d.strip().lower() for d in _env("KL_ORG_EMAIL_DOMAINS", "").split(",") if d.strip()]

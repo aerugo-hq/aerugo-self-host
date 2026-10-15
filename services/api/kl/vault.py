@@ -23,6 +23,9 @@ class SecretStore:
         return f"{_SCHEME}{self.mount}/{path}"
 
     def get(self, ref: str) -> dict:
+        if ref.startswith("gcpsm://"):  # a secret a team keeps in GCP Secret Manager (ADR 0011)
+            from . import gcp_secrets
+            return gcp_secrets.get(ref)
         prefix = f"{_SCHEME}{self.mount}/"
         if not ref.startswith(prefix):
             raise ValueError("unsupported credential reference")

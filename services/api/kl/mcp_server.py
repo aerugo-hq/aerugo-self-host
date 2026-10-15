@@ -102,5 +102,33 @@ async def get_concept(key: str) -> dict:
     return await anyio.to_thread.run_sync(lambda: _as_caller(raw, lambda caller: api.get_concept(key, caller)))
 
 
+# Graph tools (slice K12): the knowledge graph for agents, through the same permission path as the app.
+@mcp.tool()
+async def related(key: str) -> dict:
+    """A page's curated neighbors that you can see, by the page's id (for example from a search result). Hidden
+    neighbors are left out entirely, so the answer never reveals that they exist."""
+    raw = _token()
+    return await anyio.to_thread.run_sync(lambda: _as_caller(raw, lambda caller: api.related_concepts(key, caller)))
+
+
+@mcp.tool()
+async def who_to_ask(key: str) -> dict:
+    """Who to ask about a page, by its id: who verified it, who owns it, its owning team's members (only for teams
+    you're on), and who it names, each with the reasons. A page you can't read looks the same as a missing one."""
+    raw = _token()
+    return await anyio.to_thread.run_sync(lambda: _as_caller(raw, lambda caller: api.concept_people(key, caller)))
+
+
+@mcp.tool()
+async def impact(namespace: str, name: str, kind: str = "job") -> dict:
+    """What depends on a dataset or job: everything downstream of it in the lineage your own teams reported, nearest
+    first, with hop counts. kind is 'job' or 'dataset'. An asset you can't see looks the same as a missing one."""
+    raw = _token()
+    if kind not in ("job", "dataset") or not 1 <= len(namespace) <= 200 or not 1 <= len(name) <= 300:
+        raise ValueError("kind must be job or dataset; namespace 1-200 characters, name 1-300")
+    return await anyio.to_thread.run_sync(lambda: _as_caller(
+        raw, lambda caller: api.lineage_impact(namespace=namespace, name=name, kind=kind, caller=caller)))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

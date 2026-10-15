@@ -1,0 +1,12 @@
+# Aerugo on a local Kubernetes cluster (kind, or Docker Desktop's): the same services, settings, and order as
+# docker-compose.yml, in the aerugo namespace. deploy/k8s/up.ps1 builds and loads the images and turns the
+# repository's configuration files into ConfigMaps first, then applies this. Dev values only: never a public cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: aerugo
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - data.yaml
+  - identity.yaml
+  - app.yaml

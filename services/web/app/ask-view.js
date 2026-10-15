@@ -6,6 +6,9 @@ import { inScope } from "./scope.js";
 import { createElement as h, useEffect, useRef, useState } from "react";
 import { ago, kl } from "../lib/client.js";
 import { Icon } from "./icons.js";
+import { SourceIcon, sourceName } from "./brand.js";
+import KnowledgeGraph from "./knowledge-graph.js";
+import { markdown } from "./markdown.js";
 import { Alert, Confirm, Empty, SkeletonRows, Spinner, TIERS, Tier, concept, tierOf } from "./ui.js";
 
 const enc = encodeURIComponent;
@@ -58,7 +61,6 @@ export function mentionAt(text, caret) {
   return m ? { query: m[2], start: caret - m[2].length - 1 } : null;
 }
 
-const short = (t) => (t.length > 22 ? `${t.slice(0, 21)}…` : t);
 const lastAnswer = (messages) => {
   for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "assistant") return i;
   return null;
@@ -84,6 +86,9 @@ function History({ items, current, query, setQuery, onSearch, link = (path) => p
     list);
 }
 
+// Confidence (slice K9): high green, medium amber, low gray (low isn't an error; it says to check the sources).
+const CONFIDENCE_DOT = { high: "ok", medium: "warn", low: "evidence" };
+
 function AnswerGraph({ ids, selected, onSelect }) {
   const [graph, setGraph] = useState(null);
   const [error, setError] = useState(null);
@@ -96,23 +101,15 @@ function AnswerGraph({ ids, selected, onSelect }) {
   if (!ids.length) return h(Empty, null, "This answer has no sources to map.");
   if (error) return h(Alert, null, error);
   if (!graph) return h(SkeletonRows, { rows: 3, widths: [60, 40, 50] });
-  const { nodes, edges } = layout(trim(graph, ids), ids);
+  const { nodes, edges } = trim(graph, ids);
   const more = graph.nodes.length - nodes.length;
+  // The map's own renderer (slice K7): packed clusters, no names at rest, a pointed-at bubble's links in blue; the
+  // answer's sources carry a ring.
   return h("div", { className: "answer-graph" },
-    h("svg", { viewBox: "0 0 320 320", role: "group", "aria-label": `${nodes.length} pieces of knowledge this answer used or touches` },
-      edges.map((e, i) => h("line", { key: i, x1: e.a.x, y1: e.a.y, x2: e.b.x, y2: e.b.y,
-                                      className: selected && (e.source === selected || e.target === selected) ? "on" : "" })),
-      nodes.map((n) => {
-        const seed = ids.includes(n.id);
-        const pick = () => onSelect(n);
-        return h("g", { key: n.id, role: "button", tabIndex: 0, "aria-pressed": selected === n.id,
-                        "aria-label": `${n.title}: ${n.tier === "entity" ? n.kind || "entity" : TIERS[tierOf(n.tier)].label}${seed ? ", a source of this answer" : ""}`,
-                        className: `node ${tierOf(n.tier)}${seed ? " seed" : ""}${selected === n.id ? " on" : ""}`, onClick: pick,
-                        onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } } },
-          h("circle", { cx: n.x, cy: n.y, r: seed ? 9 : 6 }),
-          h("text", { x: n.x, y: n.y + (seed ? 22 : 17), textAnchor: "middle" }, short(n.title)));
-      })),
-    more > 0 ? h("p", { className: "muted small" }, `${more} more on the map`) : null);
+    h("div", { className: "answer-graph-stage" },
+      h(KnowledgeGraph, { nodes, edges, selectedId: selected, onSelect: (n) => onSelect(n), marked: ids, inset: 0 })),
+    h("p", { className: "muted small" }, "Ringed: this answer's sources. Point at a bubble to see what it links to.",
+      more > 0 ? ` ${more} more on the map.` : ""));
 }
 
 function NodePanel({ node, onAsk }) {
@@ -130,12 +127,13 @@ function NodePanel({ node, onAsk }) {
         h(Icon, { name: "external", size: 12 }))));
 }
 
-function Sources({ answer }) {
+function Sources({ answer, here = (path) => path }) {
   if (!answer.citations.length) return h(Empty, null, "This answer cites no sources.");
   const order = [...answer.citations].sort((a, b) => Number(b.cited) - Number(a.cited) || a.n - b.n);
   return h("ol", { className: "ask-sources" }, order.map((c) => h("li", { key: c.id },
     h("span", { className: "cite-n" }, c.n),
-    h("div", null, h("a", { className: "a", href: concept(c.id) }, c.title),
+    h("div", null, h("a", { className: "a", href: here(`#/documents/${encodeURIComponent(c.id)}`) }, // opens any document, in place
+      h(SourceIcon, { kind: c.source_kind, label: sourceName(c.source_kind) }), c.title),
       h("small", { className: "muted" }, c.cited ? (c.section || "Cited") : "Read, not cited")))));
 }
 
@@ -273,7 +271,12 @@ export default function AskView({ me, id: route, scope: workingIn = "org" }) {
       : loaded ? h("div", { className: "ask-messages" }, loaded.messages.map((m, i) => m.role === "user"
           ? h("div", { key: m.id, className: "msg msg-user" }, m.content)
           : h("article", { key: m.id, className: `msg msg-answer${i === pick ? " on" : ""}` },
-              m.hidden ? h("p", { className: "muted" }, m.content) : h("div", { className: "answer-text" }, withCitations(m.content)),
+              m.hidden ? h("p", { className: "muted" }, m.content) : h("div", { className: "answer-text" }, markdown(m.content)),
+              // How sure the answer is (slice K9), from what it cites: one line, the level and then why.
+              m.hidden || !m.confidence ? null : h("p", { className: "confidence-line", title: "From what the answer cites, not from the model" },
+                h("span", { className: `dot ${CONFIDENCE_DOT[m.confidence.level] || "evidence"}`, "aria-hidden": true }),
+                h("b", null, `${m.confidence.level.charAt(0).toUpperCase()}${m.confidence.level.slice(1)} confidence`),
+                h("span", null, m.confidence.reasons.join(" "))),
               h("div", { className: "msg-meta" },
                 h("span", { className: "muted small" }, m.model),
                 m.hidden ? null : h("button", { type: "button", className: "btn btn-ghost btn-sm", "aria-pressed": i === pick,
@@ -311,7 +314,7 @@ export default function AskView({ me, id: route, scope: workingIn = "org" }) {
         p === "sources" ? "Sources" : "Graph"))),
     !answer ? h(Empty, null, "Ask a question to see the knowledge behind its answer.")
       : answer.hidden ? h(Empty, null, "This answer is hidden, so its sources are too.")
-        : pane === "sources" ? h(Sources, { answer })
+        : pane === "sources" ? h(Sources, { answer, here })
           : h("div", null, h(AnswerGraph, { ids, selected: node && node.id, onSelect: setNode }), h(NodePanel, { node, onAsk: askAbout })));
 
   return h("div", { className: "ask" },

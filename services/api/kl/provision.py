@@ -130,9 +130,11 @@ def ensure_seed_tuples() -> None:
 
 def seed_dev_identities() -> None:
     """Dev links. alice = your GitHub login (KL_DEV_GITHUB_LOGIN). bob = octocat, a real GitHub account
-    outside your org, so bob is linked but GitHub grants him nothing. carol stays unlinked."""
-    links = {"user:bob": "ext:github.octocat"}
-    login = os.environ.get("KL_DEV_GITHUB_LOGIN", "").strip().lower()
+    outside your org, so bob is linked but GitHub grants him nothing. carol stays unlinked. A deployment sets
+    KL_DEV_IDENTITIES=0: no dev person exists there, so every dev link (and its grant) is removed, never made."""
+    enabled = os.environ.get("KL_DEV_IDENTITIES", "1") != "0"
+    links = {"user:bob": "ext:github.octocat"} if enabled else {}
+    login = os.environ.get("KL_DEV_GITHUB_LOGIN", "").strip().lower() if enabled else ""
     if login and GITHUB_LOGIN.fullmatch(login):
         links["user:alice"] = f"ext:github.{login}"
     elif login:

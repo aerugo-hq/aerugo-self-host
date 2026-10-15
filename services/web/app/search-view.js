@@ -3,6 +3,7 @@ import { inScope } from "./scope.js";
 import { createElement as h, useEffect, useRef, useState } from "react";
 import { kl } from "../lib/client.js";
 import { Icon } from "./icons.js";
+import { SourceIcon, sourceName } from "./brand.js";
 import { Alert, Empty, SkeletonRows, Spinner, Tier, concept } from "./ui.js";
 
 const CHANNELS = { lexical: "keyword", vector: "meaning", title: "title", curated: "curated", canonical: "exact", graph: "related", rerank: "reranked" };
@@ -134,11 +135,11 @@ export default function SearchView({ me, initial = "", team = "" }) {
         h("span", null, "Limited to sources you can access")),
       h("div", { className: "panel" }, results.results.length ? [
         ...results.results.map((r) => h("div", { key: r.id, className: "result-row" },
-          h("a", { className: "result", href: concept(r.id) },
-            h("div", { className: "result-title" }, h("span", null, r.title)),
+          h("a", { className: "result", href: inScope(`#/documents/${encodeURIComponent(r.id)}`, team) }, // opens any document, in place
+            h("div", { className: "result-title" }, h(SourceIcon, { kind: r.source_kind, label: sourceName(r.source_kind) }), h("span", null, r.title)),
             r.section ? h("div", { className: "faint small" }, r.section) : null,
             h("p", { className: "result-snippet" }, r.snippet),
-            h("div", { className: "meta" }, h(Tier, { tier: r.tier }),
+            h("div", { className: "meta" }, h(Tier, { tier: r.tier }), r.source_kind ? h("span", null, sourceName(r.source_kind)) : null,
               h("span", { className: "mono" }, r.id),
               (r.matched || []).length ? h("span", null, `matched ${r.matched.map((m) => CHANNELS[m] || m).join(", ")}`) : null,
               r.related_to ? h("span", null, `via ${r.related_to}`) : null)),

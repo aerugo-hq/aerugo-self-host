@@ -1,0 +1,342 @@
+# The application: provisioning (migrations, the authorization model, OpenBao's mounts), then the API, the worker, the
+# MCP server, and the web app, with docker-compose.yml's settings. No demo content and no development fakes: connect
+# your own sources. Settings the API's image shares are in aerugo-app-env, one place to change them.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aerugo-app-env
+data:
+  KL_ORG_SLUG: acme
+  KL_OPENFGA_URL: http://openfga:8080
+  KL_OPENFGA_STORE: kl-dev
+  KL_OPENBAO_URL: http://openbao:8200
+  KL_OIDC_ISSUER: http://localhost:8081/realms/acme   # the browser's address for Keycloak (open.ps1 forwards it)
+  KL_OIDC_JWKS_URL: http://keycloak:8080/realms/acme/protocol/openid-connect/certs
+  KL_OIDC_AUDIENCE: kl-api
+  KL_WEB_URL: http://localhost:3000
+  KL_PURGE_DELAY_SECONDS: "10"
+  KL_MODEL_TIMEOUT_SECONDS: "300"
+  KL_PIPELINE_ISSUERS: https://token.actions.githubusercontent.com
+  KL_GOOGLE_API_BASES: https://www.googleapis.com
+  KL_JIRA_API_BASES: ""   # Jira Cloud sites (https://<site>.atlassian.net) are always allowed; this adds others
+  KL_OKTA_API_BASES: ""   # likewise Okta orgs
+  KL_ORG_EMAIL_DOMAINS: acme.test   # add your own domain to match your real accounts (README)
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  OTEL_METRIC_EXPORT_INTERVAL: "5000"
+---
+# What the API's image waits for before it starts, as Compose's depends_on does: provisioning finished, which is when
+# the authorization model is written (after the migrations).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aerugo-wait
+data:
+  wait.py: |
+    import sys
+    import time
+
+    import httpx
+
+    deadline = time.time() + 900
+    while time.time() < deadline:
+        try:
+            stores = httpx.get("http://openfga:8080/stores", timeout=5).json().get("stores", [])
+            store = next((s for s in stores if s.get("name") == "kl-dev"), None)
+            if store and httpx.get(f"http://openfga:8080/stores/{store['id']}/authorization-models",
+                                   timeout=5).json().get("authorization_models"):
+                sys.exit(0)
+        except Exception:
+            pass
+        time.sleep(3)
+    sys.exit("provisioning didn't finish in 15 minutes: kubectl -n aerugo logs job/provision")
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: provision
+spec:
+  backoffLimit: 30   # retried until Postgres, OpenFGA, and OpenBao are ready
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: provision
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "kl.provision"]
+          env:
+            - name: KL_OPENFGA_URL
+              value: http://openfga:8080
+            - name: KL_OPENFGA_STORE
+              value: kl-dev
+            - name: KL_OPENBAO_URL
+              value: http://openbao:8200
+            - name: KL_OPENBAO_TOKEN
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+            - name: KL_OWNER_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: owner-database-url}
+            - name: KL_ORG_SLUG
+              value: acme
+            - name: KL_DEV_GITHUB_LOGIN
+              value: ""
+            - name: KL_SEED_KNOWLEDGE_DIR
+              value: ""   # no demo content: connect your own sources
+          volumeMounts:
+            - name: authz
+              mountPath: /app/authz
+              readOnly: true
+            - name: kl-secrets
+              mountPath: /run/kl-secrets
+              readOnly: true
+      volumes:
+        - name: authz   # authz/: the authorization model and its seed tuples
+          configMap:
+            name: aerugo-authz
+        - name: kl-secrets   # .secrets/: the GitHub App's credentials, if you've made one (up.ps1)
+          secret:
+            secretName: aerugo-kl-secrets
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      initContainers:
+        - name: wait-for-provision   # as Compose's depends_on: provisioning finished (aerugo-wait)
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "/wait/wait.py"]
+          volumeMounts:
+            - name: wait
+              mountPath: /wait
+              readOnly: true
+      containers:
+        - name: api
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: aerugo-app-env
+          env:
+            - name: KL_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: database-url}
+            - name: KL_OPENBAO_TOKEN
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+      volumes:
+        - name: wait
+          configMap:
+            name: aerugo-wait
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      initContainers:
+        - name: wait-for-provision
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "/wait/wait.py"]
+          volumeMounts:
+            - name: wait
+              mountPath: /wait
+              readOnly: true
+      containers:
+        - name: worker
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "kl.worker"]
+          envFrom:
+            - configMapRef:
+                name: aerugo-app-env
+          env:
+            - name: KL_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: database-url}
+            - name: KL_INGEST_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: ingest-database-url}
+            - name: KL_OPENBAO_TOKEN
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+            - name: KL_RESYNC_MINUTES
+              value: "10"
+            - name: KL_SCHEDULER_SECONDS
+              value: "15"
+            - name: OTEL_SERVICE_NAME
+              value: kl-worker
+          resources:   # it holds the embedding model
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {memory: 2Gi}
+      volumes:
+        - name: wait
+          configMap:
+            name: aerugo-wait
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp
+spec:
+  selector:
+    app: mcp
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp
+  template:
+    metadata:
+      labels:
+        app: mcp
+    spec:
+      initContainers:
+        - name: wait-for-provision
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "/wait/wait.py"]
+          volumeMounts:
+            - name: wait
+              mountPath: /wait
+              readOnly: true
+      containers:
+        - name: mcp
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "kl.mcp_server"]
+          envFrom:
+            - configMapRef:
+                name: aerugo-app-env
+          env:
+            - name: KL_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: database-url}
+            - name: KL_OPENBAO_TOKEN
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+            - name: KL_MCP_AUDIENCE   # only tokens issued for the MCP server are accepted here
+              value: kl-mcp
+            - name: KL_MCP_PUBLIC_URL
+              value: http://localhost:8090
+            - name: OTEL_SERVICE_NAME
+              value: kl-mcp
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            tcpSocket:
+              port: 8090
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+      volumes:
+        - name: wait
+          configMap:
+            name: aerugo-wait
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: aerugo/web:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KL_API_URL
+              value: http://api:8000
+            - name: KL_WEB_URL   # must match the kl-web redirect address in deploy/keycloak/realm-acme.json
+              value: http://localhost:3000
+            - name: KL_OIDC_PUBLIC_ISSUER
+              value: http://localhost:8081/realms/acme
+            - name: KL_OIDC_INTERNAL_ISSUER
+              value: http://keycloak:8080/realms/acme
+            - name: KL_OIDC_CLIENT_ID
+              value: kl-web
+            - name: NEXT_TELEMETRY_DISABLED
+              value: "1"
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            tcpSocket:
+              port: 3000
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}

@@ -20,6 +20,7 @@ class Caller:
     groups: tuple[str, ...]
     org_slug: str
     service: bool = False  # a registered service account acting as itself (slice T1)
+    email: str | None = None  # a person's email, only when the IdP verified it (ADR 0011: identity matching)
 
     @property
     def fga_user(self) -> str:
@@ -63,7 +64,10 @@ def caller_from_claims(claims: dict, org_slug: str, allow_service: bool = False)
             groups.add(name)
         else:
             log.warning("dropping group with unsafe name from token: %r", raw)
-    return Caller(username=username, groups=tuple(sorted(groups)), org_slug=org_slug)
+    email = claims.get("email")
+    verified = claims.get("email_verified") is True and isinstance(email, str) and 3 <= len(email) <= 254
+    return Caller(username=username, groups=tuple(sorted(groups)), org_slug=org_slug,
+                  email=email.strip().lower() if verified else None)
 
 
 def decode_token(token: str, audience: str | None = None) -> dict:

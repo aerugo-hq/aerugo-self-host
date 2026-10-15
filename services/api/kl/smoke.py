@@ -2808,6 +2808,517 @@ def pipelines_push_with_their_own_identity():
 
 # ------------------------------------------------------------------ Google Drive (slice F2)
 FAKE_GOOGLE = "http://fake-llm:8080/google"  # a fake Drive and OAuth token endpoint, inside the fake model (smoke only)
+FAKE_JIRA = "http://fake-llm:8080/jira"  # a fake Jira Cloud, inside the fake model (smoke only)
+FAKE_OKTA = "http://fake-llm:8080/okta"  # a fake Okta, inside the fake model (smoke only)
+FAKE_GCP = "http://fake-llm:8080/gcp"  # a fake GCP Secret Manager, inside the fake model (smoke only)
+FAKE_CONFLUENCE = "http://fake-llm:8080/confluence"  # a fake Confluence Cloud, inside the fake model (smoke only)
+
+
+@check
+def confluence_pages_carry_confluences_own_permissions():
+    """S1, Confluence live: each page is readable by its space's readers narrowed by every restriction down the tree (a page under a restricted one inherits it; one nobody passes isn't indexed), named by its space and placed in its tree; a label narrows what's indexed; and an exported copy of a page the live connector reads is retired, so none is indexed twice"""
+    import io
+    import zipfile
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    key, base = f"PAY{tag}", int(tag, 16) * 10
+    ids = {n: str(base + i) for i, n in enumerate(("guide", "leads", "under", "nobody", "news"))}
+    acct = {who: f"557058:cf{who}{tag.lower()}" for who in ("alice", "bob", "carol")}
+    group = f"g-{tag.lower()}"
+    page = lambda n, title, **more: {"id": ids[n], "title": f"{title} {tag}", "body": f"<p>{title} body {tag}</p>", "version": 1, **more}
+    setup = {
+        "users": {acct[w]: {"email": f"{w}@acme.test", "name": w.title()} for w in acct},
+        "groups": {group: {"name": f"payments-{tag.lower()}", "members": [acct["bob"], acct["carol"]]}},
+        "spaces": {key: {"id": str(base + 9), "name": f"Payments Engineering {tag}", "users": [acct["alice"]], "groups": [group],
+                         "pages": [page("guide", "Guide", labels=["runbook"]),
+                                   page("leads", "Leads", restricted_users=[acct["carol"]]),
+                                   page("under", "Under", parentId=ids["leads"]),
+                                   page("nobody", "Nobody", parentId=ids["leads"], restricted_users=[acct["alice"]])],
+                         "blogposts": [page("news", "News")]}}}
+    assert httpx.post(f"{FAKE_CONFLUENCE}/setup", json=setup, timeout=10).status_code == 200
+    principal = lambda who: f"ext:atlassian.{acct[who].replace(':', '.')}"
+    links = {(f"user:{who}", "owner", f"identity:{principal(who)[4:]}") for who in acct}
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for who in acct:  # each has linked their Atlassian account
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(who), f"user:{who}"))
+    fga.write(writes=links)
+    name, iname = f"confluence-{tag.lower()}", f"cf-export-{tag.lower()}"
+    body = {"name": name, "api_base": FAKE_CONFLUENCE, "email": "confluence-bot@acme.test", "api_token": "smoke-confluence-token",
+            "spaces": [key], "every_minutes": 60}
+
+    def finds(user, n):
+        hits = api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]
+        return f"confluence-{ids[n]}" in {h["id"] for h in hits}
+
+    def exported_copies() -> int:
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.documents WHERE container_ref LIKE 'import:%%' AND source_uri LIKE %s",
+                                (f"%pageId={ids['guide']}",)).fetchone()[0]
+
+    try:
+        # an export of the same space, imported first: the live connector will take its page over
+        export = io.BytesIO()
+        with zipfile.ZipFile(export, "w") as z:
+            z.writestr(f"{key}/index.html", "<html></html>")
+            z.writestr(f"{key}/Guide-{tag}_{ids['guide']}.html", f"<html><head><title>Payments : Guide {tag}</title></head><body>"
+                       f"<div id=\"main-content\"><p>The exported guide {tag}.</p></div></body></html>")
+        r = api("POST", "/v1/workspaces/payments/imports", "alice", data={"name": iname, "readers": "group:payments",
+                "base_url": "https://acme.atlassian.net/wiki"}, files={"file": ("export.zip", export.getvalue(), "application/zip")})
+        assert r.status_code == 202, r.text[:200]
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not exported_copies():
+            time.sleep(2)
+        assert exported_copies() == 1, "the export's copy of the page never arrived"
+
+        refused = {"another team's secret": {**body, "email": None, "api_token": None,
+                                             "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"},
+                   "an internal address": {**body, "api_base": "http://10.0.0.5"},
+                   "a malformed space key": {**body, "spaces": ["PAY KEY"]}}
+        for what, wrong in refused.items():
+            assert api("POST", "/v1/workspaces/payments/connections/confluence", "alice", json=wrong).status_code == 422, \
+                f"{what} was accepted"
+        r = api("POST", "/v1/workspaces/payments/connections/confluence", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not finds("alice", "guide"):
+            time.sleep(3)
+        assert finds("alice", "guide"), "the space's page never arrived"
+        assert finds("bob", "guide") and finds("carol", "guide"), "the space's group's members can't read its page"
+        assert finds("carol", "leads") and not finds("alice", "leads") and not finds("bob", "leads"), "a restricted page leaked"
+        assert finds("carol", "under") and not finds("alice", "under") and not finds("bob", "under"), \
+            "a page under a restricted one didn't inherit its restriction"
+        assert not any(finds(who, "nobody") for who in acct), "a page nobody passes every restriction of was indexed"
+        assert finds("bob", "news"), "the space's blog post never arrived"
+        under = api("GET", "/v1/documents", "carol", params={"scope": "org", "key": f"confluence-{ids['under']}"}).json()["documents"]
+        assert under and under[0]["container"]["name"] == f"Payments Engineering {tag}", f"the page isn't named by its space: {under}"
+        assert under[0]["path"] == f"Leads {tag} › Under {tag}", f"the page isn't placed in its tree: {under[0].get('path')}"
+        assert exported_copies() == 0, "the export's copy of a page the live connector reads is still indexed: it's there twice"
+        r = api("PATCH", f"/v1/workspaces/payments/connections/{name}", "alice", json={"labels": ["runbook"]})
+        assert r.status_code == 200, r.text[:200]
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and finds("bob", "news"):
+            time.sleep(3)
+        assert not finds("bob", "news") and finds("bob", "guide"), "a label filter didn't narrow what's indexed"
+        with psycopg.connect(OWNER_DB) as conn:
+            seen = dict(conn.execute("SELECT external_id, email FROM kl.source_identities WHERE source = 'atlassian' "
+                                     "AND external_id LIKE %s", (f"%cf%{tag.lower()}",)).fetchall())
+        assert seen.get(principal("alice")[len("ext:atlassian."):]) == "alice@acme.test", f"Confluence's accounts weren't recorded: {seen}"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        api("DELETE", f"/v1/workspaces/payments/imports/{iname}", "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%cf%{tag.lower()}",))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%cf%{tag.lower()}",))
+
+
+@check
+def jira_issues_carry_jiras_own_permissions():
+    """Jira (ADR 0011): synced by a service account, each issue is readable by exactly whom Jira lets see it: a project open to all of Jira reaches the org only on a site its admin confirmed is the company's; a restricted project, and an issue under a security level, reach only the people Jira names, once linked; the accounts Jira names are recorded for identity matching; another team's secret and an internal address are refused"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    open_key, private_key = f"OPEN{tag}", f"PRIV{tag}"
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "Alice@acme.test", "displayName": "Alice"}
+    carol = {"accountId": f"557058:carol{tag.lower()}", "emailAddress": "carol@acme.test", "displayName": "Carol"}
+    setup = {"projects": {
+        open_key: {"name": "Open", "company_wide": True, "browsers": [alice, carol], "issues": [
+            {"key": f"{open_key}-1", "summary": f"Cutover plan {tag}", "description": f"Dual-run for 30 days {tag}.",
+             "comments": [{"author": "Olivia", "body": f"Decided: Q3 {tag}."}]},
+            {"key": f"{open_key}-2", "summary": f"Leads only {tag}", "description": "Restricted.",
+             "security": {"name": "Leads"}, "viewers": [carol]}]},
+        private_key: {"name": "Private", "company_wide": False, "browsers": [alice], "issues": [
+            {"key": f"{private_key}-1", "summary": f"Private plan {tag}", "description": "Only the project's people."}]}}}
+    assert httpx.post(f"{FAKE_JIRA}/setup", json=setup, timeout=10).status_code == 200
+    name = f"jira-{tag.lower()}"
+    principal = lambda acct: f"ext:atlassian.{acct['accountId'].replace(':', '.')}"
+    links = {(f"user:{u}", "owner", f"identity:{principal(acct)[4:]}") for u, acct in (("alice", alice), ("carol", carol))}
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, acct in (("alice", alice), ("carol", carol)):  # both have linked their Atlassian accounts
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(acct), f"user:{u}"))
+    fga.write(writes=links)
+    body = {"name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token",
+            "projects": [open_key, private_key], "company_site": True, "every_minutes": 60}
+
+    def finds(user, key):
+        hits = api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]
+        return f"jira-{key}" in {h["id"] for h in hits}
+
+    try:
+        other_team = {**body, "email": None, "api_token": None, "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}
+        assert api("POST", "/v1/workspaces/payments/connections/jira", "alice", json=other_team).status_code == 422, \
+            "a reference to another team's secret was accepted"
+        assert api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={**body, "api_base": "http://10.0.0.5"}).status_code == 422, \
+            "an internal address was accepted"
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not finds("alice", f"{open_key}-1"):
+            time.sleep(3)
+        assert finds("alice", f"{open_key}-1"), "the open project's issue never arrived"
+        assert finds("bob", f"{open_key}-1"), "a project open to all of Jira, on a confirmed company site, didn't reach the org"
+        assert finds("carol", f"{open_key}-2"), "the person Jira names can't find the issue under a security level"
+        assert not finds("alice", f"{open_key}-2") and not finds("bob", f"{open_key}-2"), "an issue under a security level leaked"
+        assert finds("alice", f"{private_key}-1"), "the restricted project's browser can't find its issue"
+        assert not finds("bob", f"{private_key}-1") and not finds("carol", f"{private_key}-1"), "a restricted project leaked"
+        listed = {c["name"]: c for c in api("GET", "/v1/workspaces/payments/connections", "alice").json()["connections"]}
+        assert listed[name]["every_minutes"] == 60 and listed[name]["last_synced_at"], listed.get(name)
+        named = api("GET", "/v1/documents", "alice", params={"scope": "org", "key": f"jira-{open_key}-1"}).json()["documents"]
+        assert named and named[0]["container"]["name"] == "Open", f"the issue doesn't carry its project's name: {named}"
+        with psycopg.connect(OWNER_DB) as conn:
+            seen = dict(conn.execute("SELECT external_id, email FROM kl.source_identities WHERE source = 'atlassian' "
+                                     "AND external_id LIKE %s", (f"%{tag.lower()}",)).fetchall())
+        assert seen.get(principal(alice)[len("ext:atlassian."):]) == "alice@acme.test", f"Jira's accounts weren't recorded: {seen}"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag.lower()}",))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def drive_reads_as_a_service_account():
+    """Google Drive on a service account (ADR 0011): its key signs its own token request, sent only to the allowed Google address whatever the key names; folders shared with it are found and walked, subfolders too; each file keeps its own readers, the domain's or a person's; the people Drive names are recorded, so signing in matches them; a junk key and another team's secret are refused"""
+    from .authz import fga
+    tag = secrets.token_hex(3)
+    key = httpx.post(f"{FAKE_GOOGLE}/service-account", json={"email": f"aerugo-{tag}@acme-dev.iam.gserviceaccount.com"}, timeout=30).json()
+    sub = f"sub{tag}"
+    folders = {
+        f"top{tag}": {"name": "Top", "shared": True, "files": [
+            {"id": f"wide{tag}", "name": f"Wide {tag}.txt", "mimeType": "text/plain", "md5Checksum": f"w{tag}", "text": f"Everyone may read this {tag}.",
+             "permissions": [{"type": "domain", "role": "reader", "domain": "acme.test"}]},
+            {"id": sub, "name": "Sub", "mimeType": "application/vnd.google-apps.folder"}]},
+        sub: {"name": "Sub", "shared": False, "files": [
+            {"id": f"carol{tag}", "name": f"Carol only {tag}.txt", "mimeType": "text/plain", "md5Checksum": f"c{tag}", "text": f"Only carol {tag}.",
+             "permissions": [{"type": "user", "role": "reader", "emailAddress": "carol@acme.test"}]}]},
+        f"hidden{tag}": {"name": "Not shared with it", "shared": False, "files": [
+            {"id": f"never{tag}", "name": f"Never {tag}.txt", "mimeType": "text/plain", "md5Checksum": f"n{tag}", "text": f"Never indexed {tag}.",
+             "permissions": [{"type": "domain", "role": "reader", "domain": "acme.test"}]}]}}
+    assert httpx.post(f"{FAKE_GOOGLE}/folders", json={"folders": folders}, timeout=10).status_code == 200
+    name = f"drive-{tag}"
+    body = {"name": name, "service_account_key": json.dumps(key), "domain": "acme.test", "api_base": FAKE_GOOGLE, "every_minutes": 60,
+            "drives": []}  # no shared drives: only what's shared with it, so earlier runs' fake drives stay out
+    carol = "ext:google.carol@acme.test"
+
+    def finds(user, file_id):
+        hits = api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]
+        return f"gd-{file_id}" in {h["id"] for h in hits}
+
+    try:
+        assert api("POST", "/v1/workspaces/payments/connections/google", "alice", json={**body, "service_account_key": "[1]"}).status_code == 422, \
+            "a junk key was accepted"
+        other_team = {"name": name, "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake", "api_base": FAKE_GOOGLE}
+        assert api("POST", "/v1/workspaces/payments/connections/google", "alice", json=other_team).status_code == 422, \
+            "a reference to another team's secret was accepted"
+        r = api("POST", "/v1/workspaces/payments/connections/google", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not finds("alice", f"wide{tag}"):
+            time.sleep(3)
+        assert finds("alice", f"wide{tag}"), "the shared folder's file never arrived: did the token request go where the key said?"
+        assert finds("bob", f"wide{tag}"), "a file shared with the company's domain didn't reach the org"
+        assert not finds("bob", f"never{tag}"), "a folder never shared with the service account was indexed"
+        named = api("GET", "/v1/documents", "alice", params={"scope": "org", "key": f"gd-wide{tag}"}).json()["documents"]
+        assert named and named[0]["container"]["name"] == "Top", f"the file doesn't carry its shared folder's name: {named}"
+        assert not any(finds(u, f"carol{tag}") for u in ("alice", "bob", "carol")), "a file shared with carol alone was readable before she was matched"
+        with psycopg.connect(OWNER_DB) as conn:
+            seen = conn.execute("SELECT 1 FROM kl.source_identities WHERE source = 'google' AND external_id = 'carol@acme.test'").fetchone()
+        assert seen, "Drive's account for carol wasn't recorded for identity matching"
+        assert carol in api("GET", "/v1/whoami", "carol").json()["identities"], "signing in didn't match carol to her Google account"
+        assert finds("carol", f"carol{tag}"), "carol can't find the file shared with her, though she's matched"
+        assert not finds("alice", f"carol{tag}"), "the file shared with carol leaked to alice"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = %s AND verified_by = 'sso-email'", (carol,))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'google' AND external_id = 'carol@acme.test'")
+        stale = {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": "identity:google.carol@acme.test"})}
+        if stale:
+            fga.write(deletes=stale)
+
+
+@check
+def a_directory_revokes_leavers_at_once():
+    """Directories (ADR 0011): when a directory says someone has left, their matched identities are revoked at once, grants and all, without waiting for a sign-in that won't come; matching refuses them after that; someone still there keeps theirs; an internal address and another team's secret are refused"""
+    from .authz import fga
+    tag = secrets.token_hex(3)
+    leaver, stays = f"557058.leaver{tag}", f"557058.stays{tag}"
+    name = f"okta-{tag}"
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        conn.execute("INSERT INTO kl.source_identities (org_id, source, external_id, email) "
+                     "VALUES (%s, 'atlassian', %s, 'carol@acme.test'), (%s, 'atlassian', %s, 'alice@acme.test')", (org, leaver, org, stays))
+
+    def alias(user, external):
+        with psycopg.connect(OWNER_DB) as conn:
+            return bool(conn.execute("SELECT 1 FROM kl.principal_aliases WHERE source = %s AND canonical = %s AND verified_by = 'sso-email'",
+                                     (f"ext:atlassian.{external}", f"user:{user}")).fetchone())
+
+    grant = lambda user, external: fga.read({"user": f"user:{user}", "relation": "owner", "object": f"identity:atlassian.{external}"})
+    users = [{"status": "ACTIVE", "profile": {"email": "alice@acme.test", "firstName": "Alice", "lastName": "Smoke"}},
+             {"status": "DEPROVISIONED", "profile": {"email": "carol@acme.test", "firstName": "Carol", "lastName": "Smoke"}}]
+    body = {"name": name, "provider": "okta", "api_base": FAKE_OKTA, "api_token": "smoke-okta-token", "every_minutes": 60}
+    try:
+        api("GET", "/v1/whoami", "alice")
+        api("GET", "/v1/whoami", "carol")
+        assert alias("alice", stays) and alias("carol", leaver) and grant("carol", leaver), "sign-in didn't match them to begin with"
+        assert httpx.post(f"{FAKE_OKTA}/setup", json={"users": users}, timeout=10).status_code == 200
+        assert api("POST", "/v1/workspaces/payments/connections/directory", "alice", json={**body, "api_base": "http://10.0.0.5"}).status_code == 422, \
+            "an internal address was accepted"
+        other_team = {**body, "api_token": None, "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}
+        assert api("POST", "/v1/workspaces/payments/connections/directory", "alice", json=other_team).status_code == 422, \
+            "a reference to another team's secret was accepted"
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and alias("carol", leaver):  # carol never signs in: the worker must act alone
+            time.sleep(2)
+        assert not alias("carol", leaver) and not grant("carol", leaver), "the leaver's matched identity outlived the directory saying she'd left"
+        assert alias("alice", stays) and grant("alice", stays), "someone still at the company lost her match"
+        api("GET", "/v1/whoami", "carol")
+        assert not alias("carol", leaver), "signing in matched someone the directory says has left"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        httpx.post(f"{FAKE_OKTA}/setup", json={"users": []}, timeout=10)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.directory_people WHERE connection_id IN (SELECT id FROM kl.connections WHERE name = %s)", (name,))
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag}",))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag}",))
+        stale = {(t["user"], t["relation"], t["object"]) for e in (leaver, stays) for t in fga.read({"object": f"identity:atlassian.{e}"})}
+        if stale:
+            fga.write(deletes=stale)
+
+
+@check
+def a_secret_the_team_keeps_in_gcp_is_read_where_it_lives():
+    """GCP Secret Manager references (ADR 0011): a connection can name a secret its team keeps in GCP, which the runner reads as its own workload identity, so Aerugo never holds the token; a secret named for another team, a look-alike team, or a project the deployment doesn't allow is refused"""
+    tag = secrets.token_hex(3).upper()
+    key, secret = f"GCP{tag}", f"kl_acme_payments_jira{tag.lower()}"
+    setup = {"projects": {key: {"name": "Through GCP", "company_wide": True, "browsers": [], "issues": [
+        {"key": f"{key}-1", "summary": f"Read with a GCP secret {tag}", "description": f"Only the reference was stored {tag}."}]}}}
+    assert httpx.post(f"{FAKE_JIRA}/setup", json=setup, timeout=10).status_code == 200
+    assert httpx.post(f"{FAKE_GCP}/secrets", json={"secrets": {secret: {"email": "jira-bot@acme.test", "api_token": "smoke-jira-token"}}},
+                      timeout=10).status_code == 200
+    ref, name = f"gcpsm://projects/acme-dev/secrets/{secret}", f"gcp-{tag.lower()}"
+    body = {"name": name, "api_base": FAKE_JIRA, "credential_ref": ref, "projects": [key], "company_site": True}
+
+    def finds(user, issue):
+        hits = api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]
+        return f"jira-{issue}" in {h["id"] for h in hits}
+
+    try:
+        for bad in (f"gcpsm://projects/acme-dev/secrets/kl_acme_finance_jira{tag.lower()}",  # another team's
+                    f"gcpsm://projects/acme-dev/secrets/kl_acme_payments-x_jira{tag.lower()}",  # a look-alike team's
+                    f"gcpsm://projects/someone-else/secrets/{secret}"):  # a project the deployment doesn't allow
+            assert api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={**body, "credential_ref": bad}).status_code == 422, \
+                f"accepted {bad}"
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not finds("alice", f"{key}-1"):
+            time.sleep(3)
+        assert finds("alice", f"{key}-1"), "the issue never arrived: the runner couldn't read the secret where it lives"
+        got = api("GET", f"/v1/workspaces/payments/connections/{name}", "alice").json()
+        assert got["settings"]["credential_ref"] == ref, f"the reference isn't read back: {got.get('settings')}"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+
+
+@check
+def people_are_matched_to_their_source_accounts_by_verified_email():
+    """Identity matching (ADR 0011): signing in links a person to the source accounts that report their SSO-verified company email, with the grant; an account someone else holds stays theirs; nobody else is matched to it; and a match that stops holding is removed, grant and all"""
+    from .authz import fga
+    tag = secrets.token_hex(3)
+    mine, held = f"557058.match{tag}", f"557058.held{tag}"
+    grant = lambda external: fga.read({"user": "user:alice", "relation": "owner", "object": f"identity:atlassian.{external}"})
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        conn.execute("INSERT INTO kl.source_identities (org_id, source, external_id, email) "
+                     "VALUES (%s, 'atlassian', %s, 'alice@acme.test'), (%s, 'atlassian', %s, 'alice@acme.test')", (org, mine, org, held))
+        conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, 'user:carol', 'smoke')",
+                     (org, f"ext:atlassian.{held}"))  # carol holds this one, though it reports alice's email
+    try:
+        identities = api("GET", "/v1/whoami", "alice").json()["identities"]
+        assert f"ext:atlassian.{mine}" in identities and grant(mine), f"alice wasn't matched to her account: {identities}"
+        assert f"ext:atlassian.{held}" not in identities, "alice took over an account carol holds"
+        assert f"ext:atlassian.{mine}" not in api("GET", "/v1/whoami", "bob").json()["identities"], "bob was matched to alice's account"
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # Jira now reports another email for that account
+            conn.execute("UPDATE kl.source_identities SET email = 'someone@acme.test' WHERE source = 'atlassian' AND external_id = %s", (mine,))
+        identities = api("GET", "/v1/whoami", "alice").json()["identities"]
+        assert f"ext:atlassian.{mine}" not in identities and not grant(mine), "a match that stopped holding survived"
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag}",))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag}",))
+        stale = {(t["user"], t["relation"], t["object"]) for e in (mine, held) for t in fga.read({"object": f"identity:atlassian.{e}"})}
+        if stale:
+            fga.write(deletes=stale)
+
+
+@check
+def a_document_reads_exactly_when_it_lists():
+    """Reading a document in its space: its text, in sections, comes to exactly the people the documents list shows it to; anyone else gets a 404, as if it weren't there"""
+    r = api("GET", "/v1/documents/pay-runbook/content", "alice")
+    assert r.status_code == 200 and r.json()["title"] and r.json()["sections"], f"{r.status_code} {r.text[:200]}"
+    assert any("page the payments on-call" in s["body"].lower() for s in r.json()["sections"]), "the runbook's text didn't come back"
+    for user in ("bob", "dave"):
+        assert api("GET", "/v1/documents/pay-runbook/content", user).status_code == 404, f"{user} read Payments' runbook"
+    assert api("GET", "/v1/documents/legal-hold/content", "dave").status_code == 200, "dave can't read Legal's hold"
+    assert api("GET", "/v1/documents/legal-hold/content", "alice").status_code == 404, "alice read Legal's private hold"
+    assert api("GET", "/v1/documents/no-such-document/content", "alice").status_code == 404, "a missing document didn't look missing"
+
+
+@check
+def answers_carry_confidence_from_signals():
+    """Confidence (slice K9): from what an answer cites, never from the model's opinion of itself: a verified page cited is high; one raw source is low; citing a superseded page lowers it; no answer at all is low, and each level says why"""
+    from .confidence import confidence
+    assert confidence(False, [], [])["level"] == "low"
+    assert confidence(True, [], [])["reasons"] == ["The answer doesn't cite any source."]
+    assert confidence(True, [{"id": "a", "tier": "gold"}], [])["level"] == "high"
+    assert confidence(True, [{"id": "a", "tier": "evidence"}], [])["level"] == "low"
+    lowered = confidence(True, [{"id": "q3", "tier": "gold"}, {"id": "q2", "tier": "silver"}], [("q3", "q2")])
+    assert lowered["level"] == "medium" and any("superseded" in r for r in lowered["reasons"]), lowered
+
+
+@check
+def the_walk_never_carries_anyone_past_what_they_may_read():
+    """The walk in search (slice K8): a page a result wrote down comes along, authorized on its own; a reference from a page someone can read to one they can't brings nothing"""
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        ids = dict(conn.execute("SELECT external_key, id FROM kl.documents WHERE external_key IN ('handbook', 'legal-hold')").fetchall())
+        conn.execute("INSERT INTO kl.reference_links (org_id, source_id, target_id, signal, strength, evidence) "
+                     "SELECT org_id, %s, %s, 'identifier', 0.9, 'smoke-k8' FROM kl.documents WHERE id = %s ON CONFLICT DO NOTHING",
+                     (ids["handbook"], ids["legal-hold"], ids["handbook"]))
+    try:
+        for q in ("handbook", "employee", "policy"):
+            hits = [h["id"] for h in api("GET", "/v1/search", "alice", params={"q": q, "limit": 50}).json()["results"]]
+            assert "legal-hold" not in hits, f"a reference walked alice into Legal's private hold ({q!r})"
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.reference_links WHERE evidence = 'smoke-k8'")
+
+
+@check
+def mcp_graph_tools_follow_the_same_permissions():
+    """MCP graph tools (slice K12): an agent gets who to ask and related pages through the same permission path as the app; a page its user can't read is not found"""
+    people = mcp_call("alice", "who_to_ask", {"key": "kb-sev1-playbook"})
+    assert [p["user"] for p in people["people"]][:1] == ["alice"], people
+    assert mcp_call("alice", "related", {"key": "kb-sev1-playbook"})["related"], "alice's related pages came back empty"
+    for user in ("bob", "dave"):
+        for tool in ("who_to_ask", "related"):
+            try:
+                mcp_call(user, tool, {"key": "kb-sev1-playbook"})
+            except AssertionError as e:
+                assert "not found" in str(e), f"{user}, {tool}: {e}"
+            else:
+                raise AssertionError(f"{user} got {tool} for a page they can't read")
+
+
+@check
+def lineage_shows_only_to_its_own_team():
+    """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
+    import uuid
+    tag = uuid.uuid4().hex[:8]
+    events = {"events": [{"job": {"namespace": "smoke", "name": f"load_{tag}"},
+                          "inputs": [{"namespace": "smoke", "name": f"src_{tag}"}],
+                          "outputs": [{"namespace": "smoke", "name": f"table_{tag}"}]},
+                         {"job": {"namespace": "smoke", "name": f"report_{tag}"},
+                          "inputs": [{"namespace": "smoke", "name": f"table_{tag}"}],
+                          "outputs": [{"namespace": "smoke", "name": f"dash_{tag}"}]}]}
+    impact = {"namespace": "smoke", "name": f"load_{tag}", "kind": "job"}
+    try:
+        assert api("POST", "/v1/workspaces/payments/lineage", "bob", json=events).status_code in (403, 404), "a non-admin pushed lineage"
+        r = api("POST", "/v1/workspaces/payments/lineage", "alice", json=events)
+        assert r.status_code == 200 and r.json()["edges"] == 4, f"{r.status_code} {r.text[:200]}"
+        assert api("POST", "/v1/workspaces/payments/lineage", "alice", json=events).json()["edges"] == 4, "pushing again failed"
+        g = api("GET", "/v1/graph", "alice").json()
+        ids = {n["id"] for n in g["nodes"]}
+        assert {f"asset:job:smoke/load_{tag}", f"asset:dataset:smoke/table_{tag}", f"asset:dataset:smoke/dash_{tag}"} <= ids, \
+            "alice's map lacks her team's lineage"
+        assert sum(1 for n in g["nodes"] if tag in n["id"]) == 5, "pushing the same events twice duplicated assets"
+        assert any(e["kind"] == "lineage" and e["source"] == f"asset:job:smoke/load_{tag}" and e["target"] == f"asset:dataset:smoke/table_{tag}"
+                   for e in g["edges"]), "a job's write isn't a lineage link"
+        down = [(d["name"], d["hops"]) for d in api("GET", "/v1/lineage/impact", "alice", params=impact).json()["downstream"]]
+        assert down == [(f"table_{tag}", 1), (f"report_{tag}", 2), (f"dash_{tag}", 3)], down
+        for user in ("bob", "dave"):
+            g = api("GET", "/v1/graph", user).json()
+            assert not [n for n in g["nodes"] if tag in n["id"]], f"{user} saw another team's lineage"
+            assert api("GET", "/v1/lineage/impact", user, params=impact).status_code == 404, f"{user} walked another team's lineage"
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.assets WHERE namespace = 'smoke' AND name LIKE %s", (f"%{tag}",))
+
+
+@check
+def who_to_ask_comes_from_the_page_and_never_leaks():
+    """Who to ask (slice K6): for a page someone may read, the person who verified it, then its owning team's members (listed only for a team the asker is on), each with reasons; a page they can't read is a 404, and a team they aren't on is named without its people"""
+    from .people import who_to_ask
+    r = api("GET", "/v1/concepts/kb-sev1-playbook/people", "alice")
+    assert r.status_code == 200, f"{r.status_code} {r.text[:200]}"
+    people = r.json()["people"]
+    assert [p["user"] for p in people][:2] == ["alice", "carol"], people
+    assert people[0]["reasons"][0].startswith("verified it on") and any("owning team" in x for x in people[1]["reasons"]), people
+    for user in ("bob", "dave"):
+        assert api("GET", "/v1/concepts/kb-sev1-playbook/people", user).status_code == 404, \
+            f"{user} learned who to ask about a page they can't read"
+    named = who_to_ask({"x-kl": {"owners": ["group:legal"]}}, {}, [])
+    assert named == {"people": [], "teams": [{"team": "legal", "reason": "owns it", "members_shown": False}]}, named
+
+
+@check
+def current_knowledge_ranks_before_what_it_replaced():
+    """Current knowledge first (slice K5): among the results someone may see, a page another result supersedes ranks just after it; chains settle newest first, a replacement outside the results changes nothing, and a cycle can't loop"""
+    from .ranking import current_first
+    keys = lambda rows: [r["external_key"] for r in rows]
+    r = lambda *ks: [{"external_key": k} for k in ks]
+    assert keys(current_first(r("q2", "x", "q3"), [("q3", "q2")])) == ["x", "q3", "q2"]
+    assert keys(current_first(r("q3", "x", "q2"), [("q3", "q2")])) == ["q3", "x", "q2"], "an ordered list moved"
+    assert keys(current_first(r("a", "b", "c"), [("b", "a"), ("c", "b")])) == ["c", "b", "a"], "a chain didn't settle"
+    assert keys(current_first(r("q2", "x"), [("q3", "q2")])) == ["q2", "x"], "a hidden replacement changed the order"
+    assert len(current_first(r("a", "b"), [("a", "b"), ("b", "a")])) == 2, "a cycle lost a result"
+
+
+@check
+def recorded_references_link_what_a_document_names():
+    """Recorded links (slice K2): a document that writes another's identifier or address links to it, with its provenance; never to itself, never through a plain word or an identifier two pages share; and a reference is shown only to someone who can read both of its documents"""
+    from .links import identifier_names, references
+    names = identifier_names([{"external_key": "kb-order-hist", "aliases": ["order_hist", "order history table"]},
+                              {"external_key": "kb-order-migration", "aliases": ["edp-412"]},
+                              {"external_key": "kb-edp-orders", "aliases": ["edp.orders"]},
+                              {"external_key": "kb-ledger", "aliases": ["ledger"]},
+                              {"external_key": "kb-a", "aliases": ["shared_name"]}, {"external_key": "kb-b", "aliases": ["shared_name"]}])
+    assert names == {"order_hist": "kb-order-hist", "edp-412": "kb-order-migration", "edp.orders": "kb-edp-orders"}, names
+    urls = {"https://jira.acme.test/browse/EDP-412": "kb-order-migration"}
+    found = references("Reads ORDER_HIST; see EDP-412 at https://jira.acme.test/browse/EDP-412/#c1, and edp.orders. "
+                       "The ledger, ord_load.sql, ORD_LOAD, and shared_name are not links.", names, urls, own="kb-sales-dashboard")
+    assert found == {("kb-order-hist", "identifier"): "ORDER_HIST", ("kb-order-migration", "identifier"): "EDP-412",
+                     ("kb-order-migration", "url"): "https://jira.acme.test/browse/EDP-412",
+                     ("kb-edp-orders", "identifier"): "edp.orders"}, found
+    assert references("ORDER_HIST loads nightly", names, urls, own="kb-order-hist") == {}, "a page linked to itself"
+    # Visibility: a reference is read only when both of its documents are (RLS, then the map). The runbook is
+    # Payments' (alice, carol), the handbook everyone's, and the hold Legal's, which is private (dave).
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        ids = dict(conn.execute("SELECT external_key, id FROM kl.documents "
+                                "WHERE external_key IN ('pay-runbook', 'handbook', 'legal-hold')").fetchall())
+        for source, target in (("pay-runbook", "handbook"), ("pay-runbook", "legal-hold")):
+            conn.execute("INSERT INTO kl.reference_links (org_id, source_id, target_id, signal, strength, evidence) "
+                         "SELECT org_id, %s, %s, 'identifier', 0.9, 'smoke-k2' FROM kl.documents WHERE id = %s "
+                         "ON CONFLICT DO NOTHING", (ids[source], ids[target], ids[source]))
+    try:
+        def references_of(user):
+            g = api("GET", "/v1/graph", user).json()
+            return {(e["source"], e["target"]): e for e in g["edges"] if e["kind"] == "reference" and e.get("evidence") == "smoke-k2"}
+        alice = references_of("alice")
+        assert ("pay-runbook", "handbook") in alice and alice[("pay-runbook", "handbook")]["signal"] == "identifier", f"alice: {alice}"
+        assert ("pay-runbook", "legal-hold") not in alice, "alice saw a reference to a private team's document"
+        for user in ("bob", "dave"):  # bob can't read the runbook; dave can read the hold, but not the runbook
+            assert not references_of(user), f"{user} saw a reference with an end they can't read"
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.reference_links WHERE evidence = 'smoke-k2'")
 
 
 @check

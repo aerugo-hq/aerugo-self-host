@@ -1,0 +1,106 @@
+# Aerugo on one GCP VM, layered over docker-compose.yml by deploy/gcp/vm/deploy.sh. Images come from Artifact Registry
+# (the deploy workflow builds them, tagged with the commit), every credential from Secret Manager (through a root-only
+# .env), the public addresses are the deployment's domain, and TLS is Caddy's (Let's Encrypt). Keycloak runs in
+# production mode on Postgres, OpenBao unseals through Cloud KMS, every long-running service comes back after a
+# reboot, and none of development's fakes, seeds, or dev identities exist here.
+
+x-prod-env: &prod-env
+  KL_OIDC_ISSUER: https://auth.${KL_DOMAIN}/realms/acme
+  KL_WEB_URL: https://app.${KL_DOMAIN}
+  KL_ORG_EMAIL_DOMAINS: ${KL_EMAIL_DOMAINS}
+  KL_PURGE_DELAY_SECONDS: "3600"
+  KL_PIPELINE_ISSUERS: https://token.actions.githubusercontent.com
+  KL_GOOGLE_API_BASES: https://www.googleapis.com
+  KL_JIRA_API_BASES: ""
+  KL_OKTA_API_BASES: ""
+  KL_CONFLUENCE_API_BASES: ""
+  KL_GCP_SECRET_PROJECTS: ${KL_GCP_PROJECT}
+  KL_GCP_SECRETS_BASE: https://secretmanager.googleapis.com
+  KL_GCP_METADATA_BASE: http://metadata.google.internal
+
+services:
+  caddy:
+    image: caddy:2.10.2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      KL_DOMAIN: ${KL_DOMAIN}
+      ACME_EMAIL: ${KL_ACME_EMAIL}
+    volumes:
+      - ./deploy/gcp/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+      - api
+      - keycloak
+      - mcp
+
+  postgres:
+    image: ${KL_REGISTRY}/postgres:${KL_IMAGE_TAG}
+    restart: unless-stopped
+
+  openfga:
+    restart: unless-stopped
+
+  openbao:
+    restart: unless-stopped
+    entrypoint: ["bao", "server", "-config=/openbao/config/prod.hcl"]
+    volumes:
+      - ./deploy/gcp/openbao/prod.hcl:/openbao/config/prod.hcl:ro
+
+  keycloak:
+    restart: unless-stopped
+    command: ["start", "--import-realm", "--proxy-headers=xforwarded", "--http-enabled=true"]
+    environment:
+      KC_HOSTNAME: https://auth.${KL_DOMAIN}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KL_KEYCLOAK_DB_PASSWORD}
+      JAVA_OPTS_KC_HEAP: "-Xms128m -Xmx768m"   # Java would size itself from the whole machine; on a small VM, that crowds the rest
+    volumes:
+      - ./deploy/gcp/keycloak:/opt/keycloak/data/import:ro   # the production realm, built by prepare.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  provision:
+    image: ${KL_REGISTRY}/api:${KL_IMAGE_TAG}
+    environment:
+      KL_SEED_KNOWLEDGE_DIR: ""   # no demo content
+      KL_DEV_IDENTITIES: "0"      # no dev person exists here: every dev link is removed, never made
+      KL_DEV_GITHUB_LOGIN: ""
+    volumes:
+      - ./deploy/gcp/authz:/app/authz:ro   # the model, and production seed tuples (prepare.py): the first admin, no demo people
+
+  api:
+    image: ${KL_REGISTRY}/api:${KL_IMAGE_TAG}
+    restart: unless-stopped
+    environment: *prod-env
+
+  worker:
+    image: ${KL_REGISTRY}/api:${KL_IMAGE_TAG}
+    restart: unless-stopped
+    environment: *prod-env
+
+  mcp:
+    image: ${KL_REGISTRY}/api:${KL_IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      <<: *prod-env
+      KL_MCP_PUBLIC_URL: https://mcp.${KL_DOMAIN}
+
+  web:
+    image: ${KL_REGISTRY}/web:${KL_IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      KL_WEB_URL: https://app.${KL_DOMAIN}
+      KL_OIDC_PUBLIC_ISSUER: https://auth.${KL_DOMAIN}/realms/acme
+
+volumes:
+  caddy-data:
+  caddy-config:

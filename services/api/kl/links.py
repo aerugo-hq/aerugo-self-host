@@ -18,6 +18,8 @@ Visibility, enforced by RLS and again by the map: an edge is readable only when 
 a mention only when its document is, and an entity only when one of its mentions is. An entity named only
 in documents you can't see doesn't exist for you.
 """
+import hashlib
+import json
 import os
 import re
 from collections import Counter
@@ -160,6 +162,103 @@ def scan_entities(conn) -> int:
             scanned += 1
 
 
+# ------------------------------------------------------------------ recorded references (slice K2, ADR 0010)
+# A document that writes down another document's address or one of its identifiers links to it: a recorded link, a
+# fact the source wrote, so each carries its provenance (the signal, its strength, and the text that made it).
+# Identifiers are only the unambiguous kinds a curated page declares among its aliases: a table or job name with an
+# underscore (ORDER_HIST), a ticket key (EDP-412), or a dotted name (edp.orders). Plain words never link, so a page
+# called "ledger" isn't linked from every page that says the word, and an identifier two pages both declare links to
+# neither: precision over completeness. Addresses link when they match a document's source address exactly.
+URL = re.compile(r"https?://[^\s<>\"'`)\]]+")
+IDENT_TOKEN = re.compile(r"(?<![\w./@-])([A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*[A-Za-z0-9]|[A-Za-z][A-Za-z0-9]{1,9}-[0-9]{1,6}"
+                         r"|[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*[a-z0-9])(?![\w-]|\.\w)")
+IDENTIFIER = re.compile(r"[a-z][a-z0-9]*_[a-z0-9_]*[a-z0-9]|[a-z][a-z0-9]{1,9}-[0-9]{1,6}|[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*[a-z0-9]")
+STRENGTH = {"url": 1.0, "identifier": 0.9}
+
+
+def normalize_url(url: str) -> str:
+    """An address as two documents would both write it: no fragment, no trailing punctuation or slash."""
+    return url.split("#", 1)[0].rstrip(".,;:!?").rstrip("/")
+
+
+def identifier_names(rows) -> dict[str, str]:
+    """{identifier: the document declaring it}, from curated pages' aliases; an identifier two pages declare is dropped."""
+    names, ambiguous = {}, set()
+    for row in rows:
+        for alias in row["aliases"] or []:
+            name = str(alias).lower()
+            if IDENTIFIER.fullmatch(name):
+                if names.get(name, row["external_key"]) != row["external_key"]:
+                    ambiguous.add(name)
+                names[name] = row["external_key"]
+    return {name: key for name, key in names.items() if name not in ambiguous}
+
+
+def references(text: str, names: dict[str, str], urls: dict[str, str], own: str) -> dict[tuple[str, str], str]:
+    """The documents a text points at: {(target's external key, signal): what the text wrote}."""
+    found: dict[tuple[str, str], str] = {}
+    for raw in URL.findall(text):
+        address = normalize_url(raw)
+        target = urls.get(address)
+        if target and target != own:
+            found.setdefault((target, "url"), address[:200])
+    for token in IDENT_TOKEN.findall(URL.sub(" ", text)):
+        target = names.get(token.lower())
+        if target and target != own and not FILE_LIKE.search(token):
+            found.setdefault((target, "identifier"), token[:200])
+    return found
+
+
+NAMES_SQL = """
+SELECT d.id, d.external_key, k.aliases
+FROM concepts k JOIN documents d ON d.org_id = k.org_id AND d.external_key = k.concept_key
+WHERE k.aliases IS NOT NULL
+"""
+DUE_REFERENCE_SCANS_SQL = """
+SELECT d.id, d.org_id, d.external_key, d.content_hash, d.title
+FROM documents d LEFT JOIN reference_scans s ON s.document_id = d.id
+WHERE s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash OR s.names_hash IS DISTINCT FROM %(names_hash)s
+ORDER BY d.id
+LIMIT 200
+"""
+
+
+def refresh_references(conn) -> int:
+    """Scan documents that are new or changed, or every document once a page declares a new identifier, for the
+    addresses and identifiers they write down. Returns documents scanned."""
+    declared = conn.execute(NAMES_SQL).fetchall()
+    names = identifier_names(declared)
+    ids = {row["external_key"]: row["id"] for row in declared}
+    urls = {}
+    for row in conn.execute("SELECT id, external_key, source_uri FROM documents WHERE source_uri IS NOT NULL").fetchall():
+        urls[normalize_url(row["source_uri"])] = row["external_key"]
+        ids[row["external_key"]] = row["id"]
+    names_hash = hashlib.sha256(json.dumps(sorted(names.items())).encode()).hexdigest()[:16]
+    scanned = 0
+    while True:
+        docs = conn.execute(DUE_REFERENCE_SCANS_SQL, {"names_hash": names_hash}).fetchall()
+        if not docs:
+            return scanned
+        for d in docs:
+            parts = [d["title"] or ""] + [c["body"] for c in conn.execute(
+                "SELECT body FROM chunks WHERE document_id = %s ORDER BY ordinal", (d["id"],)).fetchall()]
+            found = references("\n".join(parts), names, urls, d["external_key"])
+            with conn.transaction():
+                conn.execute("DELETE FROM reference_links WHERE source_id = %s", (d["id"],))
+                for (target, signal), evidence in sorted(found.items()):
+                    conn.execute(
+                        """INSERT INTO reference_links (org_id, source_id, target_id, signal, strength, evidence)
+                           VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                        (d["org_id"], d["id"], ids[target], signal, STRENGTH[signal], evidence))
+                conn.execute(
+                    """INSERT INTO reference_scans (document_id, org_id, content_hash, names_hash) VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (document_id) DO UPDATE
+                       SET content_hash = EXCLUDED.content_hash, names_hash = EXCLUDED.names_hash, scanned_at = now()""",
+                    (d["id"], d["org_id"], d["content_hash"], names_hash))
+            scanned += 1
+
+
 def refresh(conn) -> dict:
-    """Both passes, after the worker has embedded what it could. Cheap when nothing changed."""
-    return {"entities_scanned": scan_entities(conn), "semantic_edges": refresh_semantic(conn)}
+    """Every pass, after the worker has embedded what it could. Cheap when nothing changed."""
+    return {"entities_scanned": scan_entities(conn), "semantic_edges": refresh_semantic(conn),
+            "references_scanned": refresh_references(conn)}  # slice K2
