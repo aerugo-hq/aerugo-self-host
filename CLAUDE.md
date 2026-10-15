@@ -103,7 +103,7 @@ decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 - **Administration:** teams, members, models and budgets, service accounts, marks for what Terraform manages, alerts, and observability (Grafana, Jaeger, Prometheus).
 - **The web app:** team scopes with documentation-style spaces and an in-place reader; Datavine's design system; light, dark, and system themes.
 - **The Terraform provider:** teams, members, models, budgets, and service accounts.
-- **Tests:** the smoke suite, 20 browser tests, the golden set, and the evaluation-scenario runner (`kl/evals.py`) with its opt-in scenario loader.
+- **Tests:** the smoke suite, 21 browser tests, the golden set, and the evaluation-scenario runner (`kl/evals.py`) with its opt-in scenario loader.
 
 ## What's next, in order
 
@@ -282,10 +282,22 @@ fake Confluence (`kl/fake_llm.py`) answers the client's every call at Confluence
 space's name and tree, a label filter, an export retired, and three refusals. The gallery's form, editable spaces,
 `kind = "confluence"` in the provider (spaces, labels, page_trees; an acceptance test) and its onboarding module, and
 `docs/connectors/confluence.md` (the account, and exactly the read-only access it needs). S1 is done.
+Step V (everything built, proven in the stack): `make smoke` (123 passed; the optional checks skip, as in CI),
+`make eval-scenario`, `make e2e` (21 browser tests; the gallery's is new), the provider's build, vet, and acceptance
+tests (`TestAccConnection`, `TestAccConnectionConfluence`, and the rest), and `make kind-up` then `make kind-open` on
+a kind cluster, signed in. What failed: `retire_exported` looked for exported pages as `source_kind = 'confluence'`,
+but imports store `'import'`, so a page read live stayed indexed twice; T2's Drive fixtures were title-only Docs,
+which the extractor rightly refuses; and the imports check's cleanup is a job, so the conversations check after it
+cited a page that went mid-conversation (`earlier_turns` then rightly dropped that answer). The first baseline is
+recorded (`kl/evals_baseline.json`: Recall@10 100%, MRR 0.92 over 12 cases), after smoke, as CI orders them. Locally,
+a GitHub App in `.secrets/` turns smoke's optional checks on: they connect your own sandbox org, and the curator check
+opens and merges a real pull request in its `payments-knowledge`, adding a curated page each run, which in time
+crowds the seed's runbook out of Ask's sources; `KL_OTEL_ENDPOINT` left in `.env` by `make obs` fails the trace check
+unless the collector runs. To prove an item as CI does, run with `.env.example` and no `.secrets/` (BUILD_PLAN's traps).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
-loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: first its
-step V (run everything in the stack, fix what fails, record the evaluation baseline), then S2 (Google Workspace as a
-directory, and Drive's group shares) to S8; then Q1 (its golden-set part) to Q8; E1 to E3; A1 to A4; G1 to G3.
+loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
+done; next S2 (Google Workspace as a directory, and Drive's group shares) to S8; then Q1 (its golden-set part) to Q8;
+E1 to E3; A1 to A4; G1 to G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;

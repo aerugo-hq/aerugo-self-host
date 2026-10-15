@@ -28,11 +28,11 @@ baseline is already in place (only its golden-set part is left), so each source 
 ## V. Prove what's built
 
 - [ ] A pull request runs the smoke workflow green on GitHub
-- [ ] `make eval-scenario`: no permission leak; then `make eval-baseline` records the scorecard (Q1)
-- [ ] `make web` and `make e2e` pass: the Documents shell, the gallery, the reader
-- [ ] The provider: `go build ./...`, `go vet ./...`, and the acceptance tests (`TestAccConnection`, against the fake Jira)
-- [ ] `make kind-up` brings the stack up on kind, and `make kind-open` signs in
-- [ ] Whatever failed is fixed, and recorded
+- [x] `make eval-scenario`: no permission leak; then `make eval-baseline` records the scorecard (Q1)
+- [x] `make web` and `make e2e` pass: the Documents shell, the gallery, the reader
+- [x] The provider: `go build ./...`, `go vet ./...`, and the acceptance tests (`TestAccConnection`, against the fake Jira)
+- [x] `make kind-up` brings the stack up on kind, and `make kind-open` signs in
+- [x] Whatever failed is fixed, and recorded
 
 ## 1. Sources: what it learns from
 
