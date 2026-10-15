@@ -394,6 +394,8 @@ def sync_directory(conn, connection: dict, client) -> dict:
     written: a listing cut short raises, so the sync fails with nothing changed rather than revoking everyone."""
     cid, org_id = connection["id"], connection["org_id"]
     people = client.people()
+    if not people:  # no directory lists nobody: an empty listing is a broken one, never everyone leaving
+        raise ListingCutShort("the directory listed nobody")
     groups, ids, too_big = client.groups({p["email"] for p in people if p["active"]}) if client.feeds else ({}, {}, [])
     listed = {p["email"] for p in people}
     with conn.transaction():

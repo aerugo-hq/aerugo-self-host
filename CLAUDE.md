@@ -365,7 +365,8 @@ credentials grant with a client assertion signed PS256, naming the certificate b
 `iss` and `sub` the app, a fresh `jti`, five minutes long. `entra_certificate` turns a PEM bundle into the key, the
 certificate, and its thumbprint, refusing a key that isn't the certificate's (RSA only; an encrypted key isn't
 supported). Tenants and apps are named by id (`GUID`). People are users, then Graph's deleted items; a disabled or
-deleted account has left; Graph not saying whether an account is enabled fails the sync. Groups are each group's
+deleted account has left; Graph not saying whether an account is enabled fails the sync, and in every directory
+a listing of nobody does too, so an empty answer is never read as everyone leaving. Groups are each group's
 transitive members (a cast to users, which Graph only serves with `ConsistencyLevel: eventual` and `$count`), only
 enabled users, keyed by the group's email or, for a security group without one, its id; migration 0041 adds
 `directory_groups.group_id`, set for Entra (Microsoft 365 shares by id, S5). Pages follow `@odata.nextLink` only on

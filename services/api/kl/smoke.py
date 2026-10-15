@@ -3433,7 +3433,8 @@ def an_entra_directory_revokes_leavers_and_lists_groups():
         assert matched("alice") and matched("bob"), "people still enabled lost their match"
         assert {m for _, _, m in held_groups()} == {"bob@acme.test"}, f"a leaver still counts in a group: {held_groups()}"
 
-        httpx.post(f"{FAKE_MICROSOFT}/setup", json={"users": [], "groups": groups, "next_elsewhere": True}, timeout=10).raise_for_status()
+        still = [user(u, enabled=(u != "carol")) for u in people if u != "dave"]  # more than a page, so Graph names a next one
+        httpx.post(f"{FAKE_MICROSOFT}/setup", json={"users": still, "groups": groups, "next_elsewhere": True}, timeout=10).raise_for_status()
         with psycopg.connect(OWNER_DB) as conn:
             cid = str(conn.execute("SELECT id FROM kl.connections WHERE name = %s", (name,)).fetchone()[0])
             conn.execute("UPDATE kl.jobs SET last_error = NULL WHERE payload->>'connection_id' = %s", (cid,))
