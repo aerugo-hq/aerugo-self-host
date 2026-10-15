@@ -27,7 +27,7 @@ baseline is already in place (only its golden-set part is left), so each source 
 
 ## V. Prove what's built
 
-- [ ] A pull request runs the smoke workflow green on GitHub
+- [x] A pull request runs the smoke workflow green on GitHub
 - [x] `make eval-scenario`: no permission leak; then `make eval-baseline` records the scorecard (Q1)
 - [x] `make web` and `make e2e` pass: the Documents shell, the gallery, the reader
 - [x] The provider: `go build ./...`, `go vet ./...`, and the acceptance tests (`TestAccConnection`, against the fake Jira)
