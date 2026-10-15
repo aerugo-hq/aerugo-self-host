@@ -294,6 +294,10 @@ a GitHub App in `.secrets/` turns smoke's optional checks on: they connect your 
 opens and merges a real pull request in its `payments-knowledge`, adding a curated page each run, which in time
 crowds the seed's runbook out of Ask's sources; `KL_OTEL_ENDPOINT` left in `.env` by `make obs` fails the trace check
 unless the collector runs. To prove an item as CI does, run with `.env.example` and no `.secrets/` (BUILD_PLAN's traps).
+P3 (local smoke and your GitHub): the curator check, the only one that writes to GitHub, now runs only with
+`KL_SMOKE_GITHUB_WRITES=1`; and the GitHub checks end by removing their connection
+(`github_checks_leave_the_seed_alone`), waiting until what it brought in is gone, so the checks after them see the
+seed alone, whatever curated pages your sandbox already holds.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done; next S2 (Google Workspace as a directory, and Drive's group shares) to S8; then Q1 (its golden-set part) to Q8;
