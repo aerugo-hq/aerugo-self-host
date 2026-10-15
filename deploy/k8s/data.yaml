@@ -199,9 +199,12 @@ spec:
           image: openbao/openbao:2.6.2
           command: ["/bin/sh", "/openbao/start/start.sh"]   # the dev server that keeps its data across restarts (slice I3a)
           env:
-            - name: KL_DEV_TOKEN
+            - name: KL_DEV_TOKEN   # the operator's (root); no service holds it
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: openbao-token}
+            - name: KL_SERVICES_TOKEN   # the services' (G1): services.hcl only
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
           securityContext:   # as in Compose: dev only (it owns its volume, and locks its memory)
             runAsUser: 0
             runAsGroup: 0
@@ -211,7 +214,7 @@ spec:
             - containerPort: 8200
           readinessProbe:   # unsealed, with the services' token working and Transit mounted
             exec:
-              command: ["sh", "-c", "BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$KL_DEV_TOKEN bao secrets list | grep -q '^transit/'"]
+              command: ["sh", "-c", "BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$KL_SERVICES_TOKEN bao secrets list | grep -q '^transit/'"]
             periodSeconds: 2
           resources:
             requests: {cpu: 50m, memory: 64Mi}
@@ -220,6 +223,9 @@ spec:
             - name: config
               mountPath: /openbao/config/dev.hcl
               subPath: dev.hcl
+            - name: config
+              mountPath: /openbao/config/services.hcl
+              subPath: services.hcl
             - name: config
               mountPath: /openbao/start/start.sh
               subPath: start.sh

@@ -3,8 +3,9 @@
 # holds everything in memory, so a restart lost every model key, and with per-team encryption keys it would
 # make every encrypted record unreadable for good. This server stores to a volume, initializes once, and
 # unseals itself on every start with a key kept on that same volume: fine for a laptop, never for
-# production, where deployment (slice E) unseals properly. The services keep the fixed dev token they use.
+# production, where deployment (slice E) unseals properly. The services use their own scoped token (G1).
 set -eu
+[ "$KL_SERVICES_TOKEN" != "$KL_DEV_TOKEN" ] || { echo "openbao: the services' token can't be the root one" >&2; exit 1; }
 DATA=/openbao/data
 INIT="$DATA/init.txt"
 export BAO_ADDR=http://127.0.0.1:8200
@@ -23,8 +24,16 @@ bao operator unseal "$(sed -n 's/^Unseal Key 1: //p' "$INIT")" >/dev/null
 BAO_TOKEN="$(sed -n 's/^Initial Root Token: //p' "$INIT")"
 export BAO_TOKEN
 
-# The token every service is configured with, created once and never expiring.
+# The operator's dev token (root), for poking at OpenBao by hand. No service holds it.
 bao token lookup "$KL_DEV_TOKEN" >/dev/null 2>&1 || bao token create -id="$KL_DEV_TOKEN" -policy=root -orphan >/dev/null
+# The services' token (G1): exactly their paths (services.hcl), never root. A token that isn't root expires with the
+# token mount's default (32 days) and nothing renews it, so the mount's ceiling rises and this one lasts ten years.
+# Made before Transit is mounted, so the healthcheck (the services' token listing Transit) means it works.
+# ponytail: a static scoped token; short-lived ones through an auth method (Kubernetes, GCP) once the platform has one.
+bao policy write aerugo-services /openbao/config/services.hcl >/dev/null
+bao auth tune -max-lease-ttl=87600h token/ >/dev/null
+bao token lookup "$KL_SERVICES_TOKEN" >/dev/null 2>&1 || \
+  bao token create -id="$KL_SERVICES_TOKEN" -policy=aerugo-services -orphan -ttl=87600h >/dev/null
 bao secrets list | grep -q '^secret/' || bao secrets enable -path=secret -version=2 kv >/dev/null
 bao secrets list | grep -q '^transit/' || bao secrets enable transit >/dev/null
 echo "openbao: unsealed, storage on the kl-openbao volume"

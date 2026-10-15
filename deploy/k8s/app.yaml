@@ -73,7 +73,7 @@ spec:
               value: http://openbao:8200
             - name: KL_OPENBAO_TOKEN
               valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
             - name: KL_OWNER_DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: owner-database-url}
@@ -147,7 +147,7 @@ spec:
                 secretKeyRef: {name: aerugo-dev, key: database-url}
             - name: KL_OPENBAO_TOKEN
               valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
           ports:
             - containerPort: 8000
           readinessProbe:
@@ -203,7 +203,7 @@ spec:
                 secretKeyRef: {name: aerugo-dev, key: ingest-database-url}
             - name: KL_OPENBAO_TOKEN
               valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
             - name: KL_RESYNC_MINUTES
               value: "10"
             - name: KL_SCHEDULER_SECONDS
@@ -267,7 +267,7 @@ spec:
                 secretKeyRef: {name: aerugo-dev, key: database-url}
             - name: KL_OPENBAO_TOKEN
               valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
             - name: KL_MCP_AUDIENCE   # only tokens issued for the MCP server are accepted here
               value: kl-mcp
             - name: KL_MCP_PUBLIC_URL

@@ -21,7 +21,7 @@ Keycloak takes 30–60 seconds on first boot; the smoke suite waits for it. Requ
 | MCP server | http://localhost:8090/mcp | Streamable HTTP; tools `search` and `ask`; accepts only `kl-mcp` tokens |
 | Keycloak | http://localhost:8081 (admin / `admin-dev-only`) | Dev IdP, standing in for Okta, Entra, or Google |
 | OpenFGA | not published (`openfga:8080` inside the network) | Relationship-based authorization |
-| OpenBao | http://localhost:8200 (token `dev-root-token`) | Secrets backend, dev mode |
+| OpenBao | http://localhost:8200 (the operator's token `dev-root-token`; the services hold `dev-services-token`, scoped) | Secrets backend, dev mode |
 | Postgres | `localhost:55432`, db `kl` | pgvector, RLS, full-text search |
 
 ## What the smoke suite proves

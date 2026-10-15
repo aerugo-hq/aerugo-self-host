@@ -49,6 +49,8 @@ services:
   openbao:
     restart: unless-stopped
     entrypoint: ["bao", "server", "-config=/openbao/config/prod.hcl"]
+    environment:
+      KL_DEV_TOKEN: ""   # no dev root token here: the root token lives only in Secret Manager (aerugo-openbao-init)
     volumes:
       - ./deploy/gcp/openbao/prod.hcl:/openbao/config/prod.hcl:ro
 
