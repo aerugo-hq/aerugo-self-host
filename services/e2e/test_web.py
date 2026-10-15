@@ -85,6 +85,30 @@ def test_the_gallery_offers_every_source_and_opens_its_form(page):
     expect(form.get_by_label("API token")).to_have_attribute("type", "password")  # a token is never shown
 
 
+def open_connector(page, name: str):
+    page.goto(f"{WEB}/#/admin/sources")
+    panel(page, "Connections").get_by_role("button", name="Connect a source").click()
+    gallery = page.get_by_role("list", name="Sources you can connect")
+    gallery.get_by_role("listitem").filter(has_text=name).get_by_role("button", name="Connect").click()
+
+
+def test_an_org_admin_connects_google_workspace_as_a_directory(page):
+    sign_in(page, "olivia")
+    open_connector(page, "Directory")
+    form = page.get_by_role("form", name="Connect a directory")
+    form.get_by_label("Directory").select_option("google")
+    expect(form.get_by_label("Admin to act as")).to_have_attribute("type", "email")
+    expect(form.get_by_label("Service account key")).to_be_visible()
+    expect(form.get_by_role("button", name="Connect Google Workspace")).to_be_visible()
+
+
+def test_a_team_admin_is_told_a_directory_is_an_org_admins(page):
+    sign_in(page, "alice")  # a directory decides who has left company-wide, so it isn't a team admin's to connect
+    open_connector(page, "Directory")
+    expect(page.get_by_text("Only an org admin connects a directory")).to_be_visible()
+    expect(page.get_by_role("form", name="Connect a directory")).to_have_count(0)
+
+
 def test_olivia_sets_up_and_removes_google_sign_in(page):
     sign_in(page, "olivia")
     page.goto(f"{WEB}/#/compliance/platform")

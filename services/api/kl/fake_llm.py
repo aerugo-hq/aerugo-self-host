@@ -80,6 +80,17 @@ FOLDER_TYPE = "application/vnd.google-apps.folder"
 # deprovisioned out unless they're searched for by status, so a directory has to ask for leavers to find them.
 OKTA: dict = {"users": []}
 OKTA_TOKEN = "smoke-okta-token"
+# A fake Google Workspace Directory API (S2): users, recently deleted users, groups, and their members, which smoke sets
+# through POST /google/admin/setup. Its token comes from the service-account token endpoint below, only for the three
+# read-only directory scopes and an admin it was told to allow (domain-wide delegation's `sub`). Every token request is
+# kept, so smoke can see what was asked for and where it went (GET /google/admin/requests). Pages are small on purpose.
+ADMIN: dict = {"users": [], "deleted": [], "groups": {}, "subjects": [], "broken": False}
+ADMIN_TOKEN = "fake-admin-token"
+ADMIN_SCOPES = ["https://www.googleapis.com/auth/admin.directory.user.readonly",
+                "https://www.googleapis.com/auth/admin.directory.group.readonly",
+                "https://www.googleapis.com/auth/admin.directory.group.member.readonly"]
+TOKEN_REQUESTS: list = []
+ADMIN_PAGE = 2
 # A fake GCP (ADR 0011): the metadata server's token, for the runner's own workload identity, and Secret Manager's
 # access endpoint, holding the secrets smoke sets through POST /gcp/secrets as JSON objects.
 GCP_SECRETS: dict = {}
@@ -96,16 +107,32 @@ def new_service_account(email: str) -> dict:
 
 
 def service_account_token(assertion: str) -> tuple[int, dict]:
-    """Google's token endpoint for a service account: a JWT the account signed, for read-only Drive, aimed at this endpoint."""
+    """Google's token endpoint for a service account: a JWT the account signed, aimed at this endpoint, for read-only
+    Drive, or (S2) for exactly the three read-only directory scopes acting as an admin delegation allows."""
     import jwt as pyjwt
     try:
         iss = pyjwt.decode(assertion, options={"verify_signature": False}).get("iss")
         claims = pyjwt.decode(assertion, SA_KEYS[iss], algorithms=["RS256"], audience=f"{GOOGLE}/token")
     except Exception:  # noqa: BLE001 - any bad assertion is a refused grant
         return 400, {"error": "invalid_grant"}
-    if claims.get("scope") != "https://www.googleapis.com/auth/drive.readonly":
-        return 400, {"error": "invalid_scope"}
-    return 200, {"access_token": DRIVE_TOKEN, "token_type": "Bearer", "expires_in": 3600}
+    TOKEN_REQUESTS.append({"iss": claims.get("iss"), "scope": claims.get("scope"), "sub": claims.get("sub"), "aud": claims.get("aud")})
+    if claims.get("scope") == "https://www.googleapis.com/auth/drive.readonly" and not claims.get("sub"):
+        return 200, {"access_token": DRIVE_TOKEN, "token_type": "Bearer", "expires_in": 3600}
+    if sorted(str(claims.get("scope") or "").split(" ")) == sorted(ADMIN_SCOPES):
+        if claims.get("sub") not in ADMIN["subjects"]:
+            return 401, {"error": "unauthorized_client", "error_description": "Client is unauthorized to retrieve access tokens"}
+        return 200, {"access_token": ADMIN_TOKEN, "token_type": "Bearer", "expires_in": 3600}
+    return 400, {"error": "invalid_scope"}
+
+
+def admin_members(group: str, derived: bool, seen: frozenset = frozenset()) -> list[dict]:
+    """A group's members as the Directory API lists them; with derived membership, nested groups' members too."""
+    out = []
+    for m in ADMIN["groups"].get(group, []):
+        out.append(m)
+        if derived and m.get("type") == "GROUP" and m["email"] not in seen:
+            out += admin_members(m["email"], True, seen | {group})
+    return out
 
 
 def google_id_token(client_id: str, who: dict) -> str:
@@ -175,6 +202,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, ci_jwks())
         if self.path.startswith("/google/drive/v3/"):
             return self._drive(urlparse(self.path))
+        if self.path == "/google/admin/requests":
+            return self._json(200, TOKEN_REQUESTS)
+        if self.path.startswith("/google/admin/directory/v1/"):
+            return self._admin(urlparse(self.path))
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
             return self._json(200, ci_jwks())
         site = self.path.split("/")[1]
@@ -283,6 +314,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"results": [{"title": t} for t in c.get("attachments", [])], "_links": {}})
         return self._json(404, {"message": "Not found"})
 
+    def _admin(self, url):
+        """The Directory API's users, groups, and members, as Google pages them (pageToken, never a URL)."""
+        if self.headers.get("Authorization") != f"Bearer {ADMIN_TOKEN}":
+            return self._json(401, {"error": {"code": 401, "message": "Login Required", "status": "UNAUTHENTICATED"}})
+        if ADMIN.get("broken"):  # a listing that can't finish: the client must fail, not read it as everyone leaving
+            return self._json(503, {"error": {"code": 503, "message": "Backend Error"}})
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        rest = url.path[len("/google/admin/directory/v1/"):]
+        page = lambda items, key: self._json(200, {key: items[int(q.get("pageToken") or 0):int(q.get("pageToken") or 0) + ADMIN_PAGE],
+                                                   **({"nextPageToken": str(int(q.get("pageToken") or 0) + ADMIN_PAGE)}
+                                                      if int(q.get("pageToken") or 0) + ADMIN_PAGE < len(items) else {})})
+        if rest == "users" and q.get("customer") == "my_customer":
+            return page(ADMIN["deleted"] if q.get("showDeleted") == "true" else ADMIN["users"], "users")
+        if rest == "groups" and q.get("customer") == "my_customer":
+            return page([{"email": g} for g in ADMIN["groups"]], "groups")
+        parts = rest.split("/")
+        if len(parts) == 3 and parts[0] == "groups" and parts[2] == "members":
+            from urllib.parse import unquote
+            group = unquote(parts[1])
+            if group not in ADMIN["groups"]:
+                return self._json(404, {"error": {"code": 404, "message": "Resource Not Found: groupKey"}})
+            return page(admin_members(group, q.get("includeDerivedMembership") == "true"), "members")
+        self._json(404, {"error": {"code": 404, "message": "not found"}})
+
     def _jira(self, url, site: dict):
         import base64
         if self.headers.get("Authorization") != "Basic " + base64.b64encode(JIRA_AUTH.encode()).decode():
@@ -360,6 +415,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if path == "/gcp/secrets":  # smoke sets the fake Secret Manager's secrets, each a JSON object
             GCP_SECRETS.update(self._body()["secrets"])
+            return self._json(200, {})
+        if path == "/google/admin/setup":  # smoke sets the fake Workspace directory, and which admins delegation allows
+            ADMIN.clear()
+            ADMIN.update({"users": [], "deleted": [], "groups": {}, "subjects": [], "broken": False, **self._body()})
+            TOKEN_REQUESTS.clear()
             return self._json(200, {})
         if path == "/okta/setup":  # smoke sets the fake Okta's users
             OKTA["users"] = self._body()["users"]
