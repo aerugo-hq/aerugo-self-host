@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import config, confluence, directory, gcp_secrets, gdrive, jira
+from . import config, confluence, directory, gcp_secrets, gdrive, jira, slack
 from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
@@ -288,6 +288,60 @@ def create_confluence_connection(ws: str, body: ConfluenceConnectionIn, caller: 
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
+class SlackConnectionIn(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+    bot_token: str | None = Field(default=None, min_length=10, max_length=300, repr=False)  # an internal app's xoxb- token
+    credential_ref: str | None = Field(default=None, max_length=300)
+    channels: list[str] | None = Field(default=None, max_length=500)  # channel ids; None: every channel the bot is in
+    company_workspace: bool = False  # a public channel reaches the whole org, on the company's own workspace only
+    history_days: int | None = Field(default=None, ge=1, le=3650)  # how far back it reads; a year unless set
+    api_base: str = slack.SLACK_API
+    every_minutes: int | None = Field(default=None, ge=5, le=10080)
+
+
+@router.post("/connections/slack", status_code=201)
+def create_slack_connection(ws: str, body: SlackConnectionIn, caller: Caller = Depends(authenticate),
+                            managed: tuple | None = Depends(managed_header)):
+    """Connect a Slack workspace to a team (S4, ADR 0011): an internal Slack app's bot token, handed over once or
+    referenced. The channels the bot is in are indexed, each message readable by the channel's own members (the whole
+    org for a public channel only on a workspace its admin confirms is the company's own); a channel shared with
+    another organization reaches only this workspace's members. Its admins only."""
+    require_workspace_admin(caller, ws)
+    if not slack.allowed_base(body.api_base):
+        raise HTTPException(422, "that Slack API address isn't allowed here")
+    if bool(body.bot_token) == bool(body.credential_ref):
+        raise HTTPException(422, "give the bot token, or a credential reference: one, not both")
+    if body.bot_token and not body.bot_token.startswith("xoxb-"):
+        raise HTTPException(422, "that isn't a bot token (xoxb-...): a user token would read as a person")
+    if body.channels is not None and not all(slack.CHANNEL.fullmatch(c) for c in body.channels):
+        raise HTTPException(422, "channels are named by their ids, like C0123ABCD")
+    if body.credential_ref and not team_secret(ws, body.credential_ref):
+        raise HTTPException(422, ref_rule(ws))
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
+        if not ws_row:
+            raise HTTPException(404, "workspace not found")
+        if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
+            raise HTTPException(409, "a connection with that name already exists in this workspace")
+        cid = uuid.uuid4()
+        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", {"bot_token": body.bot_token})
+        row = conn.execute(
+            """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
+               VALUES (%s, %s, %s, 'slack', %s, %s, %s, %s) RETURNING id, name, kind, status""",
+            (cid, org_id, ws_row["id"], body.name,
+             Jsonb({"api_base": body.api_base.rstrip("/"), "channels": body.channels, "company_workspace": body.company_workspace,
+                    "history_days": body.history_days, "every_minutes": body.every_minutes}), ref, caller.username),
+        ).fetchone()
+        note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
+                     (org_id, Jsonb({"connection_id": str(row["id"])})))
+        audit(conn, org_id, caller.username, "connection.create", [ws],
+              {"name": body.name, "kind": "slack", "channels": body.channels, "company_workspace": body.company_workspace,
+               "history_days": body.history_days, "credential": "reference" if body.credential_ref else "stored"})
+    return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
+
+
 @router.post("/connections/directory", status_code=201)
 def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Caller = Depends(authenticate),
                                 managed: tuple | None = Depends(managed_header)):
@@ -406,7 +460,8 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
 # What a connection was declared with, as Terraform reads it back. A credential reference is returned only when it's
 # one the team gave (its own secret); a secret Aerugo stored itself is never named.
 SETTINGS = ("api_base", "projects", "company_site", "every_minutes", "domain", "drives", "repositories", "provider",
-            "spaces", "labels", "page_trees", "admin_email", "tenant_id", "client_id")
+            "spaces", "labels", "page_trees", "admin_email", "tenant_id", "client_id", "channels", "company_workspace",
+            "history_days")
 
 
 def settings_of(ws: str, cfg: dict, credential_ref: str | None) -> dict:
@@ -507,6 +562,9 @@ class ConnectionPatch(BaseModel):
     spaces: list[str] | None = Field(default=None, max_length=500)    # Confluence: the spaces it brings in
     labels: list[str] | None = Field(default=None, max_length=50)     # Confluence: only pages with one of these
     page_trees: list[str] | None = Field(default=None, max_length=100)  # Confluence: only these trees
+    channels: list[str] | None = Field(default=None, max_length=500)  # Slack: the channels it brings in, by id
+    history_days: int | None = Field(default=None, ge=1, le=3650)     # Slack: how far back it reads
+    bot_token: str | None = Field(default=None, min_length=10, max_length=300, repr=False)  # Slack: a rotation
     every_minutes: int | None = Field(default=None, ge=5, le=10080)   # how often it syncs (ADR 0011)
     api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # Jira, Okta: a rotation
     email: str | None = Field(default=None, min_length=3, max_length=254)  # Jira: the account, with a new token
@@ -549,6 +607,12 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             raise HTTPException(422, "only a Google connection has drives and a refresh token")
         if body.projects is not None and (c["kind"] != "jira" or not all(jira.PROJECT.fullmatch(p) for p in body.projects)):
             raise HTTPException(422, "only a Jira connection has projects, keyed like EDP")
+        if (body.channels is not None or body.history_days is not None or body.bot_token) and c["kind"] != "slack":
+            raise HTTPException(422, "only a Slack connection has channels, a history window, and a bot token")
+        if body.channels is not None and not all(slack.CHANNEL.fullmatch(ch) for ch in body.channels):
+            raise HTTPException(422, "channels are named by their ids, like C0123ABCD")
+        if body.bot_token and not body.bot_token.startswith("xoxb-"):
+            raise HTTPException(422, "that isn't a bot token (xoxb-...): a user token would read as a person")
         scope = {"spaces": body.spaces, "labels": body.labels, "page_trees": body.page_trees}
         if any(v is not None for v in scope.values()):
             if c["kind"] != "confluence":
@@ -560,6 +624,10 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if body.projects is not None:
             cfg["projects"] = body.projects
             changed.append("projects")
+        for field in ("channels", "history_days"):
+            if getattr(body, field) is not None:
+                cfg[field] = getattr(body, field)
+                changed.append(field)
         for field, value in scope.items():
             if value is not None:
                 cfg[field] = value
@@ -581,10 +649,12 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if rotating:  # a new version of its secret; the connection reads the new one from now on
             ref = vault.put(f"kl/connections/{c['id']}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token})
             changed.append("credentials")
-        if body.api_token or body.email or body.service_account_key or body.certificate:  # a new secret for one Aerugo stored
+        if body.api_token or body.email or body.service_account_key or body.certificate or body.bot_token:  # a new secret for one Aerugo stored
             if not stored_secret(c["id"], ref):
                 raise HTTPException(422, "this connection reads a secret the team keeps (or GitHub's app): rotate it there")
-            if body.certificate:
+            if body.bot_token:
+                secret = {"bot_token": body.bot_token}
+            elif body.certificate:
                 if not (c["kind"] == "directory" and (c["config"] or {}).get("provider") == "entra"):
                     raise HTTPException(422, "only an Entra directory has a certificate")
                 try:

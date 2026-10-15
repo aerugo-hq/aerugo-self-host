@@ -358,7 +358,7 @@ export const CONNECTORS = [
   { id: "lineage", name: "Data lineage", what: "OpenLineage events from Airflow, dbt, Dataform, or Spark: what feeds what.", ready: true, action: "Set up" },
   { id: "google", name: "Google Drive", what: "Shared drives a service account is a member of, and folders shared with it.", ready: true, action: "Connect" },
   { id: "confluence", name: "Confluence Cloud", what: "Spaces, their pages and blog posts, with Confluence's own permissions: each space's readers, narrowed by every restriction down the tree.", ready: true, action: "Connect" },
-  { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members.", ready: false },
+  { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members; a thread is one document.", ready: true, action: "Connect" },
   { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, with each file's sharing.", ready: false },
   { id: "notion", name: "Notion", what: "Pages shared with an internal integration.", ready: false },
   { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta, Google Workspace, or Microsoft Entra): a leaver's matched access goes at once. Google's and Entra's groups also reach the files shared with them.", ready: true, action: "Connect" },
@@ -369,10 +369,12 @@ const blankConfluence = { name: "confluence", api_base: "", email: "", api_token
                           company_site: false, every_minutes: 60, credential_ref: "" };
 const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
 const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
+const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "" };
 const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", tenant_id: "", client_id: "",
                          certificate: "", every_minutes: 60, credential_ref: "" };
 // The scope list each kind has, to edit in place: its field, its label, and an example.
 const SCOPES = { jira: ["projects", "Projects", "EDP, PAY"], confluence: ["spaces", "Spaces", "PAY, ENG"], google: ["drives", "Shared drives", "Drive ids"],
+                 slack: ["channels", "Channels", "C0123ABCD"],
                  github: ["repositories", "Repositories", "acme/payments-api"] };
 const managedTitle = (m) => `Managed by ${toolName(m.by)}${m.workspace ? `, ${m.workspace}` : ""}: change it there. A change made here would be undone on its next apply.`;
 const every = (m) => (m ? (m % 1440 === 0 ? `Every ${m / 1440 === 1 ? "day" : `${m / 1440} days`}` : m % 60 === 0 ? `Every ${m / 60 === 1 ? "hour" : `${m / 60} hours`}` : `Every ${m} min`) : "Default");
@@ -393,6 +395,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [editing, setEditing] = useState(null); // the connection being edited, in its own row
   const [edit, setEdit] = useState(null); // its form, from what it was declared with: cadence and scope
   const [cf, setCf] = useState(blankConfluence); // the Confluence form (index 14)
+  const [sl, setSl] = useState(blankSlack); // the Slack form (S4)
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [ws]);
   const say = (name, tone, text) => setNote((n) => ({ ...n, [name]: [tone, text] }));
@@ -464,6 +467,26 @@ function Connections({ ws, teams, orgAdmin }) {
       setChosen(null);
       setGallery(false);
       setForm(blankJira);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function connectSlack(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = sl.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/slack`, { method: "POST", body: {
+        name: sl.name.trim(), bot_token: byRef ? null : sl.bot_token.trim(), credential_ref: byRef || null,
+        channels: list(sl.channels, true), company_workspace: sl.company_workspace, history_days: Number(sl.history_days),
+        every_minutes: Number(sl.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setSl(blankSlack);
       load();
     } catch (e) {
       setError(e.message);
@@ -595,6 +618,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const setD = (key) => (e) => setDrive({ ...drive, [key]: e.target.value });
   const setO = (key) => (e) => setDir({ ...dir, [key]: e.target.value });
   const setC = (key) => (e) => setCf({ ...cf, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
+  const setS = (key) => (e) => setSl({ ...sl, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
   const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
   const steps = {
@@ -631,6 +655,23 @@ function Connections({ ws, teams, orgAdmin }) {
           "A secret with email and api_token, under this team's own connections path, or a GCP Secret Manager secret named for this team. Aerugo reads it; it never stores the token itself.")),
       h("div", { className: "actions connector-wide" },
         h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Confluence"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    slack: () => h("form", { className: "panel-body connector-form", onSubmit: connectSlack, "aria-label": "Connect Slack" },
+      h("p", { className: "connector-lede" }, "In Slack, create an app in your own workspace (don't distribute it), give its bot the read-only scopes channels:read, groups:read, channels:history, groups:history, users:read, and users:read.email, install it, and invite the bot to the channels to index. Each message keeps its channel's own readers."),
+      field("Name", h("input", { className: "input", value: sl.name, onChange: setS("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      sl.credential_ref ? null : field("Bot token", h("input", { className: "input mono", type: "password", value: sl.bot_token, onChange: setS("bot_token"), required: true, autoComplete: "off", placeholder: "xoxb-..." }),
+        "The bot's token, never a person's. Stored in OpenBao and never shown again."),
+      field("Channels", h("input", { className: "input mono", value: sl.channels, onChange: setS("channels"), placeholder: "C0123ABCD" }), "Leave empty for every channel the bot is in."),
+      field("History", h("input", { className: "input", type: "number", min: 1, max: 3650, value: sl.history_days, onChange: setS("history_days"), required: true }),
+        "Days back it reads. Older messages leave the index."),
+      field("Sync", h("select", { className: "select", value: sl.every_minutes, onChange: setS("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: sl.company_workspace, onChange: setS("company_workspace") }),
+        h("span", null, h("b", null, "This Slack workspace is our company's own. "), "Then a public channel is readable by everyone in the org. Leave it off otherwise: each channel stays with its members. A channel shared with another organization always stays with this workspace's members.")),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a token the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: sl.credential_ref, onChange: setS("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/slack` }),
+          "A secret with bot_token, under this team's own connections path.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Slack"),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
     google: () => h("form", { className: "panel-body connector-form", onSubmit: connectDrive },
       h("p", { className: "connector-lede" }, "In Google Cloud, create a service account and a JSON key for it. Share folders with its email, or add it to shared drives: that's what gets indexed, even from a personal Google account. Each file keeps its own sharing."),

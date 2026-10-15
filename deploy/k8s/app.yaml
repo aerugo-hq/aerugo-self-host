@@ -20,6 +20,7 @@ data:
   KL_GOOGLE_API_BASES: https://www.googleapis.com
   KL_GOOGLE_ADMIN_API_BASES: https://admin.googleapis.com
   KL_MICROSOFT_GRAPH_BASES: https://graph.microsoft.com
+  KL_SLACK_API_BASES: https://slack.com/api
   KL_JIRA_API_BASES: ""   # Jira Cloud sites (https://<site>.atlassian.net) are always allowed; this adds others
   KL_OKTA_API_BASES: ""   # likewise Okta orgs
   KL_ORG_EMAIL_DOMAINS: acme.test   # add your own domain to match your real accounts (README)

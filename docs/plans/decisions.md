@@ -31,3 +31,17 @@ such choice took the narrower, fail-closed option and is listed here, with its a
    validate.
 3. **A security group without an email is keyed by its id** in `directory_groups.group_email`, beside the new
    `group_id` (migration 0041), rather than changing the table's key.
+
+## S4. Slack
+
+1. **A public channel reaches the whole org only on a confirmed company workspace;** otherwise, and always for a
+   private or shared channel, its members from this workspace. The roadmap's "a public channel, the workspace's
+   members" reads as the org; the confirmation guards a partner's workspace. Narrower.
+2. **A shared channel (Slack Connect) is members-only even on a confirmed workspace,** though its public side could be
+   read by anyone in the workspace. Narrower.
+3. **A full history window per sync** (`history_days`, a year by default) instead of incremental reads from a
+   cursor: deletions and retention are followed exactly, and older messages aren't indexed. *Alternative:* cursors,
+   with a periodic full pass for deletions.
+4. **Documents of containers a connection no longer reads are removed** (`retire_unlisted`), for Jira and Confluence
+   too: a project taken out of a connection's scope no longer keeps its issues with frozen readers. Narrower; it
+   changes what a scope edit does for Jira and Confluence.

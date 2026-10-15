@@ -382,9 +382,31 @@ The gallery's Directory card offers Microsoft Entra (tenant, app, certificate; n
 Terraform: `directory = "entra"` with `tenant_id`, `client_id`, and a write-only `certificate`, an acceptance test with
 a throwaway certificate, and the onboarding module's ids. `docs/connectors/entra.md`. Not built: a federated
 credential (the runner's own workload identity).
+S4 (Slack): `kl/slack.py`. A bot token (`xoxb-`, never a person's; `KL_SLACK_API_BASES`) of an app the company
+creates in its own workspace and never distributes, so Slack's history calls keep their usual rate. Containers are
+the channels the bot is in (`conversations.list`, `is_member`), named `#<channel>`; direct messages are never read.
+Readers (`readers_of`): a channel's members from this workspace (a shared channel's other side, someone who has left,
+and bots reach no one), or the whole org for a public, unshared channel on a workspace its admin confirmed
+(`company_workspace`). Members are `ext:slack.<user id>`, recorded with their emails for matching. A thread is one
+document (`slack-<channel>-<ts>`); other messages are one per channel per day (`slack-<channel>-<date>`); joins and
+topic changes are skipped (`SKIPPED`); text is plain (`plain`: people and channels by name, links as label and
+address); the version changes on any added, edited, or removed message. Each sync re-reads the history window
+(`history_days`, a year by default) in full, so edits, deletions, retention, and a removed member carry over on that
+sync, and a day past the window leaves; a channel whose bot left is synced as empty. Paging follows Slack's cursor;
+a 429 is waited out (`Retry-After`); `ok: false` raises `SlackError`; more than `MAX_MESSAGES` fails the sync rather
+than reading the rest as deleted. New for every kind that owns its documents (`OWNED_KINDS`: Jira, Confluence, Slack):
+after a sync, `sync_items.retire_unlisted` removes the connection's documents in containers it no longer reads (taken
+out of its scope, lost by its account, a channel its bot left), authorization first, so no container keeps its readers
+frozen. The route `POST .../connections/slack` (the bot token or a team's reference, channels by id, a history
+window); updates change channels and the window and rotate the token; `settings` read them back. The fake Slack
+(`SLACK`, `_slack`) answers each method as Slack does, including one 429 when asked. Smoke:
+`slack_messages_carry_each_channels_own_readers`. The gallery's Slack form (and `SCOPES`); a browser test. Terraform:
+`kind = "slack"` (the bot token as the write-only `api_token`, `channels`, `history_days`, `company_workspace`), an
+acceptance test, the onboarding module's fields. `docs/connectors/slack.md`. Not built: incremental reads from each
+channel's cursor (a full window is simpler and follows deletions exactly; it costs more calls on busy channels).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1, S2, and S3; next S4 (Slack) to S8; then Q1 (its golden-set part) to Q8;
+done, and so are G1 and S2 to S4; next S5 (Microsoft 365) to S8; then Q1 (its golden-set part) to Q8;
 E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
