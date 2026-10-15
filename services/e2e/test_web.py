@@ -73,6 +73,18 @@ def test_alice_imports_a_notion_export_and_finds_it(page, tmp_path):
         expect(panel(page, "Imports").locator("tr", has_text=name)).to_have_count(0)
 
 
+def test_the_gallery_offers_every_source_and_opens_its_form(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/admin/sources")
+    panel(page, "Connections").get_by_role("button", name="Connect a source").click()
+    gallery = page.get_by_role("list", name="Sources you can connect")
+    expect(gallery.get_by_role("listitem").filter(has_text="Slack")).to_contain_text(re.compile(r"Coming next|Planned"))
+    gallery.get_by_role("listitem").filter(has_text="Confluence Cloud").get_by_role("button", name="Connect").click()
+    form = page.get_by_role("form", name="Connect Confluence")
+    expect(form.get_by_role("textbox", name="Confluence site", exact=True)).to_be_visible()
+    expect(form.get_by_label("API token")).to_have_attribute("type", "password")  # a token is never shown
+
+
 def test_olivia_sets_up_and_removes_google_sign_in(page):
     sign_in(page, "olivia")
     page.goto(f"{WEB}/#/compliance/platform")
