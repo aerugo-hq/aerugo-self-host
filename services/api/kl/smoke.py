@@ -2730,7 +2730,7 @@ def repos_route_to_their_own_teams():
         listed = {c["external_id"]: c for c in api("GET", f"/v1/workspaces/payments/connections/{name}", "alice").json()["containers"]}
         assert listed[repo]["team"] == target, f"the connection lists the repo under {listed[repo]['team']}"
         with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
-            c = conn.execute("SELECT workspace_id, config FROM kl.connections WHERE id = %s", (cid,)).fetchone()
+            c = conn.execute("SELECT id, workspace_id, config FROM kl.connections WHERE id = %s", (cid,)).fetchone()
             assert str(team_for(c, repo)) == str(ids[target]), c["config"]
             conn.execute("SET search_path = kl, public")  # as the worker's connections have
             leave_former_teams(conn, c, repo, team_for(c, repo))  # what the next sync does, then it places the repo in its team
