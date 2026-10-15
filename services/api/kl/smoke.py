@@ -3333,7 +3333,7 @@ def connections_change_in_place_and_removal_keeps_what_others_hold():
     for drive, fid, title in ((ours, f"only{tag}", "Payments only"), (both, f"shared{tag}", "Shared runbook")):
         httpx.post(f"{FAKE_GOOGLE}/files", json={"drive": drive, "name": title, "files": [
             {"id": fid, "name": f"{title} {tag}", "mimeType": "application/vnd.google-apps.document", "version": "1",
-             "text": f"{title} {tag}", "permissions": org_wide}]}, timeout=10).raise_for_status()
+             "text": f"{title} {tag}\n{title} body {tag}", "permissions": org_wide}]}, timeout=10).raise_for_status()  # a Doc that's only a title has no text to index
     body = {"client_id": "fake-client.apps.googleusercontent.com", "client_secret": "fake-secret", "refresh_token": "smoke-refresh",
             "domain": "acme.test", "api_base": FAKE_GOOGLE}
 
@@ -3608,6 +3608,10 @@ def confluence_and_notion_exports_import():
     finally:
         for n in (nname, cname, bname):
             api("DELETE", f"/v1/workspaces/payments/imports/{n}", "alice")
+        # Removal is a job: wait for it, so the next check never cites a page that's about to go.
+        deadline = time.monotonic() + 120
+        while titles("alice") and time.monotonic() < deadline:
+            time.sleep(2)
 
 
 # ------------------------------------------------------------------ conversations (slice R1)

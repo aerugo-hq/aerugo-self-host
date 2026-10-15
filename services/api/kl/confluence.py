@@ -486,7 +486,7 @@ def retire_exported(conn, team, page_ids: set[str]) -> int:
     rows = conn.execute(
         """SELECT d.id, d.external_key FROM documents d
            JOIN workspace_documents wd ON wd.document_id = d.id AND wd.workspace_id = %s
-           WHERE d.source_kind = 'confluence' AND d.container_ref LIKE 'import:%%'
+           WHERE d.source_kind = 'import' AND d.container_ref LIKE 'import:%%'
              AND (d.source_uri = ANY(%s) OR substring(d.source_uri FROM 'pageId=([0-9]+)$') = ANY(%s))""",
         (team, [f"confluence:{i}" for i in ids], ids)).fetchall()
     if not rows:
