@@ -471,7 +471,10 @@ def sync_space(conn, connection: dict, client: ConfluenceClient, key: str) -> di
     if people:
         record_identities(conn, connection["org_id"], "atlassian", people)
     result = sync_container(conn, connection, key, "confluence", items)
-    result["exports_retired"] = retire_exported(conn, team_for(connection, key), {i.key[len("confluence-"):] for i in items})
+    held = conn.execute(  # the pages it now holds, never one a connection to another site holds under the same id
+        "SELECT external_key FROM documents WHERE connection_id = %s AND container_ref = %s AND source_kind = 'confluence'",
+        (connection["id"], key)).fetchall()
+    result["exports_retired"] = retire_exported(conn, team_for(connection, key), {r["external_key"][len("confluence-"):] for r in held})
     return result
 
 

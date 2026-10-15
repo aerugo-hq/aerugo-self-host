@@ -47,14 +47,16 @@ def team_for(connection: dict, full_name: str):
 
 def leave_former_teams(conn, connection: dict, full_name: str, team) -> int:
     """A routed repo moves: its documents leave the teams this connection placed them in before (its own team, and
-    any team the repo was routed to earlier). Another connection's placements of the same documents stay."""
+    any team the repo was routed to earlier). Another connection's placements of the same documents stay, and another
+    connection's own documents (migration 0040: a same-named container on another site) are never moved."""
     former = {str(connection["workspace_id"]),
               *map(str, ((connection.get("config") or {}).get("former_teams") or {}).get(full_name, []))}
     former.discard(str(team))
     if not former:
         return 0
     return conn.execute("DELETE FROM workspace_documents wd USING documents d WHERE wd.document_id = d.id "
-                        "AND d.container_ref = %s AND wd.workspace_id = ANY(%s::uuid[])", (full_name, sorted(former))).rowcount
+                        "AND d.container_ref = %s AND (d.connection_id IS NULL OR d.connection_id = %s) "
+                        "AND wd.workspace_id = ANY(%s::uuid[])", (full_name, connection["id"], sorted(former))).rowcount
 
 
 def sync_repo(conn, connection: dict, connector, container: dict) -> dict:

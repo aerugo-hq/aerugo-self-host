@@ -298,6 +298,21 @@ P3 (local smoke and your GitHub): the curator check, the only one that writes to
 `KL_SMOKE_GITHUB_WRITES=1`; and the GitHub checks end by removing their connection
 (`github_checks_leave_the_seed_alone`), waiting until what it brought in is gone, so the checks after them see the
 seed alone, whatever curated pages your sandbox already holds.
+Connections own their documents (migration 0040). Container refs and keys are unique per site, not per org (a Jira
+project key, a Confluence space key, `jira-<issue key>`, `confluence-<page id>`), so a team admin's connection to
+another site with the same project key used to delete what the first connection had indexed and its own listing
+lacked, and overwrite the keys that collided (with matching versions, only their readers: one site's issue read by the
+other site's people). `documents.connection_id` now names the connection that wrote a Jira or Confluence document:
+`sync_container` reads only its own (`existing`), its upsert updates only its own (`documents.connection_id =
+EXCLUDED.connection_id`), and a key another connection holds is skipped, never taken over, so a second connection to
+the same project indexes none of the first's issues. `leave_former_teams`, the retire job (a removed connection's
+documents lose its id, `ON DELETE SET NULL`, so `d.connection_id IS NULL` tells them from another's), the Documents
+tree's container names, and `retire_exported` (only pages the connection now holds) follow it. GitHub and Drive
+documents stay unnamed: their ids are global, and two teams' connections to one repository or drive both hold it (T2).
+The migration gives existing documents the one connection of their kind that lists their container and deletes the
+rest a connection wrote, which their own connection's next sync indexes again (the M0 seed's Confluence page has no
+container, and stays). Smoke's `a_connection_never_touches_another_connections_documents`
+proves it against a second fake Jira site (`/jira-b`, `FAKE_JIRA_B`).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done; next S2 (Google Workspace as a directory, and Drive's group shares) to S8; then Q1 (its golden-set part) to Q8;
