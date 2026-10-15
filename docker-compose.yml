@@ -164,6 +164,8 @@ services:
       KL_GOOGLE_API_BASES: ${KL_GOOGLE_API_BASES:-https://www.googleapis.com,http://fake-llm:8080/google}
       # Google Admin API addresses Workspace directories may use (S2); the fake one exists only while smoke runs.
       KL_GOOGLE_ADMIN_API_BASES: ${KL_GOOGLE_ADMIN_API_BASES:-https://admin.googleapis.com,http://fake-llm:8080/google}
+      # Microsoft Graph addresses Entra directories may use (S3); the fake one exists only while smoke runs.
+      KL_MICROSOFT_GRAPH_BASES: ${KL_MICROSOFT_GRAPH_BASES:-https://graph.microsoft.com,http://fake-llm:8080/microsoft}
       # Jira addresses besides Jira Cloud sites (ADR 0011); the fake ones (two sites) exist only while smoke runs.
       KL_JIRA_API_BASES: ${KL_JIRA_API_BASES:-http://fake-llm:8080/jira,http://fake-llm:8080/jira-b}
       # Okta addresses besides Okta orgs (ADR 0011: directories); the fake one exists only while smoke runs.

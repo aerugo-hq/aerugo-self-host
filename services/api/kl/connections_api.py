@@ -224,11 +224,14 @@ def create_jira_connection(ws: str, body: JiraConnectionIn, caller: Caller = Dep
 
 class DirectoryConnectionIn(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
-    provider: str = Field(pattern=r"^(okta|google)$")  # Entra next (S3)
-    api_base: str | None = Field(default=None, min_length=8, max_length=300)  # Okta: https://<org>.okta.com; Google: its own
+    provider: str = Field(pattern=r"^(okta|google|entra)$")
+    api_base: str | None = Field(default=None, min_length=8, max_length=300)  # Okta: https://<org>.okta.com; others: their own
     api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # Okta: a read-only admin's
     service_account_key: str | None = Field(default=None, max_length=20000, repr=False)  # Google: the account's JSON key
     admin_email: str | None = Field(default=None, min_length=3, max_length=254)  # Google: the admin it acts as (S2)
+    tenant_id: str | None = Field(default=None, max_length=36)  # Entra: the tenant's id (S3)
+    client_id: str | None = Field(default=None, max_length=36)  # Entra: the app registration's (client) id
+    certificate: str | None = Field(default=None, max_length=20000, repr=False)  # Entra: its private key and certificate (PEM)
     credential_ref: str | None = Field(default=None, max_length=300)
     every_minutes: int | None = Field(default=None, ge=5, le=10080)
 
@@ -291,22 +294,37 @@ def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Ca
     """Connect the company's directory (ADR 0011): who's at the company, by email, and who has left. It indexes no content;
     identity matching refuses an email it says has left, and a leaver's matched identities are revoked as soon as it
     says so. Okta reads with a read-only API token; Google Workspace (S2) with a service account acting as a read-only
-    admin through domain-wide delegation, which also brings each group's members to Drive's group shares. Its credential
-    is kept in the secrets backend, or referenced in the team's own part of it. A directory decides who has left and who
-    a group reaches, company-wide, so only an org admin connects one (S2)."""
+    admin through domain-wide delegation; Entra (S3) with an app registration's certificate. Google's and Entra's groups
+    reach their members through the files shared with them. Its credential is kept in the secrets backend, or referenced
+    in the team's own part of it. A directory decides who has left and who a group reaches, company-wide, so only an
+    org admin connects one (S2)."""
     require_workspace_admin(caller, ws)
     require_org_admin(caller)
+    extra = {}  # what else its config holds: Google's admin, Entra's tenant and app
     if body.provider == "okta":
         if not body.api_base or not directory.allowed_okta(body.api_base):
             raise HTTPException(422, "that isn't an Okta org (https://<org>.okta.com)")
-        if body.service_account_key or body.admin_email or bool(body.api_token) == bool(body.credential_ref):
+        if body.service_account_key or body.admin_email or body.certificate or bool(body.api_token) == bool(body.credential_ref):
             raise HTTPException(422, "give a read-only API token, or a credential reference: one, not both")
         api_base, admin, secret = body.api_base.rstrip("/"), None, {"api_token": body.api_token}
+    elif body.provider == "entra":
+        api_base, admin = (body.api_base or directory.GRAPH).rstrip("/"), None
+        if not directory.allowed_graph(api_base):
+            raise HTTPException(422, "that Microsoft Graph address isn't allowed here")
+        if not directory.GUID.fullmatch(body.tenant_id or "") or not directory.GUID.fullmatch(body.client_id or ""):
+            raise HTTPException(422, "name the tenant and the app registration by their ids")
+        if body.api_token or body.service_account_key or bool(body.certificate) == bool(body.credential_ref):
+            raise HTTPException(422, "give the app's certificate (its private key and certificate, PEM), or a credential reference: one, not both")
+        try:
+            secret = {"certificate": directory.entra_certificate(body.certificate)} if body.certificate else None
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        extra = {"tenant_id": body.tenant_id.lower(), "client_id": body.client_id.lower()}
     else:
         api_base = (body.api_base or directory.GOOGLE_ADMIN).rstrip("/")
         if not directory.allowed_google(api_base):
             raise HTTPException(422, "that Google Admin API address isn't allowed here")
-        if body.api_token or bool(body.service_account_key) == bool(body.credential_ref):
+        if body.api_token or body.certificate or bool(body.service_account_key) == bool(body.credential_ref):
             raise HTTPException(422, "give the service account's JSON key, or a credential reference: one, not both")
         admin = company_admin(body.admin_email)
         if not admin:
@@ -331,13 +349,13 @@ def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Ca
                VALUES (%s, %s, %s, 'directory', %s, %s, %s, %s) RETURNING id, name, kind, status""",
             (cid, org_id, ws_row["id"], body.name,
              Jsonb({"provider": body.provider, "api_base": api_base, "every_minutes": body.every_minutes,
-                    **({"admin_email": admin} if admin else {})}), ref, caller.username),
+                    **({"admin_email": admin} if admin else {}), **extra}), ref, caller.username),
         ).fetchone()
         note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
                      (org_id, Jsonb({"connection_id": str(row["id"])})))
         audit(conn, org_id, caller.username, "connection.create", [ws],
-              {"name": body.name, "kind": "directory", "provider": body.provider, "org": api_base, "admin_email": admin,
+              {"name": body.name, "kind": "directory", "provider": body.provider, "org": api_base, "admin_email": admin, **extra,
                "credential": "reference" if body.credential_ref else "stored"})
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
@@ -388,7 +406,7 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
 # What a connection was declared with, as Terraform reads it back. A credential reference is returned only when it's
 # one the team gave (its own secret); a secret Aerugo stored itself is never named.
 SETTINGS = ("api_base", "projects", "company_site", "every_minutes", "domain", "drives", "repositories", "provider",
-            "spaces", "labels", "page_trees", "admin_email")
+            "spaces", "labels", "page_trees", "admin_email", "tenant_id", "client_id")
 
 
 def settings_of(ws: str, cfg: dict, credential_ref: str | None) -> dict:
@@ -494,6 +512,7 @@ class ConnectionPatch(BaseModel):
     email: str | None = Field(default=None, min_length=3, max_length=254)  # Jira: the account, with a new token
     service_account_key: str | None = Field(default=None, max_length=20000, repr=False)  # Google: a rotation
     admin_email: str | None = Field(default=None, min_length=3, max_length=254)  # a Google directory: the admin it acts as
+    certificate: str | None = Field(default=None, max_length=20000, repr=False)  # an Entra directory: a rotation
 
 
 def owned_connection(conn, ws: str, name: str):
@@ -562,10 +581,17 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if rotating:  # a new version of its secret; the connection reads the new one from now on
             ref = vault.put(f"kl/connections/{c['id']}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token})
             changed.append("credentials")
-        if body.api_token or body.email or body.service_account_key:  # a new token or key for a secret Aerugo stored
+        if body.api_token or body.email or body.service_account_key or body.certificate:  # a new secret for one Aerugo stored
             if not stored_secret(c["id"], ref):
                 raise HTTPException(422, "this connection reads a secret the team keeps (or GitHub's app): rotate it there")
-            if body.service_account_key:
+            if body.certificate:
+                if not (c["kind"] == "directory" and (c["config"] or {}).get("provider") == "entra"):
+                    raise HTTPException(422, "only an Entra directory has a certificate")
+                try:
+                    secret = {"certificate": directory.entra_certificate(body.certificate)}
+                except ValueError as e:
+                    raise HTTPException(422, str(e))
+            elif body.service_account_key:
                 if c["kind"] != "google" and not google_directory:
                     raise HTTPException(422, "only a Google connection has a service account key")
                 try:

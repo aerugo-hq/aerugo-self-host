@@ -60,9 +60,9 @@ baseline is already in place (only its golden-set part is left), so each source 
 - [x] Smoke: a group share reaches a member and not a stranger; a leaver loses it
 
 ### S3. Entra as a directory
-- [ ] Microsoft Graph through an app registration (a certificate or a federated credential, never a client secret if
+- [x] Microsoft Graph through an app registration (a certificate or a federated credential, never a client secret if
       avoidable), `User.Read.All` and `GroupMember.Read.All`
-- [ ] People and their state; groups and their members; leavers revoked at once
+- [x] People and their state; groups and their members; leavers revoked at once
 
 ### S4. Slack
 - [ ] A Slack app's bot token; the channels the bot is in, as containers by name
