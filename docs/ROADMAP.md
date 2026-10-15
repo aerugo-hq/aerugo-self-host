@@ -72,9 +72,9 @@ baseline is already in place (only its golden-set part is left), so each source 
 - [x] Edits and deletions followed; the workspace's retention respected
 
 ### S5. Microsoft 365
-- [ ] SharePoint sites granted through `Sites.Selected` (never tenant-wide); document libraries as containers
-- [ ] Files (Word, PowerPoint, Excel, PDF) through the existing extractors
-- [ ] Permissions: each item's sharing (people, groups through Entra, links), mirrored
+- [x] SharePoint sites granted through `Sites.Selected` (never tenant-wide); document libraries as containers
+- [x] Files (Word, PowerPoint, Excel, PDF) through the existing extractors
+- [x] Permissions: each item's sharing (people, groups through Entra, links), mirrored
 
 ### S6. Notion, live
 - [ ] An internal integration's token; the pages and databases shared with it

@@ -78,7 +78,7 @@ def test_the_gallery_offers_every_source_and_opens_its_form(page):
     page.goto(f"{WEB}/#/admin/sources")
     panel(page, "Connections").get_by_role("button", name="Connect a source").click()
     gallery = page.get_by_role("list", name="Sources you can connect")
-    expect(gallery.get_by_role("listitem").filter(has_text="Microsoft 365")).to_contain_text(re.compile(r"Coming next|Planned"))
+    expect(gallery.get_by_role("listitem").filter(has_text="Notion")).to_contain_text(re.compile(r"Coming next|Planned"))
     gallery.get_by_role("listitem").filter(has_text="Confluence Cloud").get_by_role("button", name="Connect").click()
     form = page.get_by_role("form", name="Connect Confluence")
     expect(form.get_by_role("textbox", name="Confluence site", exact=True)).to_be_visible()
@@ -128,6 +128,15 @@ def test_a_team_admin_opens_the_slack_form(page):
     expect(form.get_by_label("Bot token")).to_have_attribute("type", "password")  # a token is never shown
     expect(form.get_by_label("History")).to_have_value("365")
     expect(form.get_by_text("This Slack workspace is our company's own.")).to_be_visible()
+
+
+def test_a_team_admin_opens_the_microsoft_365_form(page):
+    sign_in(page, "alice")
+    open_connector(page, "Microsoft 365")
+    form = page.get_by_role("form", name="Connect Microsoft 365")
+    expect(form.get_by_label(re.compile(r"^Sites"))).to_be_visible()
+    expect(form.get_by_label(re.compile(r"^Certificate"))).to_be_visible()
+    expect(form.get_by_text("never tenant-wide")).to_be_visible()
 
 
 def test_olivia_sets_up_and_removes_google_sign_in(page):

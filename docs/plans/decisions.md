@@ -45,3 +45,13 @@ such choice took the narrower, fail-closed option and is listed here, with its a
 4. **Documents of containers a connection no longer reads are removed** (`retire_unlisted`), for Jira and Confluence
    too: a project taken out of a connection's scope no longer keeps its issues with frozen readers. Narrower; it
    changes what a scope edit does for Jira and Confluence.
+
+## S5. Microsoft 365
+
+1. **Sharing links grant nothing, whatever their scope,** as Drive's don't. The build plan had organization-wide and
+   anonymous links reach the org on a confirmed company tenant; that would widen who reads a file (anyone at the
+   company, not only those sent the link), so it's not built. *Alternative:* the build plan's rule, behind a
+   `company_tenant` confirmation like Jira's `company_site`.
+2. **SharePoint site groups grant nothing,** as the build plan says, so a file shared only with a site's Members
+   isn't indexed. That's most of SharePoint by default: share with Entra groups to have files indexed.
+3. **A site the app wasn't granted is skipped,** not an error, so one site's missing grant doesn't stop the others.

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import config, confluence, directory, gcp_secrets, gdrive, jira, slack
+from . import config, confluence, directory, gcp_secrets, gdrive, jira, microsoft365, slack
 from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
@@ -342,6 +342,64 @@ def create_slack_connection(ws: str, body: SlackConnectionIn, caller: Caller = D
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
+class MicrosoftConnectionIn(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+    tenant_id: str = Field(max_length=36)
+    client_id: str = Field(max_length=36)  # its app registration, holding Sites.Selected
+    certificate: str | None = Field(default=None, max_length=20000, repr=False)  # its private key and certificate (PEM)
+    credential_ref: str | None = Field(default=None, max_length=300)
+    sites: list[str] = Field(min_length=1, max_length=200)  # the sites an admin granted the app, by Graph's site id
+    api_base: str = directory.GRAPH
+    every_minutes: int | None = Field(default=None, ge=5, le=10080)
+
+
+@router.post("/connections/microsoft", status_code=201)
+def create_microsoft_connection(ws: str, body: MicrosoftConnectionIn, caller: Caller = Depends(authenticate),
+                                managed: tuple | None = Depends(managed_header)):
+    """Connect Microsoft 365 to a team (S5, ADR 0011): an Entra app registration holding `Sites.Selected`, granted read
+    on each site to index by an admin, never tenant-wide, signing in with its certificate. Each site's document
+    libraries are indexed; each file keeps its own sharing (people, and Entra groups through an Entra directory). Its
+    admins only."""
+    require_workspace_admin(caller, ws)
+    if not directory.allowed_graph(body.api_base):
+        raise HTTPException(422, "that Microsoft Graph address isn't allowed here")
+    if not directory.GUID.fullmatch(body.tenant_id) or not directory.GUID.fullmatch(body.client_id):
+        raise HTTPException(422, "name the tenant and the app registration by their ids")
+    if not all(microsoft365.SITE.fullmatch(s) for s in body.sites):
+        raise HTTPException(422, "sites are named by Graph's site id: <tenant>.sharepoint.com,<site collection id>,<web id>")
+    if bool(body.certificate) == bool(body.credential_ref):
+        raise HTTPException(422, "give the app's certificate (its private key and certificate, PEM), or a credential reference: one, not both")
+    try:
+        secret = {"certificate": directory.entra_certificate(body.certificate)} if body.certificate else None
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if body.credential_ref and not team_secret(ws, body.credential_ref):
+        raise HTTPException(422, ref_rule(ws))
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
+        if not ws_row:
+            raise HTTPException(404, "workspace not found")
+        if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
+            raise HTTPException(409, "a connection with that name already exists in this workspace")
+        cid = uuid.uuid4()
+        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", secret)
+        row = conn.execute(
+            """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
+               VALUES (%s, %s, %s, 'microsoft', %s, %s, %s, %s) RETURNING id, name, kind, status""",
+            (cid, org_id, ws_row["id"], body.name,
+             Jsonb({"api_base": body.api_base.rstrip("/"), "tenant_id": body.tenant_id.lower(), "client_id": body.client_id.lower(),
+                    "sites": body.sites, "every_minutes": body.every_minutes}), ref, caller.username),
+        ).fetchone()
+        note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
+                     (org_id, Jsonb({"connection_id": str(row["id"])})))
+        audit(conn, org_id, caller.username, "connection.create", [ws],
+              {"name": body.name, "kind": "microsoft", "tenant_id": body.tenant_id.lower(), "sites": body.sites,
+               "credential": "reference" if body.credential_ref else "stored"})
+    return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
+
+
 @router.post("/connections/directory", status_code=201)
 def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Caller = Depends(authenticate),
                                 managed: tuple | None = Depends(managed_header)):
@@ -461,7 +519,7 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
 # one the team gave (its own secret); a secret Aerugo stored itself is never named.
 SETTINGS = ("api_base", "projects", "company_site", "every_minutes", "domain", "drives", "repositories", "provider",
             "spaces", "labels", "page_trees", "admin_email", "tenant_id", "client_id", "channels", "company_workspace",
-            "history_days")
+            "history_days", "sites")
 
 
 def settings_of(ws: str, cfg: dict, credential_ref: str | None) -> dict:
@@ -563,6 +621,7 @@ class ConnectionPatch(BaseModel):
     labels: list[str] | None = Field(default=None, max_length=50)     # Confluence: only pages with one of these
     page_trees: list[str] | None = Field(default=None, max_length=100)  # Confluence: only these trees
     channels: list[str] | None = Field(default=None, max_length=500)  # Slack: the channels it brings in, by id
+    sites: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Microsoft 365: the sites it reads
     history_days: int | None = Field(default=None, ge=1, le=3650)     # Slack: how far back it reads
     bot_token: str | None = Field(default=None, min_length=10, max_length=300, repr=False)  # Slack: a rotation
     every_minutes: int | None = Field(default=None, ge=5, le=10080)   # how often it syncs (ADR 0011)
@@ -609,6 +668,8 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             raise HTTPException(422, "only a Jira connection has projects, keyed like EDP")
         if (body.channels is not None or body.history_days is not None or body.bot_token) and c["kind"] != "slack":
             raise HTTPException(422, "only a Slack connection has channels, a history window, and a bot token")
+        if body.sites is not None and (c["kind"] != "microsoft" or not all(microsoft365.SITE.fullmatch(s) for s in body.sites)):
+            raise HTTPException(422, "only a Microsoft 365 connection has sites, by Graph's site id")
         if body.channels is not None and not all(slack.CHANNEL.fullmatch(ch) for ch in body.channels):
             raise HTTPException(422, "channels are named by their ids, like C0123ABCD")
         if body.bot_token and not body.bot_token.startswith("xoxb-"):
@@ -624,7 +685,7 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if body.projects is not None:
             cfg["projects"] = body.projects
             changed.append("projects")
-        for field in ("channels", "history_days"):
+        for field in ("channels", "history_days", "sites"):
             if getattr(body, field) is not None:
                 cfg[field] = getattr(body, field)
                 changed.append(field)
@@ -655,8 +716,8 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             if body.bot_token:
                 secret = {"bot_token": body.bot_token}
             elif body.certificate:
-                if not (c["kind"] == "directory" and (c["config"] or {}).get("provider") == "entra"):
-                    raise HTTPException(422, "only an Entra directory has a certificate")
+                if not (c["kind"] == "microsoft" or (c["kind"] == "directory" and (c["config"] or {}).get("provider") == "entra")):
+                    raise HTTPException(422, "only an Entra directory and a Microsoft 365 connection have a certificate")
                 try:
                     secret = {"certificate": directory.entra_certificate(body.certificate)}
                 except ValueError as e:
