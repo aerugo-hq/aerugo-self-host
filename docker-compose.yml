@@ -83,14 +83,16 @@ services:
     user: "0:0"   # dev only: owns its volume
     entrypoint: ["/bin/sh", "/openbao/start/start.sh"]
     environment:
-      KL_DEV_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+      KL_DEV_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}              # the operator's (root); no service holds it
+      KL_SERVICES_TOKEN: ${OPENBAO_SERVICES_TOKEN:-dev-services-token}   # the services' (G1: services.hcl only)
     volumes:
       - ./deploy/openbao/dev.hcl:/openbao/config/dev.hcl:ro
+      - ./deploy/openbao/services.hcl:/openbao/config/services.hcl:ro
       - ./deploy/openbao/start.sh:/openbao/start/start.sh:ro
       - kl-openbao:/openbao/data
     cap_add: [IPC_LOCK]
     healthcheck:   # healthy once unsealed, with the services' token working and Transit mounted
-      test: ["CMD-SHELL", "BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$$KL_DEV_TOKEN bao secrets list | grep -q '^transit/'"]
+      test: ["CMD-SHELL", "BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$$KL_SERVICES_TOKEN bao secrets list | grep -q '^transit/'"]
       interval: 2s
       timeout: 5s
       retries: 60
@@ -120,7 +122,7 @@ services:
       KL_OPENFGA_URL: http://openfga:8080
       KL_OPENFGA_STORE: kl-dev
       KL_OPENBAO_URL: http://openbao:8200
-      KL_OPENBAO_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+      KL_OPENBAO_TOKEN: ${OPENBAO_SERVICES_TOKEN:-dev-services-token}   # G1: never root
       KL_OWNER_DATABASE_URL: postgresql://kl_owner:${KL_OWNER_PASSWORD:-owner-dev-only}@postgres:5432/kl
       KL_ORG_SLUG: acme
       KL_DEV_GITHUB_LOGIN: ${KL_DEV_GITHUB_LOGIN:-}
@@ -145,7 +147,7 @@ services:
       KL_OPENFGA_URL: http://openfga:8080
       KL_OPENFGA_STORE: kl-dev
       KL_OPENBAO_URL: http://openbao:8200
-      KL_OPENBAO_TOKEN: ${OPENBAO_DEV_ROOT_TOKEN:-dev-root-token}
+      KL_OPENBAO_TOKEN: ${OPENBAO_SERVICES_TOKEN:-dev-services-token}   # G1: never root
       KL_OIDC_ISSUER: http://localhost:${KL_KEYCLOAK_PORT:-8081}/realms/acme
       KL_OIDC_JWKS_URL: http://keycloak:8080/realms/acme/protocol/openid-connect/certs
       KL_OIDC_AUDIENCE: kl-api

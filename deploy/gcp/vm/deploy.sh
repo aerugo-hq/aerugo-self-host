@@ -41,7 +41,7 @@ KL_FGA_PASSWORD=$(secret fga-password)
 KL_BACKUP_CIPHER_PASS=$(secret backup-cipher)
 KC_ADMIN_PASSWORD=$(secret keycloak-admin-password)
 KL_KEYCLOAK_DB_PASSWORD=$KEYCLOAK_DB_PASSWORD
-OPENBAO_DEV_ROOT_TOKEN=$OPENBAO_TOKEN
+OPENBAO_SERVICES_TOKEN=$OPENBAO_TOKEN
 ENV
 
 KL_DOMAIN="$DOMAIN" KL_FIRST_ADMIN="$(attr aerugo-admin)" KL_TERRAFORM_CLIENT_SECRET="$TERRAFORM_SECRET" \
@@ -85,12 +85,27 @@ if [ "$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys
   ROOT="$(printf '%s' "$INIT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["root_token"])')"
   unset INIT
   for _ in $(seq 30); do bao -e BAO_TOKEN="$ROOT" openbao bao token lookup >/dev/null 2>&1 && break; sleep 2; done
-  bao -e BAO_TOKEN="$ROOT" openbao bao token create -id="$OPENBAO_TOKEN" -policy=root -orphan >/dev/null
   bao -e BAO_TOKEN="$ROOT" openbao bao secrets enable -path=secret -version=2 kv >/dev/null
   bao -e BAO_TOKEN="$ROOT" openbao bao secrets enable transit >/dev/null
-  unset ROOT
   echo "deploy: OpenBao initialized; its root token and recovery key are in Secret Manager (aerugo-openbao-init)"
 fi
+
+# The services' token (G1): exactly their paths (deploy/openbao/services.hcl), never root, lasting ten years (nothing
+# renews it). Checked on every deploy, so an OpenBao set up before G1 replaces the root token its services held. The
+# root token is read from Secret Manager for this alone, and never written down.
+ROOT="${ROOT:-$(secret openbao-init | python3 -c 'import json,sys; print(json.load(sys.stdin)["root_token"])')}"
+for _ in $(seq 30); do bao -e BAO_TOKEN="$ROOT" openbao bao token lookup >/dev/null 2>&1 && break; sleep 2; done
+bao -e BAO_TOKEN="$ROOT" openbao bao policy write aerugo-services - < deploy/openbao/services.hcl >/dev/null
+bao -e BAO_TOKEN="$ROOT" openbao bao auth tune -max-lease-ttl=87600h token/ >/dev/null
+HELD="$(bao -e BAO_TOKEN="$ROOT" openbao bao token lookup -format=json "$OPENBAO_TOKEN" 2>/dev/null \
+  | python3 -c 'import json,sys; p=json.load(sys.stdin)["data"]["policies"]; print("scoped" if sorted(p) == ["aerugo-services", "default"] else "other")' \
+  || echo missing)"
+if [ "$HELD" != "scoped" ]; then
+  [ "$HELD" = "missing" ] || bao -e BAO_TOKEN="$ROOT" openbao bao token revoke "$OPENBAO_TOKEN" >/dev/null
+  bao -e BAO_TOKEN="$ROOT" openbao bao token create -id="$OPENBAO_TOKEN" -policy=aerugo-services -orphan -ttl=87600h >/dev/null
+  echo "deploy: the services' OpenBao token now holds only their paths"
+fi
+unset ROOT
 
 # Keycloak keeps its users in Postgres, in a database of its own.
 for _ in $(seq 60); do "${COMPOSE[@]}" exec -T postgres pg_isready -h 127.0.0.1 -q && break; sleep 2; done

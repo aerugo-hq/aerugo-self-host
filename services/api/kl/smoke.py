@@ -2561,7 +2561,7 @@ def secrets_backend_keeps_and_shreds_keys():
     """Secrets: OpenBao stores to disk so keys survive restarts; Transit encrypts, and a destroyed key makes its ciphertext unreadable"""
     from .vault import vault
     assert vault.storage() == "file", f"OpenBao keeps everything in memory ({vault.storage()}): a restart would lose every key"
-    name = f"smoke-{secrets.token_hex(3)}"
+    name = f"kl-smoke-{secrets.token_hex(3)}"  # the services' token holds only keys named kl-... (G1)
     vault.transit_key(name)
     vault.transit_key(name)  # creating it again changes nothing
     sealed = vault.encrypt(name, "a stored original")
@@ -2575,6 +2575,30 @@ def secrets_backend_keeps_and_shreds_keys():
         pass
     else:
         raise AssertionError("ciphertext was still readable after its key was destroyed")
+
+
+@check
+def the_services_openbao_token_holds_only_their_paths():
+    """Secrets (G1): the services' OpenBao token is never root: it holds secrets under kl/ and the kl- encryption keys, and is refused another secret, a key that isn't Aerugo's, the policies, a new token, a new mount, and a new auth method; it lasts years, since nothing renews it"""
+    h = {"X-Vault-Token": BAO_TOKEN}
+    me = httpx.get(f"{BAO_URL}/v1/auth/token/lookup-self", headers=h, timeout=5).json()["data"]
+    assert sorted(me["policies"]) == ["aerugo-services", "default"], f"the services' token holds {me['policies']}"
+    assert me["ttl"] > 365 * 24 * 3600, f"the services' token expires in {me['ttl']}s, and nothing renews it"
+    path = f"kl/acme/smoke-g1-{secrets.token_hex(3)}"
+    r = httpx.post(f"{BAO_URL}/v1/secret/data/{path}", headers=h, json={"data": {"v": "1"}}, timeout=5)
+    assert r.status_code == 200, f"the services' token couldn't write under kl/: {r.status_code}"
+    try:
+        refused = {"a secret outside kl/": ("POST", "secret/data/smoke-g1", {"data": {"v": "1"}}),
+                   "a key that isn't Aerugo's": ("POST", "transit/keys/smoke-g1", {}),
+                   "the policies": ("GET", "sys/policies/acl", None),
+                   "a new token": ("POST", "auth/token/create", {}),
+                   "a new mount": ("POST", "sys/mounts/smoke-g1", {"type": "kv"}),
+                   "a new auth method": ("POST", "sys/auth/smoke-g1", {"type": "userpass"})}
+        for what, (method, target, body) in refused.items():
+            r = httpx.request(method, f"{BAO_URL}/v1/{target}", headers=h, json=body, timeout=5)
+            assert r.status_code == 403, f"the services' token reached {what}: {r.status_code}"
+    finally:
+        httpx.delete(f"{BAO_URL}/v1/secret/metadata/{path}", headers=h, timeout=5)
 
 
 @check

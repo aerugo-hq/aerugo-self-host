@@ -65,7 +65,7 @@ Invoke-Native "kubectl" @("apply", "-f", "deploy/k8s/namespace.yaml")
 $fileMaps = [ordered]@{
   "aerugo-postgres-init"  = @("deploy/postgres/00-init.sh", "deploy/postgres/sql/01-roles.sql", "deploy/postgres/sql/02-schema.sql",
                               "deploy/postgres/sql/03-seed.sql")
-  "aerugo-openbao"        = @("deploy/openbao/dev.hcl", "deploy/openbao/start.sh")
+  "aerugo-openbao"        = @("deploy/openbao/dev.hcl", "deploy/openbao/services.hcl", "deploy/openbao/start.sh")
   "aerugo-keycloak-realm" = @("deploy/keycloak/realm-acme.json")
   "aerugo-keycloak-theme" = @("deploy/keycloak/themes/kl/login/theme.properties",
                               "deploy/keycloak/themes/kl/login/messages/messages_en.properties",
