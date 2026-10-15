@@ -325,10 +325,10 @@ Clusters keep their colors across reloads (derived from a stable cluster id), an
 - **The fakes are smoke's truth:** if the real client and the fake disagree on a path or a shape, smoke passes and
   production fails. Test them against each other.
 - **Local smoke isn't CI's smoke when `.secrets/` or `.env` hold more than the example:** a GitHub App there makes
-  the optional checks sync your sandbox org and merge a real pull request in it (each run adds a curated page that
-  later checks then see), and a leftover `KL_OTEL_ENDPOINT` fails the trace check. Prove an item as CI does, leaving
-  both files alone: `COMPOSE_ENV_FILES=.env.example`, and an override file (in `COMPOSE_FILE`) that mounts an empty
-  folder at `/run/kl-secrets` for `provision` and `smoke`.
+  the optional checks sync your sandbox org (they remove their connection when done), `KL_SMOKE_GITHUB_WRITES=1`
+  also lets the curator check merge a real pull request in it, and a leftover `KL_OTEL_ENDPOINT` fails the trace
+  check. Prove an item as CI does, leaving both files alone: `COMPOSE_ENV_FILES=.env.example`, and an override file
+  (in `COMPOSE_FILE`) that mounts an empty folder at `/run/kl-secrets` for `provision` and `smoke`.
 
 ## 9. When unsure
 

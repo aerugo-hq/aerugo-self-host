@@ -231,6 +231,7 @@ services:
       KL_EVAL_JUDGE_CLASSIFICATIONS: ${KL_EVAL_JUDGE_CLASSIFICATIONS:-public,internal}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       KL_DEV_GITHUB_LOGIN: ${KL_DEV_GITHUB_LOGIN:-}
+      KL_SMOKE_GITHUB_WRITES: ${KL_SMOKE_GITHUB_WRITES:-}   # 1: the curator check may open and merge a pull request
     volumes:
       - ./.secrets:/run/kl-secrets:ro
       - ./sandbox/knowledge:/seed-knowledge:ro   # so smoke can run knowledge CI on the seed bundles

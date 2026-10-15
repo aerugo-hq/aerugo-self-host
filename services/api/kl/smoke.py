@@ -2053,6 +2053,9 @@ def curator_pull_request_loop():
                             "WHERE split_part(external_id, '/', 2) = 'payments-knowledge' LIMIT 1").fetchone()
     if not repo:
         return SKIP
+    if os.environ.get("KL_SMOKE_GITHUB_WRITES") != "1":  # it writes to GitHub, and adds a curated page each run
+        print("      set KL_SMOKE_GITHUB_WRITES=1 in .env to let it open and merge a pull request in your sandbox")
+        return SKIP
     ensure_fake_models()
     r = compile_as("alice")
     assert r.status_code == 201, r.text[:300]
@@ -2084,6 +2087,25 @@ def curator_pull_request_loop():
     assert {"pr_opened", "merged", "indexed"} <= set(kinds), kinds
     assert api("GET", f"/v1/concepts/{key}", "bob").status_code == 404
     print(f"      {p['pr_url']} opened, merged at {merged[:7]}, and indexed; history: {' -> '.join(dict.fromkeys(kinds))}")
+
+
+@check
+def github_checks_leave_the_seed_alone():
+    """Optional: the GitHub checks' connection is removed when they're done, and what it brought in goes with it, so the checks after them see the seed alone"""
+    r = api("GET", "/v1/workspaces/payments/connections/smoke-github", "alice")
+    if r.status_code == 404:
+        return SKIP
+    repos = [c["external_id"] for c in r.json()["containers"]]
+    assert api("DELETE", "/v1/workspaces/payments/connections/smoke-github", "alice").status_code == 202
+
+    def brought_in() -> int:
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.documents WHERE container_ref = ANY(%s)", (repos,)).fetchone()[0]
+
+    deadline = time.monotonic() + 120  # removal is a job
+    while brought_in() and time.monotonic() < deadline:
+        time.sleep(2)
+    assert not brought_in(), f"documents from {repos} stayed after their connection was removed"
 
 
 @check
