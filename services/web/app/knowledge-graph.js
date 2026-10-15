@@ -1,9 +1,11 @@
 "use client";
 // The knowledge map's graph: d3-force physics drawn on a canvas. Nodes fall in from above and the physics
-// lands them; each edge fades in once both its ends are falling. Pan, zoom, pinch, drag, ego highlight,
-// keyboard focus, and filters that animate nodes out. Physics moves to a Web Worker past 2,000 nodes, and
-// drawing stops once the graph settles, restarting on interaction.
+// lands them in one packed disc (slice K7): bubbles colored by cluster, a community found from the links themselves,
+// with no lines at rest. Pointing at or clicking a node turns it purple and draws its links in blue. Pan, zoom,
+// pinch, drag, keyboard focus, and filters that animate nodes out. Physics moves to a Web Worker past 2,000 nodes,
+// and drawing stops once the graph settles, restarting on interaction.
 import { createElement as h, useEffect, useMemo, useRef } from "react";
+import { communities } from "./graph-clusters.js";
 import { createPhysics, releaseTimes } from "./graph-physics.js";
 import { createGraphWorker } from "./graph-worker-client.js";
 import { TIERS, tierOf } from "./ui.js";
@@ -14,9 +16,15 @@ const SCALE_MS = 150; // filter scale in and out
 const DIM = 0.15; // everything outside a clicked node's neighborhood
 const HOVER_DIM = 0.45; // a gentler preview while pointing at a node
 const MIX_MS = 150; // highlights fade in and out
-const LABEL_ALL_UNDER = 40; // small maps name every node
-const EDGE_ALPHA = 0.14; // quiet until a node is focused, so the map reads as packed bubbles
-const KIND_ALPHA = { gold: 1, silver: 1, evidence: 0.4, entity: 0.9 }; // contextual nodes stay quiet
+const EGO_ALPHA = 0.9; // a picked node's links; no other lines are drawn
+const COLORS = 10; // cluster colors, the --cluster-0 to --cluster-9 tokens, reused round the clusters
+const BUBBLE_PX = 14; // fitting never zooms the typical bubble past this radius on screen, however few nodes there are
+// The three kinds of link (ADR 0010), never mixed up: curated (a person's own relation) bold, recorded (written in a
+// source: references, lineage, mentions) solid, inferred (similar meaning) dashed. A pair linked several ways shows its
+// strongest kind.
+const CURATED = 0, RECORDED = 1, INFERRED = 2;
+export const LINK_STYLE = { relation: CURATED, "derived-from": CURATED, reference: RECORDED, lineage: RECORDED,
+                            describes: RECORDED, mentions: RECORDED, semantic: INFERRED };
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ");
 // The map paints with the page's own tokens (slice D2), so it follows the theme: light, dark, or the system's. They're
 // read once and kept until the theme changes; each falls back to the light value where there's no page to read.
@@ -27,6 +35,9 @@ export function readPalette(get) {
     edge: rgb(hex("--accent", "#1f6f61")), accent: hex("--accent", "#1f6f61"), ink: hex("--fg", "#121820"),
     paper: rgb(hex("--map-bg", "#f7f8fa")), label: rgb(hex("--fg-2", "#3a4552")), quiet: rgb(hex("--muted", "#5f6b7a")),
     tiers: Object.fromEntries(Object.entries(TIERS).map(([k, t]) => [k, rgb(hex(`--${k}`, t.color))])),
+    clusters: ["#bfe3cf", "#f5c9d9", "#d8cdf3", "#c3daf3", "#f1e2ad", "#f6d1bd", "#bfe5e6", "#d5e5c2", "#ecd0e5", "#d3d8de"]
+      .map((fallback, i) => rgb(hex(`--cluster-${i}`, fallback))), // pastels, one per cluster (slice K7)
+    focus: hex("--map-focus", "#8b5cf6"), ego: rgb(hex("--map-ego", "#2f6bd8")), // the picked node, and its links
   };
 }
 function palette() {
@@ -39,21 +50,23 @@ function palette() {
 const TIER_KEYS = Object.keys(TIERS);
 const STEPS = 20; // opacity is drawn in 5% steps, one batch per step
 // Batches reused every frame, so drawing allocates nothing and the garbage collector stays out of the way.
-const edgeBatches = Array.from({ length: 2 * STEPS + 1 }, () => []);
-const nodeBatches = Array.from({ length: TIER_KEYS.length * (STEPS + 1) }, () => []); // one batch per tier and step
+const nodeBatches = Array.from({ length: COLORS * (STEPS + 1) }, () => []); // one batch per color and step
 
-// Indexes, degrees, sizes (6 to 14 px by degree), and the release order (hubs first).
+// Indexes, degrees, sizes (6 to 12 by degree), clusters, and the release order (hubs first).
 export function prepare(nodes, edges) {
   const index = new Map(nodes.map((n, i) => [n.id, i]));
   const seen = new Set();
   const links = [];
   const neighbors = nodes.map(() => []);
+  const linkStyle = new Map(); // pair key to its strongest kind of link
   for (const e of edges) {
     const a = index.get(e.source);
     const b = index.get(e.target);
     if (a === undefined || b === undefined || a === b) continue;
     const key = a < b ? a * 1e6 + b : b * 1e6 + a;
-    if (seen.has(key)) continue;
+    const style = LINK_STYLE[e.kind] ?? RECORDED;
+    if (seen.has(key)) { linkStyle.set(key, Math.min(linkStyle.get(key), style)); continue; }
+    linkStyle.set(key, style);
     seen.add(key);
     links.push([a, b]);
     neighbors[a].push(b);
@@ -61,17 +74,19 @@ export function prepare(nodes, edges) {
   }
   const degree = neighbors.map((list) => list.length);
   const maxDegree = degree.reduce((m, d) => Math.max(m, d), 1);
-  const radii = degree.map((d) => 8 + 12 * Math.sqrt(d / maxDegree)); // bubbles, sized by their links
+  const radii = degree.map((d) => 6 + 6 * Math.sqrt(d / maxDegree)); // bubbles, a little larger the more they link
   const order = nodes.map((_, i) => i).sort((p, q) => degree[q] - degree[p] || p - q);
   const tiers = nodes.map((n) => tierOf(n.tier));
-  // Half of each name's width at 12 px (about 6.8 px a character), so small maps can space nodes to fit it.
+  // Half of each name's width at 12 px (about 6.8 px a character).
   const extents = nodes.map((n) => Math.min(90, 8 + String(n.title || "").length * 3.4));
   const teamNames = [...new Set(nodes.map((n) => n.workspaces[0] || ""))];
   const teams = nodes.map((n) => teamNames.indexOf(n.workspaces[0] || ""));
-  return { index, links, neighbors, degree, radii, order, tiers, teams, teamNames, extents, tierIndex: Uint8Array.from(tiers, (t) => TIER_KEYS.indexOf(t)) };
+  const { cluster, count: clusterCount } = communities(neighbors, teams, order);
+  return { index, links, neighbors, degree, radii, order, tiers, teams, teamNames, extents, cluster, clusterCount, linkStyle,
+           tierIndex: Uint8Array.from(tiers, (t) => TIER_KEYS.indexOf(t)) };
 }
 
-export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSelect, onReady }) {
+export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSelect, onReady, marked, inset = 56 }) {
   const wrap = useRef(null);
   const canvas = useRef(null);
   const tip = useRef(null);
@@ -80,6 +95,13 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
   const graph = useMemo(() => prepare(nodes, edges), [nodes, edges]);
   const select = useRef(onSelect);
   select.current = onSelect;
+  // Ringed nodes (Ask rings an answer's sources), and the room kept clear at the bottom (the map's replay bar).
+  const marks = useMemo(() => (marked || []).map((id) => graph.index.get(id)).filter((i) => i !== undefined),
+                        [graph, (marked || []).join(",")]);
+  const markRef = useRef(marks);
+  markRef.current = marks;
+  const insetRef = useRef(inset);
+  insetRef.current = inset;
 
   useEffect(() => {
     const el = canvas.current;
@@ -88,7 +110,7 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
     const n = nodes.length;
     const animate = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const rect = box.getBoundingClientRect();
-    const options = { count: n, links: graph.links, radii: graph.radii, order: graph.order, teams: graph.teams, extents: graph.extents, width: rect.width, height: rect.height, animate };
+    const options = { count: n, links: graph.links, radii: graph.radii, order: graph.order, groups: graph.cluster, width: rect.width, height: rect.height, animate };
     const s = {
       t0: performance.now(), now: 0, raf: 0, width: rect.width, height: rect.height, dpr: window.devicePixelRatio || 1,
       view: { k: 1, x: rect.width / 2, y: rect.height / 2 },
@@ -134,6 +156,7 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
       s.height = r.height;
       el.width = Math.round(r.width * s.dpr);
       el.height = Math.round(r.height * s.dpr);
+      if (s.fitted && !s.userMoved) fit(); // the panel changed size: frame the disc again, unless you've moved it
       kick();
     }
 
@@ -149,31 +172,26 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
       const near = s.litNear;
       const mix = s.mix; // 0 = no highlight, 1 = fully applied
       const fade = (inside, base) => (inside ? base + (1 - base) * mix : base + (base * s.litDim - base) * mix);
-      // Edges, grouped by opacity so each group is a single stroke.
-      for (const batch of edgeBatches) batch.length = 0;
-      for (let e = 0; e < graph.links.length; e++) {
-        const [a, b] = graph.links[e];
-        const start = Math.max(s.releaseAt[a], s.releaseAt[b]);
-        if (now < start) continue;
-        const sc = Math.min(scale(a), scale(b));
-        if (!sc) continue;
-        const ego = hl >= 0 && (a === hl || b === hl);
-        const alpha = Math.min(1, (now - start) / FADE_MS) * sc * (hl < 0 ? EDGE_ALPHA : fade(ego, EDGE_ALPHA));
-        const key = Math.round(alpha * 2 * STEPS);
-        if (key) edgeBatches[key].push(e);
-      }
-      ctx.lineWidth = 1 / k;
-      for (let key = 1; key < edgeBatches.length; key++) {
-        const list = edgeBatches[key];
-        if (!list.length) continue;
-        ctx.strokeStyle = `rgba(${palette().edge}, ${key / (2 * STEPS)})`;
-        ctx.beginPath();
-        for (const e of list) {
-          const [a, b] = graph.links[e];
-          ctx.moveTo(px(a), py(a));
-          ctx.lineTo(px(b), py(b));
+      // Lines: none at rest, so the map reads as packed bubbles; the lit node's links, in blue, as it lights up, each
+      // drawn as its kind: curated bold, recorded solid, inferred dashed (inferred first, so stronger kinds sit on top).
+      if (hl >= 0 && mix > 0 && scale(hl)) {
+        for (const style of [INFERRED, RECORDED, CURATED]) {
+          ctx.beginPath();
+          let any = false;
+          for (const b of graph.neighbors[hl]) {
+            if (now < Math.max(s.releaseAt[hl], s.releaseAt[b]) || !scale(b)) continue;
+            if ((graph.linkStyle.get(hl < b ? hl * 1e6 + b : b * 1e6 + hl) ?? RECORDED) !== style) continue;
+            ctx.moveTo(px(hl), py(hl));
+            ctx.lineTo(px(b), py(b));
+            any = true;
+          }
+          if (!any) continue;
+          ctx.setLineDash(style === INFERRED ? [4 / k, 3 / k] : []);
+          ctx.strokeStyle = `rgba(${palette().ego}, ${EGO_ALPHA * mix})`;
+          ctx.lineWidth = (style === CURATED ? 2.6 : 1.6) / k;
+          ctx.stroke();
         }
-        ctx.stroke();
+        ctx.setLineDash([]);
       }
       // Nodes, grouped by color and opacity.
       for (const batch of nodeBatches) batch.length = 0;
@@ -181,15 +199,14 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
         if (now < s.releaseAt[i]) continue;
         const sc = scale(i);
         if (!sc) continue;
-        const base = KIND_ALPHA[graph.tiers[i]];
-        const alpha = hl < 0 ? base : fade(i === hl || near.has(i), base);
+        const alpha = hl < 0 ? 1 : fade(i === hl || near.has(i), 1);
         const step = Math.round(alpha * STEPS);
-        if (step) nodeBatches[graph.tierIndex[i] * (STEPS + 1) + step].push(i, sc);
+        if (step) nodeBatches[(graph.cluster[i] % COLORS) * (STEPS + 1) + step].push(i, sc);
       }
       for (let key = 0; key < nodeBatches.length; key++) {
         const list = nodeBatches[key];
         if (!list.length) continue;
-        ctx.fillStyle = `rgba(${palette().tiers[TIER_KEYS[Math.floor(key / (STEPS + 1))]]}, ${(key % (STEPS + 1)) / STEPS})`;
+        ctx.fillStyle = `rgba(${palette().clusters[Math.floor(key / (STEPS + 1))]}, ${(key % (STEPS + 1)) / STEPS})`;
         ctx.beginPath();
         for (let j = 0; j < list.length; j += 2) {
           const i = list[j];
@@ -209,30 +226,32 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
         ctx.lineWidth = width / k;
         ctx.stroke();
       };
-      if (s.highlight >= 0 && scale(s.highlight)) ring(s.highlight, 2.5, palette().ink, 1.5);
+      // The lit node, purple and a little larger, over its neighbors.
+      if (hl >= 0 && mix > 0 && scale(hl)) {
+        ctx.beginPath();
+        ctx.arc(px(hl), py(hl), graph.radii[hl] * (1 + 0.25 * mix) * scale(hl), 0, Math.PI * 2);
+        ctx.globalAlpha = mix;
+        ctx.fillStyle = palette().focus;
+        ctx.fill();
+        ctx.strokeStyle = `rgba(${palette().paper}, 0.85)`;
+        ctx.lineWidth = 1.5 / k;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      if (s.highlight >= 0 && scale(s.highlight)) ring(s.highlight, 2.5 + 0.25 * graph.radii[s.highlight] * k, palette().ink, 1.5);
       if (s.focus >= 0 && scale(s.focus)) ring(s.focus, 3.5, palette().accent, 2);
-      // Labels: every node on small maps; on larger ones, past 1.5× zoom, nodes with more than three links.
+      for (const i of markRef.current) if (s.mask[i] && now >= s.releaseAt[i] && scale(i)) ring(i, 2, palette().ink, 1.25);
+      // Labels: none at rest, so the disc reads as clusters, not as scattered names. Lighting a node (pointing at it or
+      // clicking it) names it and the nodes it links to, fading in with its lines; the tooltip names the one pointed
+      // at. Names sit centered under their node and never overlap each other; a name with no room is left out.
       const labels = [];
-      let shownCount = 0;
-      for (let i = 0; i < n; i++) if (s.mask[i]) shownCount++;
-      const small = shownCount <= LABEL_ALL_UNDER;
-      // Highlighted names first, then the most connected; names sit centered under their node and never
-      // overlap each other or another node. A name with no room waits for a hover.
       queued.fill(0);
       const queue = (i) => { if (!queued[i]) { queued[i] = 1; labels.push(i); } };
-      if (hl >= 0) { queue(hl); graph.neighbors[hl].forEach(queue); }
-      for (const i of graph.order) if (small || (k > 1.5 && graph.degree[i] > 3)) queue(i);
+      if (hl >= 0 && mix > 0) { queue(hl); graph.neighbors[hl].forEach(queue); }
       const placed = [];
       s.named = 0;
       const free = (b) => !placed.some((p) => b[0] < p[2] && b[2] > p[0] && b[1] < p[3] && b[3] > p[1]);
-      if (small) {
-        for (let i = 0; i < n; i++) {
-          if (!s.mask[i] || now < s.releaseAt[i]) continue;
-          const r = graph.radii[i];
-          placed.push([px(i) - r, py(i) - r, px(i) + r, py(i) + r]);
-        }
-      }
-      ctx.font = `500 ${12 / k}px ${s.font}`;
+      ctx.font = `500 ${11 / k}px ${s.font}`;
       ctx.textBaseline = "middle";
       for (const i of labels) {
         if (!s.mask[i] || now < s.releaseAt[i] || scale(i) < 1 || i === s.hover) continue; // the tooltip names the hovered node
@@ -247,33 +266,13 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
         placed.push(box);
         if (s.timings) s.named = (s.named || 0) + 1; // only with the debug hook
         const quiet = graph.tiers[i] === "evidence" ? 0.75 : 1; // evidence names sit a step back
-        const a = hl < 0 ? quiet : fade(i === hl || near.has(i), quiet);
+        const a = quiet * mix; // they fade in and out with the highlight
+        ctx.lineJoin = "round"; // a halo of paper behind each name, so it reads over the bubbles it crosses
+        ctx.lineWidth = 3 / k;
+        ctx.strokeStyle = `rgba(${palette().paper}, ${0.85 * a})`;
+        ctx.strokeText(nodes[i].title, px(i) - w / 2, y);
         ctx.fillStyle = `rgba(${palette().label}, ${a})`; // --fg-2
         ctx.fillText(nodes[i].title, px(i) - w / 2, y);
-      }
-      // Team regions: each team's name, quietly, above its nodes.
-      if (graph.teamNames.length > 1) {
-        const box = graph.teamNames.map(() => [Infinity, 0, 0]); // top, x of the topmost node, count
-        for (let i = 0; i < n; i++) {
-          if (!s.mask[i] || now < s.releaseAt[i]) continue;
-          const b = box[graph.teams[i]];
-          if (py(i) - graph.radii[i] < b[0]) { b[0] = py(i) - graph.radii[i]; b[1] = px(i); }
-          b[2] += 1;
-        }
-        ctx.font = `500 ${12 / k}px ${s.font}`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "bottom";
-        ctx.fillStyle = `rgba(${palette().quiet}, ${hl < 0 ? 1 : 1 - 0.6 * mix})`; // --muted
-        box.forEach(([top, x, c], t) => {
-          if (c < 2) return;
-          const w = ctx.measureText(graph.teamNames[t]).width;
-          for (let lift = 14; lift <= 46; lift += 16) { // rise until clear of names and nodes
-            const y = top - lift / k;
-            const b = [x - w / 2, y - 16 / k, x + w / 2, y];
-            if (free(b)) { placed.push(b); ctx.fillText(graph.teamNames[t], x, y); break; }
-          }
-        });
-        ctx.textAlign = "start";
       }
       placeTip();
     }
@@ -380,29 +379,23 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
       s.now = clock();
       kick();
     }
-    // Fit: frame every visible node, easing there over 400 ms. Never zooms in past 1.25×.
+    // Fit: frame every visible node, easing there over 400 ms. Never zooms the typical bubble past BUBBLE_PX on screen,
+    // so a small map stays bubbles, not balloons; a large one fills the panel.
     function fit() {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      const namesShown = shownLabels(); // once, not per node
       for (let i = 0; i < n; i++) {
         if (!s.mask[i] || s.now < s.releaseAt[i]) continue;
         const r = graph.radii[i];
-        const named = namesShown ? graph.extents[i] : r; // names are centered under their node
-        x0 = Math.min(x0, px(i) - Math.max(r, named)); x1 = Math.max(x1, px(i) + Math.max(r, named));
-        y0 = Math.min(y0, py(i) - r); y1 = Math.max(y1, py(i) + r + (namesShown ? 20 : 0));
+        x0 = Math.min(x0, px(i) - r); x1 = Math.max(x1, px(i) + r);
+        y0 = Math.min(y0, py(i) - r); y1 = Math.max(y1, py(i) + r + 16); // room for a lit name on the bottom row
       }
       if (!Number.isFinite(x0)) return;
-      if (graph.teamNames.length > 1) y0 -= 44; // room for the team names above each region
-      const room = { w: s.width - 64, h: s.height - 64 - 56 }; // margins, and the replay bar at the bottom
-      const k = Math.max(0.25, Math.min(1.25, room.w / (x1 - x0 || 1), room.h / (y1 - y0 || 1)));
-      const to = { k, x: s.width / 2 - ((x0 + x1) / 2) * k, y: (s.height - 56) / 2 - ((y0 + y1) / 2) * k };
+      const room = { w: s.width - 64, h: s.height - 64 - insetRef.current }; // margins, and the map's replay bar
+      const typical = [...graph.radii].sort((a, b) => a - b)[Math.floor(graph.radii.length / 2)] || 1;
+      const k = Math.max(0.25, Math.min(BUBBLE_PX / typical, room.w / (x1 - x0 || 1), room.h / (y1 - y0 || 1)));
+      const to = { k, x: s.width / 2 - ((x0 + x1) / 2) * k, y: (s.height - insetRef.current) / 2 - ((y0 + y1) / 2) * k };
       s.viewAnim = { from: { ...s.view }, to, start: performance.now() };
       kick();
-    }
-    function shownLabels() {
-      let c = 0;
-      for (let i = 0; i < n; i++) c += s.mask[i];
-      return c <= LABEL_ALL_UNDER;
     }
     function stepView(ts) {
       const a = s.viewAnim;

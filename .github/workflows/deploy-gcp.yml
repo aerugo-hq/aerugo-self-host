@@ -1,0 +1,85 @@
+# Deploy Aerugo to a GCP VM, only when started by hand (Actions, deploy-gcp, Run workflow): a VM is never the default.
+# Keyless: GitHub's own short-lived token is exchanged
+# for the deployer service account through Workload Identity Federation (deploy/gcp/terraform allows this repository's
+# main branch only), so no Google key is stored in GitHub. It builds the three images Aerugo builds itself, pushes
+# them to Artifact Registry tagged with the commit, copies the release's configuration to the VM through IAP, and
+# runs deploy/gcp/vm/deploy.sh there. Variables: GCP_PROJECT, GCP_REGION, GCP_ZONE, GCP_WORKLOAD_PROVIDER, GCP_DEPLOYER,
+# AERUGO_DOMAIN (terraform output github_variables). Pin the actions to commit SHAs once it's running.
+name: deploy-gcp
+
+on:
+  workflow_dispatch: # by hand only
+
+permissions:
+  contents: read
+  id-token: write # the short-lived token Workload Identity Federation exchanges
+
+concurrency:
+  group: deploy-gcp
+  cancel-in-progress: false # never stop a deploy halfway
+
+env:
+  REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/aerugo
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: api
+            context: services/api
+          - name: web
+            context: services/web
+          - name: postgres
+            context: deploy/postgres-image
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ matrix.name }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  deploy:
+    needs: images
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers in the repository's settings to approve each deploy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Package the release's configuration (the images hold the code)
+        run: tar czf release.tgz docker-compose.yml deploy authz
+
+      - name: Copy it to the VM, through IAP
+        run: >-
+          gcloud compute scp release.tgz "aerugo:/tmp/aerugo-${GITHUB_SHA}.tgz"
+          --zone "${{ vars.GCP_ZONE }}" --tunnel-through-iap --quiet
+
+      - name: Deploy
+        run: >-
+          gcloud compute ssh aerugo --zone "${{ vars.GCP_ZONE }}" --tunnel-through-iap --quiet --command
+          "sudo bash -euc 'tar xzf /tmp/aerugo-${GITHUB_SHA}.tgz -C /opt/aerugo/release && rm /tmp/aerugo-${GITHUB_SHA}.tgz
+          && bash /opt/aerugo/release/deploy/gcp/vm/deploy.sh ${GITHUB_SHA}'"
+
+      - name: Check it answers
+        run: |
+          for i in $(seq 30); do
+            curl -fsS "https://api.${{ vars.AERUGO_DOMAIN }}/readyz" >/dev/null && echo "Aerugo answers." && exit 0
+            sleep 10
+          done
+          echo "Aerugo didn't answer in five minutes: see the VM's logs (README)." && exit 1

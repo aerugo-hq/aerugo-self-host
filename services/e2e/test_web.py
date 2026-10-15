@@ -8,8 +8,8 @@ from playwright.sync_api import expect
 from conftest import WEB, sign_in
 
 # The seed runbook, by its id: readable by the payments group only. Found by id, not title, because a copy synced from
-# GitHub can share its title (and alice, linked to GitHub, may read that copy too).
-RUNBOOK = 'a.result[href="#/concepts/pay-runbook"]'
+# GitHub can share its title (and alice, linked to GitHub, may read that copy too). A result opens in the reader.
+RUNBOOK = 'a.result[href="#/documents/pay-runbook"]'
 
 
 def search(page, q: str):
@@ -71,6 +71,18 @@ def test_alice_imports_a_notion_export_and_finds_it(page, tmp_path):
         panel(page, "Imports").locator("tr", has_text=name).get_by_role("button", name="Remove").click()
         page.get_by_role("alertdialog").get_by_role("button", name="Remove import").click()
         expect(panel(page, "Imports").locator("tr", has_text=name)).to_have_count(0)
+
+
+def test_the_gallery_offers_every_source_and_opens_its_form(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/admin/sources")
+    panel(page, "Connections").get_by_role("button", name="Connect a source").click()
+    gallery = page.get_by_role("list", name="Sources you can connect")
+    expect(gallery.get_by_role("listitem").filter(has_text="Slack")).to_contain_text(re.compile(r"Coming next|Planned"))
+    gallery.get_by_role("listitem").filter(has_text="Confluence Cloud").get_by_role("button", name="Connect").click()
+    form = page.get_by_role("form", name="Connect Confluence")
+    expect(form.get_by_role("textbox", name="Confluence site", exact=True)).to_be_visible()
+    expect(form.get_by_label("API token")).to_have_attribute("type", "password")  # a token is never shown
 
 
 def test_olivia_sets_up_and_removes_google_sign_in(page):
@@ -160,12 +172,17 @@ def test_typing_at_focuses_a_question_on_a_document(page):
 def test_documents_opens_a_document_and_asks_about_it(page):
     sign_in(page, "alice")
     page.goto(f"{WEB}/#/documents")
-    expect(page.get_by_role("heading", name="Documents", exact=True)).to_be_visible()
-    page.get_by_role("button", name=re.compile("Payments API incident response")).first.click()  # synced copies share the title
-    panel = page.get_by_role("complementary", name="About Payments API incident response")
-    expect(panel).to_be_visible()
-    panel.get_by_role("link", name="Ask about this").click()
-    expect(page).to_have_url(re.compile(r"#/ask/focus:"))
+    expect(page.get_by_role("heading", name="Documentation", exact=True)).to_be_visible()
+    spaces = page.get_by_role("navigation", name="Your spaces")
+    expect(spaces.get_by_role("button", name=re.compile(r"^payments", re.I))).to_be_visible()  # every space you're in
+    page.get_by_role("searchbox", name="Search every space's pages by title").fill("incident response")  # unfolds them all
+    pages = page.get_by_role("navigation", name=re.compile(r"^Documents in payments$", re.I))
+    pages.get_by_role("link", name="Payments API incident response").first.click()  # synced copies share the title
+    expect(page).to_have_url(re.compile(r"#/documents/.+"))
+    expect(page.locator(".reader-title")).to_have_text("Payments API incident response")
+    expect(pages.locator('a[aria-current="page"]')).to_have_count(1)  # the tree shows where you are
+    page.get_by_role("link", name="Ask about this").click()
+    expect(page).to_have_url(re.compile(r"/ask/focus:"))  # in the page's own team: #/t/<team>/ask/focus:<id>
     expect(page.get_by_role("group", name="Answering from")).to_contain_text("@ Payments API incident response")
 
 

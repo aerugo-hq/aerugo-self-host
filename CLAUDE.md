@@ -1,6 +1,51 @@
-# knowledge-layer: instructions for Claude Code
+# Aerugo (self-hosted): instructions for Claude Code
 
-Open-source, permission-aware knowledge platform: curated OKF bundles (Git, PR-reviewed) plus a hybrid-search evidence layer, behind one policy decision point. The full design is in `docs/design/v1.md`; read the relevant section before changing architecture. The current milestone is **slice I (compliance operations) built: data-subject requests, access reviews, retention and legal holds, persistent OpenBao, per-team encryption, backups and the restore drill, personal-data detection, the control map, and runbooks; next is F (connectors: F1, routing each repo to its own team, F2, Google Drive (ADR 0008), and F2b's Google sign-in linking are built; Google groups and incremental Drive sync remain), with L2 (spreadsheets, OpenDocument, email, plain text, RTF, and OCR for scans and images) built, D4b (screens for everything that had only an API) built, and J1 (CI pipelines pushing with workload tokens, ADR 0007) and J2 (importing Confluence and Notion exports) built; left before deployment: the drill-down slices R1–R4 (R1's conversation backend is built; its workspace UI is next), and optionally Google groups and incremental Drive sync, with deployment (E) and Q last, and D5's browser tests (`make e2e`) built, per `docs/design/build-plan.md`**. Build the remaining slices in that order: each must keep every `make smoke` check green and add its own (see §13 of the design doc).
+## What Aerugo is
+
+Aerugo is **the knowledge layer for an enterprise**. It brings in what every team knows, from every source, connects it
+across team boundaries, and serves it to people, AI agents, RAG systems, and decision tools, always within each
+person's permissions. **The knowledge layer is the product**; connectors, the web app, and the hosted service are built
+around it. Its promise is *measurably accurate, and honest when unsure*: precision over completeness.
+
+This repository is the open product: everything a company needs to run Aerugo in its own environment. The hosted
+service's control plane is private (`aerugo-SaaS`); it deploys pinned releases of this product and never copies it.
+The Terraform provider lives in its own repository (`terraform-provider-aerugo`).
+
+Where documents disagree, **ADR 0010 and this file win**. `docs/design/v1.md` and `docs/design/build-plan.md` record
+how the project started; read them for history, not for direction.
+
+## The knowledge layer (ADR 0010)
+
+| Component | What it does |
+|---|---|
+| **Extract** | Turns any format into text and structure: documents, slides, sheets, PDFs, email, scans (OCR). |
+| **Evidence** | Everything from every source: chunks, embeddings, full text, metadata, permissions, classification. |
+| **Graph** | Entities (people, systems, tables, projects, customers) and typed links between everything. |
+| **Curated** | A small set of reviewed pages in OKF (definitions, decisions, system pages, runbooks), citing evidence. |
+| **Quality** | Evaluation sets, the review queue for unsure links and merges, and knowledge health. |
+| **Policy** | Permissions, egress, audit, and retention, on every read path. |
+| **Interfaces** | The REST API, MCP, an SDK, a change feed, and OKF export, so anyone can build on the layer. |
+
+**Where data lives.** Original documents stay in their sources, the system of record; documents never move. Aerugo's
+store (inside the company's environment when self-hosted, in its region on the hosted service) keeps what it extracts:
+text, chunks, embeddings, metadata, the graph, and permission mirrors; optionally an original's copy, encrypted with
+its team's key. Large media is a pointer plus derived text (transcripts, descriptions), never a copy. Curated pages are
+small: they live in Git (one repo per team, or one repo with a folder per team) or in Aerugo's own versioned store for
+teams that don't use Git. OKF is the curated layer's format and the portable export, never a requirement that every
+document become OKF.
+
+**Three kinds of links**, never mixed up: *recorded* (facts a source wrote down: references, attachments, lineage,
+owners; near-certain), *inferred* (Aerugo's judgment: the same entity, a similar meaning; always shown with its
+confidence and reason, drawn dashed), and *confirmed* (a person agreed; becomes a rule for that company).
+
+## Identities and connections
+
+Aerugo owns no credentials to anyone else's systems. The **runner** (self-hosted: the worker) runs as the company's
+own service account; each **connector** uses either the runner's identity (no key at all) or a reference to a secret
+in the company's own secret manager, never the value. **API access** is separate and is the only identity Aerugo
+checks: people sign in through SSO; pipelines show their own identity (a GitHub Actions token, a cloud service
+account), with a token as the fallback. Today's service accounts (slice T1) become these trusted workloads. The
+decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 
 ## Invariants (IMPORTANT: never violate; ask before any change that touches one)
 
@@ -16,29 +61,244 @@ Open-source, permission-aware knowledge platform: curated OKF bundles (Git, PR-r
 4. Principals entering RLS context must pass `principals.is_valid`. Never build principal strings from unvalidated input.
 5. Secrets never go into Postgres, logs, exceptions, traces, or Git. Store a `credential_ref` and read the value from `kl.vault` at the moment of use. Pydantic fields holding secrets use `repr=False`.
 6. Authenticated calls act as the end user. Never add a shared or service key that bypasses document ACLs.
-7. Content may go to a model (generation or embeddings) only if its classification is allowed for that endpoint (egress policy, M4).
+7. Content may go to a model (generation or embeddings) only if its classification is allowed for that endpoint (egress policy).
 8. Deny by default. Treat an unknown principal, missing context, or unresolved identity as no access, and fail closed on errors in authorization code.
-9. Every new read surface (REST, MCP, webhook payload, export) adds permission-leak checks to `kl/smoke.py` (later, the leak suite) in the same PR.
+9. Every new read surface (REST, MCP, webhook payload, export) adds permission-leak checks to `kl/smoke.py` in the same PR.
 10. No new infrastructure dependency without an ADR in `docs/adr/`.
 11. Don't return counts of hidden items or distinguish "forbidden" from "not found" for content or private workspaces. Use 404.
 12. Synced content carries only the source's permissions. ACL arrays hold source identities (`ext:github.<login>`), and a caller gets them only through a `principal_aliases` link, expanded inside `db.scoped()`. Never put workspace, group, or org principals on synced content: connecting a source must never widen who can read it.
 13. Webhooks are hints, never truth. A delivery must pass HMAC verification and replay protection, and it may only queue jobs. Never read permissions or content from a webhook payload; the job re-reads the source.
+14. Every link carries its provenance: the signal that made it, its strength, and the evidence behind it. Never store a bare edge.
+15. Graph expansion is authorized at every hop. A walk never passes through, or reveals, a node the asker can't read.
+16. Nothing derived mixes permissions. A summary, cluster label, or entity description shown to someone is built only from what that person can read; never precompute one across documents with different readers.
 
 ## Conventions
 
 - Python 3.12, FastAPI, psycopg 3 with plain SQL (no ORM), httpx. Keep modules small and typed.
-- Schema changes are numbered migrations in `services/api/kl/migrations/NNNN_name.sql`. `provision` applies pending ones on every `make up`. Never edit an applied migration; add a new one. `deploy/postgres/sql/` is the frozen M0 baseline.
+- Schema changes are numbered migrations in `services/api/kl/migrations/NNNN_name.sql`; `provision` applies pending ones on every `make up`. Never edit an applied migration. `deploy/postgres/sql/` is the frozen M0 baseline; dev seed data never goes into migrations.
 - Background work goes through the `jobs` table and `kl/worker.py` handlers. The worker runs as `kl_ingest` with its org context set, so RLS still applies.
-- Embeddings carry their own copy of each chunk's ACL. Any code that changes a chunk's ACL must update `chunk_embeddings` in the same transaction, or the vector path leaks.
-- Authorization model: `authz/model.json` is loaded by `kl.provision`. Keep the readable DSL in `docs/design/v1.md` §5.4 in sync.
-- OKF: follow OKF v0.2 exactly; our extensions live only under the `x-kl` frontmatter key. Preserve unknown keys when round-tripping.
+- Embeddings carry their own copy of each chunk's ACL. Code that changes a chunk's ACL updates `chunk_embeddings` in the same transaction, or the vector path leaks.
+- Authorization model: `authz/model.json`, loaded by `kl.provision`. A document's readers come from its source (direct grants, or its container); team membership never grants a document.
+- OKF: follow OKF v0.2 exactly; extensions live only under `x-kl`. Relation types: `owns`, `owned-by`, `depends-on`, `approves`, `derived-from`, `supersedes`; targets are bundle paths or `kl:<id>`. A page never names a page its readers can't see.
+- The web app follows `docs/design/DESIGN.md`: Datavine's system with Verdigris as the one accent; light, dark, and system themes; every color is a token, and every pairing meets WCAG AA.
 - Tests describe behavior in plain sentences (see `kl/smoke.py` docstrings). Write permission tests first.
 - Never use dev credentials outside the local stack.
 
-## Commands
+## Commands (run from this folder)
 
-- `make up`: build and start the stack.
-- `make smoke`: run the smoke suite; it must pass before you call a task done.
-- `make github-app ORG=<org>`: create the dev GitHub App via the manifest flow; credentials land in `.secrets/`.
+- `make up`: build and start the stack. `make web`: the web app on http://localhost:3000.
+- `make smoke`: the smoke suite; it must pass before a task is done. It expects the plain seed.
+- `make e2e`: the browser tests. `make eval`: the golden set (slice M2); `make eval-mine` grows it from feedback.
+- `make demo`: load the fictional migration company (`sandbox/scenarios/migration`). `make eval-scenario`: load it and score its questions; it fails only on a permission leak. Run `make reset && make up` before `make smoke` afterwards.
+- `make github-app ORG=<org>`: the dev GitHub App; credentials land in `.secrets/`.
 - `make reset && make up`: re-run init SQL and the realm import after schema or seed changes.
 - `docker compose logs <service>`: debug a service.
+
+## What's built
+
+- **Retrieval and knowledge:** hybrid search (pgvector and full text) behind RLS and OpenFGA post-checks, with audit; curated OKF bundles with tiers (gold, silver, evidence); proposals compiled from evidence and reviewed as pull requests; Ask with conversations, focus, and citations; the Map, with entities extracted from text.
+- **Sources:** GitHub (routing each repo to its own team), Google Drive (with Google sign-in linking), CI pipelines pushing with workload tokens, Confluence and Notion export imports. Formats: PDFs, Office files, spreadsheets, OpenDocument, email, plain text, RTF, and OCR for scans and images.
+- **Connections:** create, refresh, change in place, and remove; removal retires what only that team held, its authorization first.
+- **Compliance:** data-subject requests, access reviews, retention, legal holds, persistent OpenBao, per-team encryption, pgBackRest backups and the restore drill, personal-data detection, the control map, runbooks, and team purge.
+- **Administration:** teams, members, models and budgets, service accounts, marks for what Terraform manages, alerts, and observability (Grafana, Jaeger, Prometheus).
+- **The web app:** team scopes with documentation-style spaces and an in-place reader; Datavine's design system; light, dark, and system themes.
+- **The Terraform provider:** teams, members, models, budgets, and service accounts.
+- **Tests:** the smoke suite, 21 browser tests, the golden set, and the evaluation-scenario runner (`kl/evals.py`) with its opt-in scenario loader.
+
+## What's next, in order
+
+The knowledge layer comes first; the platform is built around it afterwards.
+
+1. **K1, the evaluation set.** Built: the runner (`kl/evals.py`, 13 cases with permission traps), the scenario mode of
+   the seed job, `make demo` / `make eval-scenario`, and the migration company's ten pages in
+   `sandbox/scenarios/migration/<team>-knowledge/` (Commons: the program, the platform standards, and data owners;
+   Payments: ORDER_HIST, edp.orders, the EDP-412 migration, and the Q3 2025 cutover decision superseding Q2; Finance:
+   the Sales dashboard; Legal, private: order data retention). Payments pages never name Legal's page. **Next:**
+   record the first baseline, then merge `kl.evals` into `kl.eval`'s scorecard.
+2. **K2, recorded links.** Built: references (migration 0033: `reference_links`, with the signal, its strength, and the
+   text that made each one; `links.refresh_references`). A document that writes another document's address, or an
+   identifier a curated page declares among its aliases (ORDER_HIST, EDP-412, edp.orders), links to it; plain words and
+   identifiers two pages share never link. The map serves them as `reference` edges, between visible documents only,
+   after curated links and before semantic ones. **Next, K2b:** attachments ("attached to"), then owners and authors
+   from every connector.
+3. **K3, systems and data.** Built: lineage in OpenLineage's shape (`POST /v1/workspaces/{ws}/lineage`, team
+   admins; migration 0034: `assets` and `lineage_edges`, metadata only) becomes datasets and jobs on the map, joined by
+   `lineage` edges and a `describes` link from the page that declares an asset's name; one node per asset however many
+   teams report it; shown only to members of a reporting team. The scenario loads Payments' and Finance's lineage.
+   **Next:** connectors that emit it for you (an OpenLineage HTTP endpoint for Airflow and Marquez, dbt and Dataform
+   manifests, BigQuery's lineage API, warehouse catalogs).
+4. **K4, understanding.** Built: entity resolution on the map (an entity whose name a visible page declares among its
+   aliases is that page, so its mentions link to the page; an alias two pages declare resolves to neither). **Next:**
+   chunk context written at index time, and the same resolution in search.
+5. **K5, decisions.** Built: current knowledge first (`ranking.current_first`, applied at the end of retrieval):
+   among the results someone may see, a page another result `supersedes` ranks just after it, so the eval's "When is
+   the order history cutover?" now counts. **Next:** decisions as their own items, extracted from Jira comments and
+   Confluence decision pages: what was decided, who decided, when, and where it's recorded.
+6. **K6, people.** Built: who to ask about a page (`kl/people.py`; `GET /v1/concepts/{key}/people`; the reader's "Who
+   to ask"): who verified it, who owns it, its owning team's members (listed only for teams the asker is on, so a
+   private team's membership never leaks), and the people it names, each with reasons; a hidden page is a 404.
+   **Next:** the company directory as a connector (display names, who's still active), then assignees and commenters
+   from Jira.
+7. **K7, the Map redesign.** Built, after EdgeQuake's look: one packed disc (`graph-physics.js`), clusters found from
+   the links by Louvain local moving at resolution 1.5, links weighted by shared neighbors (`graph-clusters.js`; plain
+   label propagation let one hub page paint everything one color), a pastel per cluster from the `--cluster-0` to
+   `--cluster-9` tokens (light and dark), no lines and no names at rest (a lit node names itself and its links, with a
+   halo, and draws its links in blue, itself purple), fitting that keeps the typical bubble at about 14 px on screen and refits when
+   the panel resizes, and the selected node as a bottom card that says how each link was made. A lit node's links are
+   drawn by kind (`LINK_STYLE`): curated bold, recorded (references, lineage, mentions) solid, inferred dashed.
+   **Next:** stable cluster IDs across reloads as the graph grows; cluster names built only from what the viewer can
+   read.
+8. **K8, the permission-checked walk.** Built: for lineage, `GET /v1/lineage/impact` (what depends on an asset,
+   nearest first, loading only lineage the caller's own teams reported); in search and Ask, a hop along recorded
+   references (`REFERENCE_NEIGHBORS_SQL`) after the curated one, each page found authorized on its own.
+   **Next:** lineage hops inside search and Ask (a dashboard's question reaching the tables it reads).
+9. **K9, confidence.** Built: every answer carries High, Medium, or Low with reasons, from signals (the tier of what it
+   cites, how many sources, whether one is superseded), never the model's opinion of itself (`kl/confidence.py`);
+   saved with the message (migration 0035) and hidden with it; Ask shows the badge and reasons. **Next:** claim-level
+   checking; thresholds calibrated against each company's evaluation set; abstaining when unsure.
+10. **K10, review and health:** the review queue for unsure links and merges, confirmed decisions as rules, and a
+    knowledge-health page that shows accuracy.
+11. **K11, extraction gaps:** attachments as their own documents, descriptions of diagrams, transcripts for audio and
+    video, a richer document model (sections, tables), and pointers for large media.
+12. **K12, interfaces.** Built: MCP graph tools `related`, `who_to_ask`, and `impact` (same permission path as the
+    app). **Next:** neighbors, path, and why-linked tools; an SDK; a change feed; OKF export; curated review inside
+    Aerugo for teams without Git.
+
+**Connectors (ADR 0011: a service account reads; people see only their own access).** Built: the ADR; one sync loop
+for every connector (`kl/sync_items.py`: items in, documents, grants, deletions, and routing out); connections with
+their own cadence (`every_minutes`), freshness (`last_synced_at` is when readers were last read), and a credential
+either stored once or referenced under the team's own `openbao://secret/kl/<org>/<team>/connections/` (migration 0036);
+Jira Cloud (`kl/jira.py`: projects as containers, issues with comments, Jira's own permissions including security
+levels, `company_site` for company-wide projects, the accounts Jira names recorded in `source_identities`), with a fake
+and a smoke leak check. Identity matching (`kl/identity_match.py`, run at `/v1/whoami`): a person is linked to the source
+accounts that connectors reported with their SSO-verified email, in a domain the company declared (`KL_ORG_EMAIL_DOMAINS`),
+recorded as `sso-email`; never an account someone else holds; removed, grant and all, once it stops holding; proven
+links untouched. The Connect-a-source gallery (Admin, Sources, Connections: `CONNECTORS` in `admin-view.js`): every
+source, the built ones with a form (Jira) or steps (GitHub, with its installations found and connected in a click;
+imports, pipelines, lineage), the rest marked coming; each connection's row shows its cadence and when its permissions
+were last read, with re-sync, pause, resume, and remove (confirmed). Google Drive on a service account (`kl/gdrive.py`):
+its JSON key signs its own token request (RS256, read-only Drive scope), sent only to the allowed Google address, never
+a key's own `token_uri`; shared drives it's a member of, plus folders shared with it (`folder-<id>` containers, walked
+breadth first, always selected); the accounts Drive names recorded for identity matching; the person-token mode kept
+only for older connections. Directories (`kl/directory.py`, migration 0037), Okta first: who's at the company and who
+has left, by email, in `directory_people`; an email listed twice is active if any listing is; deprovisioned people
+are asked for explicitly; Okta's next-page links are followed only on the same org; a leaver's `sso-email` matches
+are revoked by the worker as soon as the directory says so, grants and all, and matching refuses them at sign-in;
+links a person proved stay. Documents, as in Datavine's documentation (`documents-view.js`), at the org and in a team
+alike: a 288px sidebar with a Documentation header, a page search, and every space you're in (at the org, each
+unfolding on click, its pages loaded then, a search unfolding them all; in a team, that one unfolded), each tree its
+own navigation, "Documents in <space>"; the main pane a sticky bar (the space, where the page sits in its source, and
+its actions) over an 800px reading column, or a home with what was added recently. A page opened at the org keeps
+its own address (`#/documents/<id>`), its space unfolded. Every document opens: a curated page through its page, any
+other through
+`GET /v1/documents/{key}/content` (its sections, through the documents list's own gates, a 404 otherwise). Text is
+rendered by `markdown.js` in documents mode: links (http and https), images (https; an http one is only a link),
+and video players for YouTube, Vimeo, and Loom built from a validated id (YouTube's privacy-enhanced domain,
+sandboxed, lazy, sending only the site's origin), and video files over https; Ask's answers never embed anything.
+Each source shows as its own brand mark (`brand.js`: `SourceIcon`, and `sourceName` for its name), the same wherever a
+source shows, so people can tell at a glance where something came from: search results and Ask's sources (both open
+any document in the reader, in scope), the Documents tree's groups, the breadcrumb, Open in, the space's recent table,
+the gallery, connection rows, and imports; the label loses its kind's name (`sourceOf`) since the mark says it. Search
+results and Ask's citations carry `source_kind` (every retrieval query selects it; stored citations keep it). Marks
+are files in `services/web/public/brand/`, fetched as the web image builds (`scripts/brand-icons.mjs`, in the
+Dockerfile): full color from Iconify's open logos set first, one color from Simple Icons otherwise, each recorded in
+`sources.json` so a one-color mark upgrades later and nothing downgrades; any holding a script, an outside reference,
+or an embedded image is refused. Never committed (trademarks), never drawn in code; a missing one is a neutral glyph;
+in dark mode each sits on a light backing (`--mark-bg`), never inverted.
+The tree remembers what's open (`folds`, keyed by each folder's path): a source starts unfolded and its folders folded,
+opening a page unfolds its way there (`foldsTo`), nothing folds unless you fold it, and a search unfolds its matches
+without changing what's remembered. Sources order curated pages first, then Confluence, Jira, GitHub, Drive, Notion,
+Slack, each named by its container (spaces by name: `connection_containers.display_name`, migration 0038, set at
+discovery; imports and pipelines by their names; curated bundles by theirs), returned as each document's `container`.
+The reader isn't remounted per page: the current page stays under a thin progress line until the next is ready,
+pages read are cached for the session (`READ`, at most 50), and pressing a link starts the read (never hover: reads
+are audited). `markdown.js` renders pipe tables (alignment, cell formatting, wide ones scrolling inside the page).
+Connections are Terraform-ready (the API half of `aerugo_connection`): every create and update records its manager
+from the provider's `Aerugo-Managed-By` header (`kl/managed.py`, moved out of `main.py` so the connections API can
+share it), and reads return `managed_by`; a connection's read returns its `settings` (site, projects, company_site,
+cadence, domain, drives, repositories, provider) and `enabled`, so a plan sees no false drift, naming a
+`credential_ref` only when it's the team's own; updates rotate a secret Aerugo stored (an API token, or a service
+account key), refusing a team's own reference (rotate it where it lives); removing a connection destroys only the
+secret Aerugo stored for it, recognized by its own path (`kl/connections/<id>`), never a team's or GitHub's app.
+The provider's half (terraform-provider-aerugo): `aerugo_connection` (`internal/provider/connection_resource.go`), one
+resource for every kind (github, google, jira, directory), its credential a `credential_ref` or a write-only
+`api_token` / `service_account_key` (never in state; `credential_version` rotates it); cadence, `enabled`, the scope
+lists, and the Jira email change in place, removing a list replaces it; imports as `team/name`; an acceptance test
+against the fake Jira (`connection_test.go`). `examples/onboarding` is a whole onboarding repository: a YAML file per
+team (`teams/<team>/sources.yaml`, found by `fileset`), the `aerugo-team` module (which refuses a source without a
+`credential_ref`), `CODEOWNERS`, a GCS state backend, a workflow that plans on pull requests and applies on merge, and
+`terraformrc.example` for the private provider mirror. In the app, a connection Terraform manages shows its tag (the
+workspace managing it, and that a change made here is undone on its next apply) and only Re-sync (and GitHub's
+routing, which Terraform doesn't manage); any other can be edited in place: its cadence (one set elsewhere kept as a
+choice) and its scope list, prefilled from its settings. Credential references can also name a GCP Secret Manager
+secret (`kl/gcp_secrets.py`): `gcpsm://projects/<project>/secrets/kl_<org>_<team>_<name>[/versions/<n>]`, in a
+project the deployment allows (`KL_GCP_SECRET_PROJECTS`, none unless set), named for its team (underscores, which
+teams' names never hold, so no prefix is another team's); the runner reads it as its own workload identity (the
+metadata server) or a key file (`GOOGLE_APPLICATION_CREDENTIALS`); `vault.get` hands it such references; smoke proves
+it with a fake Secret Manager and metadata server. Phase 0 and Phase 1 of the plan are built; next, the deployment.
+The deployment's first stage (`deploy/gcp`, README there): one VM, deployed by `.github/workflows/deploy-gcp.yml`, run
+by hand (`workflow_dispatch`; merging to main deploys nothing). GitHub signs in keyless (Workload Identity Federation, this repository's main branch only),
+builds the api, web, and postgres images into Artifact Registry by commit, and runs `deploy/gcp/vm/deploy.sh` on the
+VM through IAP: it reads the VM's settings (metadata) and every credential (Secret Manager, generated by
+`deploy/gcp/terraform`) into a root-only .env, builds the production realm and seed tuples from the dev ones
+(`vm/prepare.py`: no people, SSL required, no password grant, a generated kl-terraform secret, the domain's
+addresses; the org's structure and the first admin), initializes OpenBao once (Cloud KMS unseals it; the root token
+and recovery key go to Secret Manager), gives Keycloak its own Postgres database, and starts `compose.gcp.yml` over
+the dev file (registry images, restart policies, Keycloak in production mode, every dev fake gone, Caddy's TLS; the
+Keycloak admin console only through a tunnel). Provisioning makes no dev identity when `KL_DEV_IDENTITIES=0`, and
+removes any that exist.
+Local Kubernetes (`deploy/k8s`, README there; the default way to try it beyond Compose, free): kind or Docker
+Desktop's cluster, `make kind-up` then `make kind-open`. Plain manifests applied with `kubectl apply -k` (no Helm
+yet: YAML can be checked without a cluster), mirroring Compose service for service: Postgres, OpenBao, and Keycloak
+as StatefulSets with volumes (Keycloak's users kept), OpenFGA after its migrate Job, the provision Job, and the API,
+worker, and MCP server each waiting for provisioning (`aerugo-wait`: the authorization model is written); shared
+settings in `aerugo-app-env`; no demo content and no fakes. `up.ps1` refuses a non-local context, builds and loads
+the images (kind's CLI, or straight into the nodes), turns the repository's files into ConfigMaps on each run,
+re-creates the Jobs, and waits; `open.ps1` forwards Compose's ports. The GCP VM deploy is by hand only.
+What's left is `docs/ROADMAP.md`: five sections of checklists (sources, quality, experience, agents, governance),
+item IDs, one definition of done, and the build order; tick items there as they land. Q1 (the quality baseline):
+`kl/evals.py` turns its results into a scorecard (`scorecard`), held to `kl/evals_baseline.json` (`compare`): a case
+that finds less, or MRR falling more than `MRR_TOLERANCE`, fails the run; what improved is said, to record next.
+`make eval-baseline` records it deliberately (`--record`: stdout holds only the JSON, everything else goes to stderr;
+written to a temporary file and moved, so a failed or leaking run never replaces the baseline); CI runs
+`make eval-scenario` after smoke.
+S1 (Confluence, live), its core: `kl/confluence.py`. Confluence has no "who may read this page" call, so readers are
+computed: a space's read grants (people, and groups' members, expanded once per sync; a space role grants nothing),
+narrowed by the read restriction on every restricted page from the root down (`narrowed`); the whole org only on a
+confirmed company site, when anyone may read the space (anonymous, or the `confluence-users` group). Fails closed: an
+unreadable restriction or folder drops that subtree; a group that won't expand grants nothing; a page nobody may read
+isn't an item. The storage format becomes sections per heading, tables as pipe tables, fenced code, Jira keys, link
+text (over the linked title), tasks with their state (from the status alone), images by file name. A page's path is
+its ancestors' titles (` › `), for the tree. Labels and page trees filter; attachments are listed. Paging follows
+only next links on the site itself. Keys are `confluence-<id>`; accounts `ext:atlassian.<id>`, shared with Jira.
+`KL_CONFLUENCE_API_BASES` adds sites beyond Confluence Cloud's (the dev fake).
+S1 wired in: `POST .../connections/confluence` (Confluence sites only, one credential, the team fence; space keys,
+labels, and page ids validated by `confluence_scope`), its scope lists in updates and in Terraform's `settings`, the
+worker's discovery and sync, `SOURCE_KINDS` for retiring. The documents list returns each document's `path`, and
+Documents nests a live page under its ancestors. A live sync retires the export copies of the pages it read, in the
+team the space syncs into (`team_for`), with their tuples (`retire_exported`); another team's are never touched. The
+fake Confluence (`kl/fake_llm.py`) answers the client's every call at Confluence's paths; smoke's
+`confluence_pages_carry_confluences_own_permissions` proves inherited restrictions, a page nobody passes, groups, the
+space's name and tree, a label filter, an export retired, and three refusals. The gallery's form, editable spaces,
+`kind = "confluence"` in the provider (spaces, labels, page_trees; an acceptance test) and its onboarding module, and
+`docs/connectors/confluence.md` (the account, and exactly the read-only access it needs). S1 is done.
+Step V (everything built, proven in the stack): `make smoke` (123 passed; the optional checks skip, as in CI),
+`make eval-scenario`, `make e2e` (21 browser tests; the gallery's is new), the provider's build, vet, and acceptance
+tests (`TestAccConnection`, `TestAccConnectionConfluence`, and the rest), and `make kind-up` then `make kind-open` on
+a kind cluster, signed in. What failed: `retire_exported` looked for exported pages as `source_kind = 'confluence'`,
+but imports store `'import'`, so a page read live stayed indexed twice; T2's Drive fixtures were title-only Docs,
+which the extractor rightly refuses; and the imports check's cleanup is a job, so the conversations check after it
+cited a page that went mid-conversation (`earlier_turns` then rightly dropped that answer). The first baseline is
+recorded (`kl/evals_baseline.json`: Recall@10 100%, MRR 0.92 over 12 cases), after smoke, as CI orders them. Locally,
+a GitHub App in `.secrets/` turns smoke's optional checks on: they connect your own sandbox org, and the curator check
+opens and merges a real pull request in its `payments-knowledge`, adding a curated page each run, which in time
+crowds the seed's runbook out of Ask's sources; `KL_OTEL_ENDPOINT` left in `.env` by `make obs` fails the trace check
+unless the collector runs. To prove an item as CI does, run with `.env.example` and no `.secrets/` (BUILD_PLAN's traps).
+**Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
+loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
+done; next S2 (Google Workspace as a directory, and Drive's group shares) to S8; then Q1 (its golden-set part) to Q8;
+E1 to E3; A1 to A4; G1 to G3.
+
+Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
+models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;
+the Helm chart with its volumes; and continued polish of the web app's spacing and components.

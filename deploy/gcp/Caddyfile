@@ -1,0 +1,24 @@
+# The edge of an Aerugo deployment: HTTPS for each public address, certificates from Let's Encrypt (renewed by Caddy),
+# and nothing else reachable. Keycloak's admin console isn't public: reach it through an IAP SSH tunnel (README).
+{
+	email {$ACME_EMAIL}
+}
+
+app.{$KL_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:3000
+}
+
+api.{$KL_DOMAIN} {
+	reverse_proxy api:8000
+}
+
+mcp.{$KL_DOMAIN} {
+	reverse_proxy mcp:8090
+}
+
+auth.{$KL_DOMAIN} {
+	@admin path /admin /admin/*
+	respond @admin 404
+	reverse_proxy keycloak:8080
+}

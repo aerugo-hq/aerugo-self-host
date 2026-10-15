@@ -182,7 +182,7 @@ export default function App() {
       case "home": return h(HomeView, { me, alerts });
       case "search": return h(SearchView, { me, initial: where.arg });
       case "ask": return h(AskView, { me, id: where.arg });
-      case "documents": return h(DocumentsView, { me, names });
+      case "documents": return h(DocumentsView, { me, names, doc: where.arg }); // every space; a document opened in place
       case "developer": return h(DeveloperView, { me });
       case "concepts": return h(ConceptView, { id: where.arg });
       case "proposals": return h(ProposalsView, { me, id: where.arg });

@@ -1,0 +1,238 @@
+# The stores: Postgres (pgvector and pgBackRest), OpenFGA and its migration, and OpenBao, as docker-compose.yml runs them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: aerugo/postgres:dev
+          imagePullPolicy: IfNotPresent
+          args: ["postgres", "-c", "archive_mode=on", "-c", "archive_command=pgbackrest --stanza=kl archive-push %p",
+                 "-c", "archive_timeout=300"]
+          env:
+            - name: POSTGRES_DB
+              value: kl
+            - name: POSTGRES_USER
+              value: kl_owner
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: owner-password}
+            - name: KL_APP_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: app-password}
+            - name: KL_INGEST_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: ingest-password}
+            - name: KL_FGA_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: fga-password}
+            - name: PGBACKREST_REPO1_CIPHER_PASS
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: backup-cipher}
+            - name: PGBACKREST_PG1_USER
+              value: kl_owner
+          ports:
+            - containerPort: 5432
+          readinessProbe:   # over TCP, as kl_fga into openfga: that proves the init scripts finished (as in Compose)
+            exec:
+              command: ["sh", "-c", "PGPASSWORD=$KL_FGA_PASSWORD psql -h 127.0.0.1 -U kl_fga -d openfga -tAc 'select 1' > /dev/null"]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: pgbackrest
+              mountPath: /var/lib/pgbackrest
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: init   # deploy/postgres, its SQL in sql/ as 00-init.sh expects
+          configMap:
+            name: aerugo-postgres-init
+            items:
+              - {key: 00-init.sh, path: 00-init.sh}
+              - {key: 01-roles.sql, path: sql/01-roles.sql}
+              - {key: 02-schema.sql, path: sql/02-schema.sql}
+              - {key: 03-seed.sql, path: sql/03-seed.sql}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 5Gi}
+    - metadata:
+        name: pgbackrest
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 5Gi}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openfga-migrate
+spec:
+  backoffLimit: 30   # retried until Postgres is ready
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: openfga/openfga:v1.11.1
+          args: ["migrate"]
+          env:
+            - name: OPENFGA_DATASTORE_ENGINE
+              value: postgres
+            - name: OPENFGA_DATASTORE_URI
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: fga-datastore-uri}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openfga
+spec:
+  selector:
+    app: openfga
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openfga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openfga
+  template:
+    metadata:
+      labels:
+        app: openfga
+    spec:
+      containers:
+        - name: openfga
+          image: openfga/openfga:v1.11.1
+          args: ["run"]
+          env:
+            - name: OPENFGA_DATASTORE_ENGINE
+              value: postgres
+            - name: OPENFGA_DATASTORE_URI
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: fga-datastore-uri}
+            - name: OPENFGA_PLAYGROUND_ENABLED
+              value: "false"
+          ports:
+            - containerPort: 8080
+            - containerPort: 8081
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/grpc_health_probe", "-addr=127.0.0.1:8081"]
+            periodSeconds: 3
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao
+spec:
+  selector:
+    app: openbao
+  ports:
+    - name: http
+      port: 8200
+      targetPort: 8200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openbao
+spec:
+  serviceName: openbao
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openbao
+  template:
+    metadata:
+      labels:
+        app: openbao
+    spec:
+      containers:
+        - name: openbao
+          image: openbao/openbao:2.6.2
+          command: ["/bin/sh", "/openbao/start/start.sh"]   # the dev server that keeps its data across restarts (slice I3a)
+          env:
+            - name: KL_DEV_TOKEN
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: openbao-token}
+          securityContext:   # as in Compose: dev only (it owns its volume, and locks its memory)
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add: ["IPC_LOCK"]
+          ports:
+            - containerPort: 8200
+          readinessProbe:   # unsealed, with the services' token working and Transit mounted
+            exec:
+              command: ["sh", "-c", "BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$KL_DEV_TOKEN bao secrets list | grep -q '^transit/'"]
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - name: config
+              mountPath: /openbao/config/dev.hcl
+              subPath: dev.hcl
+            - name: config
+              mountPath: /openbao/start/start.sh
+              subPath: start.sh
+            - name: data
+              mountPath: /openbao/data
+      volumes:
+        - name: config   # deploy/openbao
+          configMap:
+            name: aerugo-openbao
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}

@@ -1,0 +1,84 @@
+# Sign-in: Keycloak in development mode, importing deploy/keycloak/realm-acme.json (the dev people, alice and the
+# rest) and its sign-in theme. Its issuer is http://localhost:8081, as in Compose: open.ps1 forwards that port. Its
+# users are kept on a volume, so an account you add (yourself, with your real email) survives a restart; the realm
+# is imported only when the volume is new (to import a changed realm: README).
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak
+spec:
+  serviceName: keycloak
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.3
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: keycloak-admin-password}
+            - name: KC_HOSTNAME   # one issuer, whatever address reaches it; the API validates against exactly this
+              value: http://localhost:8081
+            - name: JAVA_OPTS_KC_HEAP
+              value: "-Xms128m -Xmx768m"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /realms/acme
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 40
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - name: users   # its database, in development mode
+              mountPath: /opt/keycloak/data/h2
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+            - name: theme
+              mountPath: /opt/keycloak/themes/kl
+              readOnly: true
+      volumes:
+        - name: realm   # deploy/keycloak/realm-acme.json
+          configMap:
+            name: aerugo-keycloak-realm
+        - name: theme   # deploy/keycloak/themes/kl, its folders rebuilt
+          configMap:
+            name: aerugo-keycloak-theme
+            items:
+              - {key: theme.properties, path: login/theme.properties}
+              - {key: messages_en.properties, path: login/messages/messages_en.properties}
+              - {key: kl.css, path: login/resources/css/kl.css}
+  volumeClaimTemplates:
+    - metadata:
+        name: users
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}

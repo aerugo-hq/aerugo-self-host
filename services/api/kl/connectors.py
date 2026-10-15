@@ -27,6 +27,7 @@ class Container:
     kind: str
     visibility: str | None = None
     default_ref: str | None = None
+    name: str | None = None  # how its source names it: a space, project, shared drive or folder, or repository
 
 
 class Connector(Protocol):
@@ -57,7 +58,7 @@ class GitHubConnector:
         return [
             Container(external_id=r["full_name"], kind="repo",
                       visibility=r.get("visibility") or ("private" if r.get("private") else "public"),
-                      default_ref=r.get("default_branch"))
+                      default_ref=r.get("default_branch"), name=r["full_name"])
             for r in self.app.repositories(self.installation_id)
         ]
 

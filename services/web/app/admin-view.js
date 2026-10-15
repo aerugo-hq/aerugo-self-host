@@ -5,6 +5,7 @@
 import { createElement as h, useEffect, useState } from "react";
 import { ago, kl, klUpload } from "../lib/client.js";
 import { Icon } from "./icons.js";
+import { SourceIcon, sourceName } from "./brand.js";
 import { Alert, Confirm, Empty, PageHead, SectionNav, SkeletonRows, Spinner, Table, Status, TeamPicker, stamp } from "./ui.js";
 import { ManagedNote, TerraformDetails, budgetItem, memberItem, modelItem, teamItem, toolName } from "./terraform.js";
 
@@ -347,20 +348,80 @@ function Models({ ws, orgAdmin }) {
     models && models.length ? h(TerraformDetails, { items: models.flatMap((m) => [modelItem(ws, m), budgetItem(ws, m)]) }) : null);
 }
 
+// Every source a team can connect (ADR 0011: a service account reads; people see only their own access). Ready ones
+// open their form or their steps; the rest are next in line.
+export const CONNECTORS = [
+  { id: "jira", name: "Jira Cloud", what: "Issues and their comments, with Jira's own permissions, security levels included.", ready: true, action: "Connect" },
+  { id: "github", name: "GitHub", what: "Repositories, through a GitHub App installed on the ones to index.", ready: true, action: "Set up" },
+  { id: "imports", name: "Notion or Confluence export", what: "Upload an export; its pages arrive with the readers you name.", ready: true, action: "How" },
+  { id: "pipelines", name: "CI pipeline", what: "Documents pushed from GitHub Actions or another CI, signed in with its own token.", ready: true, action: "Set up" },
+  { id: "lineage", name: "Data lineage", what: "OpenLineage events from Airflow, dbt, Dataform, or Spark: what feeds what.", ready: true, action: "Set up" },
+  { id: "google", name: "Google Drive", what: "Shared drives a service account is a member of, and folders shared with it.", ready: true, action: "Connect" },
+  { id: "confluence", name: "Confluence Cloud", what: "Spaces, their pages and blog posts, with Confluence's own permissions: each space's readers, narrowed by every restriction down the tree.", ready: true, action: "Connect" },
+  { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members.", ready: false },
+  { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, with each file's sharing.", ready: false },
+  { id: "notion", name: "Notion", what: "Pages shared with an internal integration.", ready: false },
+  { id: "directory", name: "Directory (Okta)", what: "Who's at the company, and who has left: a leaver's matched access goes at once. Google Workspace and Entra next.", ready: true, action: "Connect" },
+];
+const EVERY = [[15, "Every 15 minutes"], [60, "Every hour"], [360, "Every 6 hours"], [1440, "Every day"]];
+const blankJira = { name: "jira", api_base: "", email: "", api_token: "", projects: "", company_site: false, every_minutes: 60, credential_ref: "" };
+const blankConfluence = { name: "confluence", api_base: "", email: "", api_token: "", spaces: "", labels: "", page_trees: "",
+                          company_site: false, every_minutes: 60, credential_ref: "" };
+const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
+const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
+const blankOkta = { name: "okta", api_base: "", api_token: "", every_minutes: 60, credential_ref: "" };
+// The scope list each kind has, to edit in place: its field, its label, and an example.
+const SCOPES = { jira: ["projects", "Projects", "EDP, PAY"], confluence: ["spaces", "Spaces", "PAY, ENG"], google: ["drives", "Shared drives", "Drive ids"],
+                 github: ["repositories", "Repositories", "acme/payments-api"] };
+const managedTitle = (m) => `Managed by ${toolName(m.by)}${m.workspace ? `, ${m.workspace}` : ""}: change it there. A change made here would be undone on its next apply.`;
+const every = (m) => (m ? (m % 1440 === 0 ? `Every ${m / 1440 === 1 ? "day" : `${m / 1440} days`}` : m % 60 === 0 ? `Every ${m / 60 === 1 ? "hour" : `${m / 60} hours`}` : `Every ${m} min`) : "Default");
+
 function Connections({ ws, teams }) {
   const [items, setItems] = useState(null);
   const [note, setNote] = useState({});
   const [repos, setRepos] = useState({}); // connection name -> its repos, once shown
   const [error, setError] = useState(null);
-  const load = () => kl(`connections?ws=${enc(ws)}`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
+  const [gallery, setGallery] = useState(false);
+  const [chosen, setChosen] = useState(null); // the connector whose form or steps are open
+  const [form, setForm] = useState(blankJira);
+  const [busy, setBusy] = useState(false);
+  const [installs, setInstalls] = useState(null); // GitHub App installations, once looked up
+  const [confirming, setConfirming] = useState(null); // the connection about to be removed
+  const [drive, setDrive] = useState(blankDrive);
+  const [okta, setOkta] = useState(blankOkta);
+  const [editing, setEditing] = useState(null); // the connection being edited, in its own row
+  const [edit, setEdit] = useState(null); // its form, from what it was declared with: cadence and scope
+  const [cf, setCf] = useState(blankConfluence); // the Confluence form (index 14)
+  const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [ws]);
+  const say = (name, tone, text) => setNote((n) => ({ ...n, [name]: [tone, text] }));
   async function resync(name) {
-    setNote((n) => ({ ...n, [name]: ["idle", "Queuing…"] }));
+    say(name, "idle", "Queuing…");
     try {
       await kl(`connections/${enc(name)}/refresh?ws=${enc(ws)}`, { method: "POST" });
-      setNote((n) => ({ ...n, [name]: ["ok", "Re-sync queued"] }));
+      say(name, "ok", "Re-sync queued");
     } catch (e) {
-      setNote((n) => ({ ...n, [name]: ["bad", e.message] }));
+      say(name, "bad", e.message);
+    }
+  }
+  async function setEnabled(name, enabled) {
+    say(name, "idle", enabled ? "Resuming…" : "Pausing…");
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/${enc(name)}`, { method: "PATCH", body: { enabled } });
+      say(name, "ok", enabled ? "Resumed" : "Paused");
+      load();
+    } catch (e) {
+      say(name, "bad", e.message);
+    }
+  }
+  async function remove(name) {
+    setConfirming(null);
+    say(name, "idle", "Removing…");
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/${enc(name)}`, { method: "DELETE" });
+      load();
+    } catch (e) {
+      say(name, "bad", e.message);
     }
   }
   // Each repo can go to its own team (slice F1); a team is offered only if you administer it, as the API requires.
@@ -379,15 +440,245 @@ function Connections({ ws, teams }) {
     }
   }
   async function route(name, repository, team) {
-    setNote((n) => ({ ...n, [name]: ["idle", "Moving…"] }));
+    say(name, "idle", "Moving…");
     try {
       await kl(`workspaces/${enc(ws)}/connections/${enc(name)}/routes`, { method: "PUT", body: { repository, workspace: team === ws ? null : team } });
       setRepos((r) => ({ ...r, [name]: r[name].map((c) => (c.external_id === repository ? { ...c, team } : c)) }));
-      setNote((n) => ({ ...n, [name]: ["ok", `${repository} moves to ${team} on its next sync`] }));
+      say(name, "ok", `${repository} moves to ${team} on its next sync`);
     } catch (e) {
-      setNote((n) => ({ ...n, [name]: ["bad", e.message] }));
+      say(name, "bad", e.message);
     }
   }
+  async function connectJira(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = form.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/jira`, { method: "POST", body: {
+        name: form.name.trim(), api_base: form.api_base.trim().replace(/\/+$/, ""),
+        email: byRef ? null : form.email.trim(), api_token: byRef ? null : form.api_token, credential_ref: byRef || null,
+        projects: form.projects.trim() ? form.projects.split(/[\s,]+/).filter(Boolean).map((p) => p.toUpperCase()) : null,
+        company_site: form.company_site, every_minutes: Number(form.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setForm(blankJira);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function connectConfluence(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = cf.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/confluence`, { method: "POST", body: {
+        name: cf.name.trim(), api_base: cf.api_base.trim().replace(/\/+$/, "").replace(/\/wiki$/, ""),
+        email: byRef ? null : cf.email.trim(), api_token: byRef ? null : cf.api_token, credential_ref: byRef || null,
+        spaces: list(cf.spaces, true), labels: list(cf.labels.toLowerCase()), page_trees: list(cf.page_trees),
+        company_site: cf.company_site, every_minutes: Number(cf.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setCf(blankConfluence);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function connectDrive(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = drive.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/google`, { method: "POST", body: {
+        name: drive.name.trim(), service_account_key: byRef ? null : drive.key.trim(), credential_ref: byRef || null,
+        domain: drive.domain.trim().toLowerCase() || null,
+        drives: drive.drives.trim() ? drive.drives.split(/[\s,]+/).filter(Boolean) : null, every_minutes: Number(drive.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setDrive(blankDrive);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function connectOkta(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = okta.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/directory`, { method: "POST", body: {
+        name: okta.name.trim(), provider: "okta", api_base: okta.api_base.trim().replace(/\/+$/, ""),
+        api_token: byRef ? null : okta.api_token, credential_ref: byRef || null, every_minutes: Number(okta.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setOkta(blankOkta);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  // Editing in place: its cadence, and its scope list where its kind has one. A list can be changed, not removed.
+  async function startEdit(c) {
+    if (editing === c.name) {
+      setEditing(null);
+      return;
+    }
+    setEditing(c.name);
+    setEdit(null);
+    try {
+      const d = await kl(`workspaces/${enc(ws)}/connections/${enc(c.name)}`);
+      const scope = SCOPES[c.kind];
+      const held = (d.settings || {});
+      setEdit({ every_minutes: held.every_minutes ? String(held.every_minutes) : "", scope: scope ? (held[scope[0]] || []).join(", ") : "" });
+    } catch (e) {
+      setEditing(null);
+      setError(e.message);
+    }
+  }
+  async function saveEdit(event, c) {
+    event.preventDefault();
+    const scope = SCOPES[c.kind];
+    const body = {};
+    if (edit.every_minutes) body.every_minutes = Number(edit.every_minutes);
+    if (scope && edit.scope.trim()) body[scope[0]] = edit.scope.split(/[\s,]+/).filter(Boolean).map((x) => (c.kind === "jira" || c.kind === "confluence" ? x.toUpperCase() : x));
+    say(c.name, "idle", "Saving…");
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/${enc(c.name)}`, { method: "PATCH", body });
+      say(c.name, "ok", "Saved");
+      setEditing(null);
+      load();
+    } catch (e) {
+      say(c.name, "bad", e.message);
+    }
+  }
+  async function findInstallations() {
+    setInstalls("loading");
+    try {
+      setInstalls((await kl(`workspaces/${enc(ws)}/connectors/github/installations`)).installations);
+    } catch (e) {
+      setInstalls(null);
+      setError(e.message);
+    }
+  }
+  async function connectGitHub(inst) {
+    setError(null);
+    try {
+      const name = String(inst.account).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "github";
+      await kl(`workspaces/${enc(ws)}/connections`, { method: "POST", body: { name, installation_id: inst.installation_id } });
+      setChosen(null);
+      setGallery(false);
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
+  const setD = (key) => (e) => setDrive({ ...drive, [key]: e.target.value });
+  const setO = (key) => (e) => setOkta({ ...okta, [key]: e.target.value });
+  const setC = (key) => (e) => setCf({ ...cf, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
+  const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
+  const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
+  const steps = {
+    jira: () => h("form", { className: "panel-body connector-form", onSubmit: connectJira },
+      h("p", { className: "connector-lede" }, "Create a service account in Atlassian (or a dedicated user), give it browse access to the projects to index, and make it an API token. It only sets what's indexed: each issue keeps Jira's own readers."),
+      field("Name", h("input", { className: "input", value: form.name, onChange: set("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      field("Jira site", h("input", { className: "input mono", value: form.api_base, onChange: set("api_base"), placeholder: "https://your-site.atlassian.net", required: true })),
+      form.credential_ref ? null : field("Account email", h("input", { className: "input", type: "email", value: form.email, onChange: set("email"), required: true, autoComplete: "off" })),
+      form.credential_ref ? null : field("API token", h("input", { className: "input mono", type: "password", value: form.api_token, onChange: set("api_token"), required: true, autoComplete: "off" }), "Stored in OpenBao and never shown again."),
+      field("Projects", h("input", { className: "input mono", value: form.projects, onChange: set("projects"), placeholder: "EDP, PAY" }), "Leave empty for every project the account can browse."),
+      field("Sync", h("select", { className: "select", value: form.every_minutes, onChange: set("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: form.company_site, onChange: set("company_site") }),
+        h("span", null, h("b", null, "This Jira site is our company's own. "), "Then a project anyone in Jira may browse is readable by everyone in the org. Leave it off for a partner's or a vendor's site: its projects stay with the people Jira names.")),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a secret the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: form.credential_ref, onChange: set("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/jira` }),
+          "A secret with email and api_token, under this team's own connections path. Aerugo reads it; it never stores the token itself.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Jira"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    confluence: () => h("form", { className: "panel-body connector-form", onSubmit: connectConfluence, "aria-label": "Connect Confluence" },
+      h("p", { className: "connector-lede" }, "Create a service account in Atlassian (or a dedicated user), give it view access to the spaces to index, and make it an API token. It only sets what's indexed: each page keeps Confluence's own readers, its space's narrowed by every restriction down the tree."),
+      field("Name", h("input", { className: "input", value: cf.name, onChange: setC("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      field("Confluence site", h("input", { className: "input mono", value: cf.api_base, onChange: setC("api_base"), placeholder: "https://your-site.atlassian.net", required: true })),
+      cf.credential_ref ? null : field("Account email", h("input", { className: "input", type: "email", value: cf.email, onChange: setC("email"), required: true, autoComplete: "off" })),
+      cf.credential_ref ? null : field("API token", h("input", { className: "input mono", type: "password", value: cf.api_token, onChange: setC("api_token"), required: true, autoComplete: "off" }), "Stored in OpenBao and never shown again."),
+      field("Spaces", h("input", { className: "input mono", value: cf.spaces, onChange: setC("spaces"), placeholder: "PAY, ENG" }), "Leave empty for every space the account can view."),
+      field("Labels", h("input", { className: "input mono", value: cf.labels, onChange: setC("labels"), placeholder: "runbook, decision" }), "Only pages with one of these labels. Leave empty for every page."),
+      field("Page trees", h("input", { className: "input mono", value: cf.page_trees, onChange: setC("page_trees"), placeholder: "123456789" }), "Only these pages and everything under them, by the number in a page's address."),
+      field("Sync", h("select", { className: "select", value: cf.every_minutes, onChange: setC("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: cf.company_site, onChange: setC("company_site") }),
+        h("span", null, h("b", null, "This Confluence site is our company's own. "), "Then a space anyone in Confluence may view is readable by everyone in the org, and restrictions still narrow it. Leave it off for a partner's or a vendor's site.")),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a secret the team keeps instead"),
+        field("Credential reference", h("input", { className: "input mono", value: cf.credential_ref, onChange: setC("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/confluence` }),
+          "A secret with email and api_token, under this team's own connections path, or a GCP Secret Manager secret named for this team. Aerugo reads it; it never stores the token itself.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Confluence"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    google: () => h("form", { className: "panel-body connector-form", onSubmit: connectDrive },
+      h("p", { className: "connector-lede" }, "In Google Cloud, create a service account and a JSON key for it. Share folders with its email, or add it to shared drives: that's what gets indexed, even from a personal Google account. Each file keeps its own sharing."),
+      field("Name", h("input", { className: "input", value: drive.name, onChange: setD("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      field("Company domain", h("input", { className: "input mono", value: drive.domain, onChange: setD("domain"), placeholder: "acme.com" }),
+        "A file shared with everyone at this domain becomes readable by everyone in the org. Leave empty if it isn't yours."),
+      drive.credential_ref ? null : h("label", { className: "field connector-wide" }, h("span", null, "Service account key"),
+        h("textarea", { className: "input mono", rows: 4, value: drive.key, onChange: setD("key"), required: true, spellCheck: false, autoComplete: "off",
+                        placeholder: '{"type": "service_account", "client_email": "...", "private_key": "..."}' }),
+        h("span", { className: "hint" }, "Paste the JSON key. Only its email and private key are kept, in OpenBao; nothing else in it is used.")),
+      field("Shared drives", h("input", { className: "input mono", value: drive.drives, onChange: setD("drives"), placeholder: "Optional drive ids" }),
+        "Leave empty for every shared drive it's a member of. Folders shared with it are always included."),
+      field("Sync", h("select", { className: "select", value: drive.every_minutes, onChange: setD("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a key the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: drive.credential_ref, onChange: setD("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/drive` }),
+          "A secret with service_account (its client_email and private_key), under this team's own connections path.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Drive"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    directory: () => h("form", { className: "panel-body connector-form", onSubmit: connectOkta },
+      h("p", { className: "connector-lede" }, "A directory adds no documents. It tells Aerugo who's at the company and who has left: when someone leaves, the access their email matched is revoked at once, without waiting for a sign-in that won't come. In Okta, create a read-only admin's API token."),
+      field("Name", h("input", { className: "input", value: okta.name, onChange: setO("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      field("Okta org", h("input", { className: "input mono", value: okta.api_base, onChange: setO("api_base"), placeholder: "https://your-org.okta.com", required: true })),
+      okta.credential_ref ? null : field("API token", h("input", { className: "input mono", type: "password", value: okta.api_token, onChange: setO("api_token"), required: true, autoComplete: "off" }),
+        "A read-only admin's token. Stored in OpenBao and never shown again."),
+      field("Sync", h("select", { className: "select", value: okta.every_minutes, onChange: setO("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label))),
+        "How quickly a leaver's access goes. Every 15 minutes is a good start."),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a token the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: okta.credential_ref, onChange: setO("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/okta` }),
+          "A secret with api_token, under this team's own connections path.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Okta"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    github: () => h("div", { className: "connector-steps" },
+      h("ol", null,
+        h("li", null, "Create the GitHub App once: ", h("code", null, "make github-app ORG=<your-org>"), ". It's a non-human identity; nothing runs on a person's token."),
+        h("li", null, "Install it on the repositories to index. Each file keeps its repository's own readers."),
+        h("li", null, "Find the installation here and connect it. Then route each repository to its team.")),
+      h("div", { className: "actions" }, h("button", { type: "button", className: "btn btn-sm", onClick: findInstallations }, "Find installations")),
+      installs === "loading" ? h(SkeletonRows, { rows: 1, widths: [40] })
+        : installs ? (installs.length ? h("ul", { className: "connector-installs" }, installs.map((inst) => h("li", { key: inst.installation_id },
+            h("span", null, h("b", null, inst.account), ` · ${inst.repositories.length} repositor${inst.repositories.length === 1 ? "y" : "ies"}`),
+            h("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => connectGitHub(inst) }, "Connect"))))
+          : h("p", { className: "muted" }, "No installations yet. Install the App on a repository, then look again.")) : null),
+    imports: () => h("div", { className: "connector-steps" },
+      h("p", null, "Export from Notion (Markdown & CSV) or Confluence (HTML), then upload the .zip in the Imports panel above. You name who may read the pages; nothing becomes readable by default.")),
+    pipelines: () => h("div", { className: "connector-steps" },
+      h("p", null, "A CI job pushes documents with its own short-lived sign-in token (GitHub Actions' OIDC), so no secret is stored anywhere. Register the pipeline with Terraform or the API, then push from CI:"),
+      h("pre", null, `POST ${api}/documents\nAuthorization: Bearer <the job's OIDC token>\n{"upserts": [{"key": "runbook-1", "title": "...", "text": "...", "readers": ["group:${ws}"]}]}`)),
+    lineage: () => h("div", { className: "connector-steps" },
+      h("p", null, "Send OpenLineage run events (Airflow, dbt, Dataform, and Spark emit them): each names a job, what it read, and what it wrote. Metadata only, never data; only this team sees it."),
+      h("pre", null, `POST ${api}/lineage\n{"events": [{"job": {"namespace": "airflow", "name": "orders_daily"},\n  "inputs": [{"namespace": "edw", "name": "ORDER_HIST"}],\n  "outputs": [{"namespace": "bigquery", "name": "edp.orders"}]}]}`)),
+  };
+  const open = (id) => { setChosen(chosen === id ? null : id); setError(null); };
   const repoList = (name) => (repos[name] === "loading" ? h(SkeletonRows, { rows: 1, widths: [30] })
     : repos[name].length ? h("div", { style: { display: "grid", gap: 8 } }, repos[name].map((r) => h("div", { key: r.external_id, className: "actions", style: { justifyContent: "space-between" } },
         h("span", { className: "mono" }, r.external_id, r.selected ? null : h("span", { className: "sub" }, " (not synced)")),
@@ -395,23 +686,60 @@ function Connections({ ws, teams }) {
           h("select", { className: "select", value: r.team, onChange: (e) => route(name, r.external_id, e.target.value) },
             [...new Set([r.team, ...teams])].map((t) => h("option", { key: t, value: t }, t)))))))
       : h("span", { className: "muted" }, "No repos discovered yet."));
+  const tone = (s) => (s === "active" || s === "ready" ? "ok" : s === "error" ? "bad" : "idle");
+  const editForm = (c) => {
+    if (!edit) return h(SkeletonRows, { rows: 1, widths: [40] });
+    const scope = SCOPES[c.kind];
+    const current = Number(edit.every_minutes);
+    const choices = current && !EVERY.some(([m]) => m === current) ? [...EVERY, [current, every(current)]] : EVERY; // keep a cadence set elsewhere
+    return h("form", { className: "connector-form connection-edit", onSubmit: (e) => saveEdit(e, c), "aria-label": `Edit ${c.name}` },
+      field("Sync", h("select", { className: "select", value: edit.every_minutes, onChange: (e) => setEdit({ ...edit, every_minutes: e.target.value }) },
+        h("option", { value: "" }, "The deployment's default"), choices.map(([m, label]) => h("option", { key: m, value: String(m) }, label)))),
+      scope ? field(scope[1], h("input", { className: "input mono", value: edit.scope, placeholder: scope[2], onChange: (e) => setEdit({ ...edit, scope: e.target.value }) }),
+        "Comma-separated. It can change, not be removed: to read everything again, connect it again.") : null,
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary btn-sm" }, "Save"),
+        h("button", { type: "button", className: "btn btn-ghost btn-sm", onClick: () => setEditing(null) }, "Cancel")));
+  };
   return h("section", { className: "panel", style: { marginTop: 24 } },
-    h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Connections"), h("p", null, "Sources synced into this team, with their own permissions. Each repo can belong to its own team."))),
+    h("div", { className: "panel-head" }, h("div", null, h("h2", null, "Connections"), h("p", null, "Sources synced into this team by a service account, each item with its source's own readers.")),
+      h("button", { type: "button", className: "btn btn-sm", "aria-expanded": gallery, onClick: () => { setGallery(!gallery); setChosen(null); } },
+        gallery ? "Close" : h("span", null, h(Icon, { name: "plus", size: 14 }), "Connect a source"))),
+    gallery ? h("div", { className: "connector-grid", role: "list", "aria-label": "Sources you can connect" }, CONNECTORS.map((c) => h("div", {
+      key: c.id, role: "listitem", className: `connector-card${c.ready ? "" : " later"}${chosen === c.id ? " on" : ""}` },
+      h("h3", null, h(SourceIcon, { kind: c.id }), c.name), h("p", null, c.what),
+      h("div", { className: "actions" }, c.ready
+        ? h("button", { type: "button", className: `btn btn-sm${chosen === c.id ? " btn-primary" : ""}`, "aria-pressed": chosen === c.id, onClick: () => open(c.id) }, c.action)
+        : h("span", { className: "tag" }, c.next ? "Coming next" : "Planned"))))) : null,
+    gallery && chosen ? steps[chosen]() : null,
     error ? h("div", { style: { padding: 16 } }, h(Alert, { onRetry: load }, error)) : null,
     items === null && !error ? h(SkeletonRows, { rows: 2, widths: [30, 12, 12] })
       : items && items.length ? h(Table, null,
-          h("thead", null, h("tr", null, h("th", null, "Connection"), h("th", null, "Status"), h("th", { className: "num hide-sm" }, "Updated"), h("th", { className: "actions-cell" }, h("span", { className: "sr-only" }, "Actions")))),
+          h("thead", null, h("tr", null, h("th", null, "Connection"), h("th", null, "Status"), h("th", { className: "hide-sm" }, "Sync"),
+            h("th", { className: "num hide-sm" }, "Permissions as of"), h("th", { className: "actions-cell" }, h("span", { className: "sr-only" }, "Actions")))),
           h("tbody", null, items.flatMap((c) => [h("tr", { key: c.name },
-            h("td", null, h("div", { className: "title" }, c.name), h("div", { className: "sub" }, c.kind)),
+            h("td", null, h("div", { className: "title" }, c.name,
+                c.managed_by ? h("span", { className: "tag tf-tag", title: managedTitle(c.managed_by) }, toolName(c.managed_by.by)) : null),
+              h("div", { className: "sub" }, h(SourceIcon, { kind: c.kind }), " ", c.kind)),
             h("td", null, note[c.name] ? h(Status, { tone: note[c.name][0] }, note[c.name][1])
-              : h(Status, { tone: c.status === "active" ? "ok" : c.status === "error" ? "bad" : "idle" }, c.status.charAt(0).toUpperCase() + c.status.slice(1))),
-            h("td", { className: "num hide-sm", title: new Date(c.updated_at).toLocaleString() }, ago(c.updated_at)),
+              : h(Status, { tone: tone(c.status) }, c.status.charAt(0).toUpperCase() + c.status.slice(1))),
+            h("td", { className: "hide-sm" }, every(c.every_minutes)),
+            h("td", { className: "num hide-sm", title: c.last_synced_at ? `Every sync re-reads each item's readers. Last: ${new Date(c.last_synced_at).toLocaleString()}` : "Not synced yet" },
+              c.last_synced_at ? ago(c.last_synced_at) : "Not yet"),
             h("td", { className: "actions-cell" }, h("div", { className: "actions" },
-              h("button", { type: "button", className: "btn btn-sm", onClick: () => showRepos(c.name) }, repos[c.name] ? "Hide repos" : "Repos"),
-              h("button", { type: "button", className: "btn btn-sm", onClick: () => resync(c.name) },
-                h(Icon, { name: "refresh", size: 14 }), "Re-sync")))),
-            repos[c.name] ? h("tr", { key: `${c.name}-repos` }, h("td", { colSpan: 4 }, repoList(c.name))) : null])))
-        : items ? h(Empty, null, "No sources connected to this team yet.") : null);
+              c.kind === "github" ? h("button", { type: "button", className: "btn btn-sm", onClick: () => showRepos(c.name) }, repos[c.name] ? "Hide repos" : "Repos") : null,
+              h("button", { type: "button", className: "btn btn-sm", onClick: () => resync(c.name), disabled: c.status === "disabled" },
+                h(Icon, { name: "refresh", size: 14 }), "Re-sync"),
+              c.managed_by ? null : [ // what Terraform manages changes there, not here
+                h("button", { key: "edit", type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": editing === c.name, onClick: () => startEdit(c) }, "Edit"),
+                h("button", { key: "pause", type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEnabled(c.name, c.status === "disabled") }, c.status === "disabled" ? "Resume" : "Pause"),
+                h("button", { key: "remove", type: "button", className: "btn btn-sm btn-ghost", onClick: () => setConfirming(c.name), "aria-label": `Remove ${c.name}` }, "Remove")]))),
+            repos[c.name] ? h("tr", { key: `${c.name}-repos` }, h("td", { colSpan: 5 }, repoList(c.name))) : null,
+            editing === c.name ? h("tr", { key: `${c.name}-edit` }, h("td", { colSpan: 5 }, editForm(c))) : null])))
+        : items ? h(Empty, null, "No sources connected to this team yet. Connect one above.") : null,
+    confirming ? h(Confirm, { title: `Remove the connection “${confirming}”?`, action: "Remove connection", onCancel: () => setConfirming(null),
+                             onConfirm: () => remove(confirming) },
+      "Its documents leave this team, and anything only it brought in leaves Aerugo, grants and all. Shared documents other connections hold stay.") : null);
 }
 
 function Audit({ ws }) {
@@ -584,7 +912,7 @@ function Imports({ ws }) {
           h("thead", null, h("tr", null, h("th", null, "Import"), h("th", { className: "hide-sm" }, "Readers"), h("th", null, "Last run"),
             h("th", { className: "actions-cell" }, h("span", { className: "sr-only" }, "Actions")))),
           h("tbody", null, items.map((i) => h("tr", { key: i.name },
-            h("td", null, h("div", { className: "title" }, i.name), h("div", { className: "sub" }, `${i.kind === "notion" ? "Notion" : "Confluence"} export, ${i.classification}`)),
+            h("td", null, h("div", { className: "title" }, i.name), h("div", { className: "sub" }, h(SourceIcon, { kind: i.kind }), " ", `${sourceName(i.kind)} export, ${i.classification}`)),
             h("td", { className: "hide-sm mono" }, i.readers.join(", ")),
             h("td", null, outcome(i.last_run)),
             h("td", { className: "actions-cell" }, h("button", { type: "button", className: "btn btn-ghost btn-sm", onClick: () => setConfirming(i.name), "aria-label": `Remove ${i.name}` }, "Remove"))))))

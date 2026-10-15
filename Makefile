@@ -1,6 +1,9 @@
 # Recipes start with ">" instead of a tab (.RECIPEPREFIX, GNU make 3.82+), so editors can't break them.
 .RECIPEPREFIX = >
-.PHONY: env up smoke eval eval-mine backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset
+.PHONY: env up smoke eval eval-mine demo eval-scenario eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-down
+
+# The local model `make llm` downloads for Ask. About 1 GB; make llm LLM_MODEL=qwen2.5:3b for better answers (about 2 GB).
+LLM_MODEL ?= qwen2.5:1.5b
 
 ## Provision the stack, run the smoke suite, create the GitHub App (make github-app ORG=<org>), inspect, tear down.
 
@@ -16,10 +19,23 @@ smoke: env
 >docker compose --profile smoke up -d --force-recreate fake-llm
 >docker compose --profile smoke run --rm smoke
 
-# The web app, separate from `make up` so the backend never depends on its build.
+# The web app, separate from `make up` so the backend never depends on its build. Its image fetches the sources'
+# brand marks as it builds (services/web/scripts/brand-icons.mjs).
 web: env
 >docker compose --profile web up -d --build web
 >@echo 'Web app: http://localhost:3000 (alice / alice-dev-only, or bob, carol, dave with <name>-dev-only)'
+
+# Aerugo on a local Kubernetes cluster (kind, or Docker Desktop's), from deploy/k8s: kind-up builds and loads the
+# images, applies, and waits; kind-open serves it at Compose's addresses (stop Compose first: make down); kind-down
+# removes it, its data included.
+kind-up:
+>powershell -NoProfile -ExecutionPolicy Bypass -File deploy/k8s/up.ps1
+
+kind-open:
+>powershell -NoProfile -ExecutionPolicy Bypass -File deploy/k8s/open.ps1
+
+kind-down:
+>kubectl delete namespace aerugo --ignore-not-found
 
 # Browser tests (slice D5): Chromium signs in at Keycloak and uses the web app as people do. Needs `make up`; starts
 # the web app. Failures leave screenshots and traces in services/e2e/results.
@@ -46,6 +62,32 @@ eval:
 eval-mine:
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm smoke python -m kl.golden_mine
+
+# The fictional migration company (sandbox/scenarios/migration, slice K1): a legacy warehouse moving to BigQuery, across
+# Payments, Finance, Legal, and Commons. demo loads it for the Map and Ask; eval-scenario loads it and scores its
+# questions, failing only on a permission leak. Smoke expects the plain seed: make reset && make up before make smoke.
+demo: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm smoke python -m kl.evals --load-only
+
+eval-scenario: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm smoke python -m kl.evals
+
+# Record the evaluation set's scorecard as its baseline (slice K1): from then on, make eval-scenario fails when a case
+# gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
+# with a permission leak, or one that fails, is never recorded: the baseline you had stays.
+eval-baseline: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm -T smoke python -m kl.evals --record > services/api/kl/evals_baseline.tmp
+>mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
+
+# A real model for Ask, running in the stack (Ollama): no API key, and nothing sent to it leaves the machine.
+# Downloads LLM_MODEL once, checks it answers, and registers it in every team as <team>/local. Safe to rerun.
+llm: env
+>docker compose --profile llm up -d ollama
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm -e KL_LLM_MODEL=$(LLM_MODEL) smoke python -m kl.local_llm
 
 # Backups (slice I4, ADR 0006): an encrypted pgBackRest backup of the database, incremental after the first full one.
 backup:

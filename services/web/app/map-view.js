@@ -7,11 +7,16 @@ import { createElement as h, useEffect, useMemo, useRef, useState } from "react"
 import { ago, day, kl } from "../lib/client.js";
 import { Icon } from "./icons.js";
 import KnowledgeGraph from "./knowledge-graph.js";
-import { Alert, TIERS, Tier, concept, tierOf } from "./ui.js";
+import { Alert, TIERS, concept, tierOf } from "./ui.js";
 
 const ms = (iso) => Date.parse(iso);
 const REPLAY_MS = 6000; // the whole history, replayed in six seconds
-const ENTITY_KINDS = { system: "System", team: "Team", person: "Person", channel: "Channel" }; // entities are extracted from text (slice N)
+const ENTITY_KINDS = { system: "System", team: "Team", person: "Person", channel: "Channel", dataset: "Dataset", job: "Job" }; // from text (slice N) and lineage (slice K3)
+// How a link was made, in words (slices N and K2): what the inspector shows beside each neighbor.
+const HOW = (e) => (e.kind === "reference" ? `recorded reference${e.evidence ? ` via ${e.evidence}` : ""}`
+  : e.kind === "relation" ? `curated: ${e.relation}` : e.kind === "derived-from" ? "derived from it"
+  : e.kind === "semantic" ? "similar meaning" : e.kind === "mentions" ? "named in the text"
+  : e.kind === "lineage" ? "data feeds it" : e.kind === "describes" ? "describes it" : e.kind); // lineage: slice K3
 
 export default function MapView({ team = "" } = {}) { // in a team's scope, only that team (slice N1)
   const [data, setData] = useState(null);
@@ -98,6 +103,16 @@ export default function MapView({ team = "" } = {}) { // in a team's scope, only
     }
     return { nodes: visible.size, links: pairs.size, cross: [...pairs.values()].filter(Boolean).length };
   }, [data, visible]);
+  // The selected node's neighbors, strongest kind of link first: curated, recorded, then inferred.
+  const linksOf = useMemo(() => {
+    if (!data || !selected) return [];
+    const titles = new Map(data.nodes.map((n) => [n.id, n.title]));
+    const rank = { relation: 0, "derived-from": 1, reference: 2, mentions: 3, semantic: 4 };
+    return data.edges.filter((e) => e.source === selected.id || e.target === selected.id)
+      .map((e) => { const other = e.source === selected.id ? e.target : e.source; return { id: other, title: titles.get(other) || other, how: HOW(e), rank: rank[e.kind] ?? 9 }; })
+      .filter((l) => !visible || visible.has(l.id))
+      .sort((a, b) => a.rank - b.rank || a.title.localeCompare(b.title));
+  }, [data, selected, visible]);
   const degree = useMemo(() => {
     const d = new Map();
     if (data) for (const e of data.edges) for (const id of [e.source, e.target]) d.set(id, (d.get(id) || 0) + 1);
@@ -144,6 +159,8 @@ export default function MapView({ team = "" } = {}) { // in a team's scope, only
         h("div", null, h("dt", null, "Across teams"), h("dd", null, stats.cross.toLocaleString()))) : null),
     h("section", { className: "graph-card", "aria-label": "Knowledge map" },
       h("div", { className: "graph-bar" },
+        stats ? h("span", { className: "graph-summary" },
+          `${stats.nodes.toLocaleString()} entities · ${stats.links.toLocaleString()} relationships`) : null,
         h("label", { className: "searchbox sm graph-search" }, h(Icon, { name: "search" }),
           h("input", { ref: search, value: query, onChange: (e) => setQuery(e.target.value), placeholder: "Filter the map", "aria-label": "Filter the map by name" }),
           h("kbd", null, "/")),
@@ -170,25 +187,27 @@ export default function MapView({ team = "" } = {}) { // in a team's scope, only
           : h("button", { type: "button", className: "btn btn-sm", onClick: () => { setPlaying(false); setAt(null); } }, "Back to live")) : null,
       selected ? h("aside", { className: "graph-inspector", "aria-label": "Selected node" },
         h("div", { className: "inspector-head" },
-          selected.tier === "entity"
-            ? h("span", { className: "status" }, h("span", { className: "dot entity" }), ENTITY_KINDS[selected.kind] || "Entity")
-            : h(Tier, { tier: selected.tier }),
+          h("h2", null, selected.title),
           h("button", { type: "button", className: "btn btn-ghost btn-sm btn-icon", onClick: () => setSelected(null), "aria-label": "Close" }, h(Icon, { name: "x" }))),
-        h("h2", null, selected.title),
+        h("div", { className: "inspector-tags" },
+          h("span", { className: "graph-badge" }, selected.tier === "entity" ? ENTITY_KINDS[selected.kind] || "Entity" : TIERS[tierOf(selected.tier)].label),
+          h("span", { className: "inspector-context" }, selected.workspaces.join(", "))),
+        linksOf.length ? h("ul", { className: "inspector-links", "aria-label": "Linked to" },
+          linksOf.slice(0, 4).map((l) => h("li", { key: l.id }, h("span", null, l.title), h("small", null, l.how))),
+          linksOf.length > 4 ? h("li", { className: "more" }, `and ${linksOf.length - 4} more`) : null)
+          : h("p", { className: "faint small" }, "Nothing visible links here yet."),
         selected.tier === "entity"
           ? [h("dl", { key: "facts", className: "facts" },
                fact("Named in", `${degree.get(selected.id) || 0} document${degree.get(selected.id) === 1 ? "" : "s"}`),
                fact("Mentions", selected.mentions, true),
-               fact("Teams", selected.workspaces.join(", ")),
                fact("First seen", `${day(selected.since)} · ${ago(selected.since)}`, true)),
              h("p", { key: "hint", className: "faint small" }, "Found in your documents' text. Select a highlighted document to open it.")]
           : [h("dl", { key: "facts", className: "facts" },
-               fact("Teams", selected.workspaces.join(", ")),
                fact("Classification", selected.classification),
                fact("Source", selected.source),
-               fact("First seen", `${day(selected.since)} · ${ago(selected.since)}`, true),
-               fact("Links", degree.get(selected.id) || 0, true)),
-             h("a", { key: "open", className: "btn btn-primary", href: inScope(concept(selected.id), team) }, "Open page and history", h(Icon, { name: "arrowRight", size: 14 })),
-             h("a", { key: "ask", className: "btn", href: inScope(`#/ask/focus:${encodeURIComponent(selected.id)}`, team) }, h(Icon, { name: "ask", size: 14 }), "Ask about this")]) : null),
+               fact("First seen", `${day(selected.since)} · ${ago(selected.since)}`, true)),
+             h("div", { key: "actions", className: "inspector-actions" },
+               h("a", { key: "open", className: "btn btn-primary", href: inScope(concept(selected.id), team) }, "Open page and history", h(Icon, { name: "arrowRight", size: 14 })),
+               h("a", { key: "ask", className: "btn", href: inScope(`#/ask/focus:${encodeURIComponent(selected.id)}`, team) }, h(Icon, { name: "ask", size: 14 }), "Ask about this"))]) : null),
     data ? h("p", { className: "faint small map-note" }, data.note) : null);
 }

@@ -154,11 +154,24 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${KL_OTEL_ENDPOINT:-}
       OTEL_METRIC_EXPORT_INTERVAL: "5000"
       KL_PURGE_DELAY_SECONDS: ${KL_PURGE_DELAY_SECONDS:-10}   # dev: 10s to cancel a team purge; production defaults to an hour
+      KL_MODEL_TIMEOUT_SECONDS: ${KL_MODEL_TIMEOUT_SECONDS:-300}   # a local model on a CPU can need minutes (make llm)
       KL_WEB_URL: http://localhost:3000   # where GitHub sends people back after they prove a login (identity links)
       # CI issuers trusted for pipeline pushes (slice J1); the fake one exists only while smoke runs.
       KL_PIPELINE_ISSUERS: ${KL_PIPELINE_ISSUERS:-https://token.actions.githubusercontent.com,http://fake-llm:8080/oidc}
       # Google API addresses Drive connections may use (slice F2); the fake one exists only while smoke runs.
       KL_GOOGLE_API_BASES: ${KL_GOOGLE_API_BASES:-https://www.googleapis.com,http://fake-llm:8080/google}
+      # Jira addresses besides Jira Cloud sites (ADR 0011); the fake one exists only while smoke runs.
+      KL_JIRA_API_BASES: ${KL_JIRA_API_BASES:-http://fake-llm:8080/jira}
+      # Okta addresses besides Okta orgs (ADR 0011: directories); the fake one exists only while smoke runs.
+      KL_OKTA_API_BASES: ${KL_OKTA_API_BASES:-http://fake-llm:8080/okta}
+      KL_CONFLUENCE_API_BASES: ${KL_CONFLUENCE_API_BASES:-http://fake-llm:8080/confluence}   # the fake exists only while smoke runs
+      # GCP Secret Manager references (ADR 0011): the projects a reference may name, and, in dev only, the fake Secret
+      # Manager and metadata server smoke runs. In production leave the two addresses unset: Google's own are the default.
+      KL_GCP_SECRET_PROJECTS: ${KL_GCP_SECRET_PROJECTS:-acme-dev}
+      KL_GCP_SECRETS_BASE: ${KL_GCP_SECRETS_BASE:-http://fake-llm:8080/gcp}
+      KL_GCP_METADATA_BASE: ${KL_GCP_METADATA_BASE:-http://fake-llm:8080/gcp-metadata}
+      # The company's own email domains (ADR 0011): identity matching links people by verified email only within these.
+      KL_ORG_EMAIL_DOMAINS: ${KL_ORG_EMAIL_DOMAINS:-acme.test}
     extra_hosts:
       - "host.docker.internal:host-gateway"   # lets a probe reach Ollama or vLLM on your machine
     ports:
@@ -182,9 +195,11 @@ services:
       KL_RESYNC_MINUTES: ${KL_RESYNC_MINUTES:-10}       # every connection re-syncs at least this often
       KL_SCHEDULER_SECONDS: ${KL_SCHEDULER_SECONDS:-15}  # how often the worker looks for stale ones
       KL_SEED_KNOWLEDGE_DIR: /seed-knowledge   # dev only: sandbox bundles standing in for knowledge repos
+      KL_SEED_SCENARIOS_DIR: /seed-scenarios   # dev only: opt-in demo companies (make demo, make eval; slice K1)
       OTEL_SERVICE_NAME: kl-worker
     volumes:
       - ./sandbox/knowledge:/seed-knowledge:ro
+      - ./sandbox/scenarios:/seed-scenarios:ro
     depends_on:
       provision:
         condition: service_completed_successfully
@@ -284,6 +299,16 @@ services:
     profiles: ["smoke"]
     command: ["python", "-m", "kl.fake_llm"]   # test-only model that records every prompt it receives
 
+  ollama:   # a real local model for Ask (make llm): no API key, and nothing sent to it leaves the machine
+    image: ollama/ollama:${KL_OLLAMA_VERSION:-0.30.10}
+    profiles: ["llm"]
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m   # stays loaded between questions, so only the first one waits for it to load
+    volumes:
+      - kl-ollama:/root/.ollama   # downloaded models, kept across restarts
+    ports:
+      - "127.0.0.1:11434:11434"   # also reachable from your machine, for trying prompts directly
+
   github-app-setup:
     <<: *api-build
     profiles: ["tools"]
@@ -379,3 +404,4 @@ volumes:
   kl-pgbackrest:
   kl-telemetry:
   kl-grafana:
+  kl-ollama:

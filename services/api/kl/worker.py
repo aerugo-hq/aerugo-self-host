@@ -13,7 +13,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, config, curator, gdrive, imports, knowledge, links, okf, originals, pipelines, privacy, telemetry
+from . import alerting, config, confluence, curator, directory, gdrive, imports, jira, knowledge, links, okf, originals, pipelines, privacy, telemetry
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import embed, passage_text, vector_literal
@@ -45,7 +45,8 @@ INSERT INTO jobs (org_id, kind, payload)
 SELECT c.org_id, 'connection.sync', jsonb_build_object('connection_id', c.id::text, 'reason', 'schedule')
 FROM connections c
 WHERE c.status = 'ready'
-  AND (c.last_synced_at IS NULL OR c.last_synced_at < now() - %s * interval '1 minute')
+  AND (c.last_synced_at IS NULL OR c.last_synced_at < now() - (CASE WHEN c.config->>'every_minutes' ~ '^[0-9]{1,5}$'
+       THEN (c.config->>'every_minutes')::int ELSE %s END) * interval '1 minute')  -- its own cadence (ADR 0011), else the default
   AND NOT EXISTS (SELECT 1 FROM jobs j
                   WHERE j.kind IN ('connection.sync', 'connection.discover')
                     AND j.status IN ('queued', 'running')
@@ -196,6 +197,15 @@ def handle_connection_discover(conn, job) -> dict:
     elif c["kind"] == "github":
         connector = GitHubConnector(load_app(c["credential_ref"]), int(c["config"]["installation_id"]))
         wanted = c["config"].get("repositories")  # None: everything the installation grants
+    elif c["kind"] == "jira":  # ADR 0011: projects, as the connection's account sees them
+        connector = jira.client_for(c)
+        wanted = c["config"].get("projects")  # None: every project the account can browse
+    elif c["kind"] == "confluence":  # S1: spaces, as the connection's account sees them
+        connector = confluence.client_for(c)
+        wanted = c["config"].get("spaces")  # None: every space the account can read
+    elif c["kind"] == "directory":  # ADR 0011: who's at the company, and who has left
+        connector = directory.client_for(c)
+        wanted = None
     else:
         raise RuntimeError(f"no connector for kind {c['kind']!r}")
     health = connector.test()
@@ -207,10 +217,11 @@ def handle_connection_discover(conn, job) -> dict:
         for ct in found:
             conn.execute(
                 """INSERT INTO connection_containers
-                     (connection_id, org_id, external_id, container_kind, visibility, default_ref, selected)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                     (connection_id, org_id, external_id, container_kind, visibility, default_ref, selected, display_name)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                 (cid, c["org_id"], ct.external_id, ct.kind, ct.visibility, ct.default_ref,
-                 wanted is None or ct.external_id in wanted))
+                 wanted is None or ct.external_id in wanted or ct.kind == "folder",  # a folder shared with it is chosen by that sharing
+                 (ct.name or "")[:300] or None))  # its name as the source gives it, for the Documents tree
         conn.execute("UPDATE connections SET status = 'ready', last_error = NULL, updated_at = now() WHERE id = %s",
                      (cid,))
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",
@@ -235,6 +246,14 @@ def handle_connection_sync(conn, job) -> dict:
     elif c["kind"] == "github":
         connector = GitHubConnector(load_app(c["credential_ref"]), int(c["config"]["installation_id"]))
         results = [sync_repo(conn, c, connector, ct) for ct in containers]
+    elif c["kind"] == "jira":
+        client = jira.client_for(c)
+        results = [jira.sync_project(conn, c, client, ct["external_id"]) for ct in containers]
+    elif c["kind"] == "confluence":
+        client = confluence.client_for(c)
+        results = [confluence.sync_space(conn, c, client, ct["external_id"]) for ct in containers]
+    elif c["kind"] == "directory":
+        results = [directory.sync_directory(conn, c, directory.client_for(c))]
     else:
         raise RuntimeError(f"no connector for kind {c['kind']!r}")
     embedded = embed_missing(conn)
@@ -250,13 +269,41 @@ def handle_connection_sync(conn, job) -> dict:
 # ------------------------------------------------------------------ curated knowledge (slice C2)
 # Dev only: the sandbox bundles stand in for <workspace>-knowledge repos, with readers like the seed's.
 SEED_READERS = {"payments": ["group:payments"], "commons": [f"org:{config.ORG_SLUG}"],
-                "legal": [f"org:{config.ORG_SLUG}"]}
+                "legal": [f"org:{config.ORG_SLUG}"], "finance": ["group:finance"]}  # finance: scenarios only (slice K1)
+
+
+def grant_scenario_readers(files: dict[str, str], acl: list[str]) -> int:
+    """A scenario's pages get the viewer tuples the plain seed's get from authz/seed-tuples.json: the members of each
+    of the bundle's readers may view each page. Indexing writes no tuples, so without these the post-check drops every
+    page for everyone. Only missing tuples are written, so loading a scenario again is harmless."""
+    from .okf import parse
+    wanted = set()
+    for path, text in files.items():
+        key = (parse(text, path).meta.get("x-kl") or {}).get("id")
+        if key:
+            wanted |= {(f"{principal}#member", "viewer", f"document:{key}") for principal in acl}
+    have = {(t["user"], t["relation"], t["object"]) for obj in sorted({w[2] for w in wanted}) for t in fga.read({"object": obj})}
+    missing = wanted - have
+    if missing:
+        fga.write(writes=missing)
+    return len(missing)
 
 
 def handle_knowledge_seed(conn, job) -> dict:
-    root = os.environ.get("KL_SEED_KNOWLEDGE_DIR")
-    if not root or not os.path.isdir(root):
-        return {"skipped": "KL_SEED_KNOWLEDGE_DIR isn't a directory"}
+    # Dev only. With no payload: the sandbox bundles the smoke suite relies on, unchanged. With {"scenario": name}
+    # (make demo, make eval; slice K1): a scenario's bundles on top, each under its own container
+    # (scenario/<name>/<bundle>), so smoke's fixtures never change and a scenario can be told apart from the seed.
+    scenario = str((job.get("payload") or {}).get("scenario") or "").strip()
+    if scenario:
+        base = os.environ.get("KL_SEED_SCENARIOS_DIR")
+        ok_name = len(scenario) <= 40 and scenario.replace("-", "").isalnum() and scenario.islower()
+        if not base or not ok_name or not os.path.isdir(os.path.join(base, scenario)):
+            return {"skipped": f"no scenario named {scenario!r}"}
+        root, prefix = os.path.join(base, scenario), f"scenario/{scenario}/"
+    else:
+        root, prefix = os.environ.get("KL_SEED_KNOWLEDGE_DIR"), "seed/"
+        if not root or not os.path.isdir(root):
+            return {"skipped": "KL_SEED_KNOWLEDGE_DIR isn't a directory"}
     results = {}
     for bundle in sorted(Path(root).iterdir()):
         ws = bundle.name.removesuffix("-knowledge")
@@ -265,10 +312,13 @@ def handle_knowledge_seed(conn, job) -> dict:
         row = conn.execute("SELECT id, org_id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not row:
             continue
+        files = knowledge.load_dir(str(bundle))
         results[bundle.name] = knowledge.index_bundle(
-            conn, org_id=row["org_id"], workspace_id=row["id"], container_ref=f"seed/{bundle.name}",
-            version="seed", files=knowledge.load_dir(str(bundle)), acl=SEED_READERS[ws],
+            conn, org_id=row["org_id"], workspace_id=row["id"], container_ref=f"{prefix}{bundle.name}",
+            version="seed", files=files, acl=SEED_READERS[ws],
             uri_for=lambda path, name=bundle.name: f"https://kb.acme.test/{name}{path}")
+        if scenario:  # the plain seed's readers come from authz/seed-tuples.json; a scenario's are granted here
+            grant_scenario_readers(files, SEED_READERS[ws])
     return {"bundles": results, "embedded": embed_missing(conn), **links.refresh(conn), "personal_data": privacy.scan(conn)}
 
 
@@ -429,7 +479,7 @@ def handle_import_retire(conn, job) -> dict:
     return {"documents": removed, "tuples": len(tuples)}
 
 
-SOURCE_KINDS = {"github": ["github", "okf"], "google": ["gdrive"]}  # what each kind of connection's documents are
+SOURCE_KINDS = {"github": ["github", "okf"], "google": ["gdrive"], "jira": ["jira"], "confluence": ["confluence"]}  # what each kind of connection's documents are
 
 
 def handle_connection_retire(conn, job) -> dict:
