@@ -35,6 +35,7 @@ PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "oliv
 SKIP = object()
 CHECKS = []
 _tokens: dict[str, str] = {}
+_expires: dict = {}  # when each cached token stops working, so a long run fetches a fresh one instead of failing
 
 
 def check(fn):
@@ -57,7 +58,7 @@ def wait_for(url: str, seconds: int = 240) -> None:
 
 def token(user: str, client_id: str = "kl-cli") -> str:
     key = (user, client_id)
-    if key not in _tokens:
+    if key not in _tokens or _expires.get(key, 0) - time.time() < 60:
         deadline, last = time.monotonic() + 240, ""  # Keycloak is slow on first boot
         while True:
             try:
@@ -67,6 +68,7 @@ def token(user: str, client_id: str = "kl-cli") -> str:
                 })
                 if r.status_code == 200:
                     _tokens[key] = r.json()["access_token"]
+                    _expires[key] = time.time() + int(r.json().get("expires_in") or 300)
                     break
                 last = f"{r.status_code} {r.text[:200]}"
             except httpx.HTTPError as e:
