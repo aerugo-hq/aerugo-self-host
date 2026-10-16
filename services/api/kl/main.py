@@ -656,8 +656,11 @@ BUDGET_WARN = 0.8  # past this share of a monthly budget, the team's admins are 
 
 def rate_limit(org_id: str, caller: Caller, route: str, team: str | None) -> None:
     """Count this request and refuse it with 429 and Retry-After when it's over a limit. The counters commit
-    in a transaction of their own, so a counter's row lock is never held through a model call."""
+    in a transaction of their own, so a counter's row lock is never held through a model call. Every request of a route
+    counts on one org-wide row, so that transaction commits without waiting for the disk (H1): the row's lock is held
+    for the statements alone, not a flush each, and a crash loses at most a moment's counts, never anything else."""
     with scoped(org_id, caller.principals) as conn:
+        conn.execute("SET LOCAL synchronous_commit = off")
         row = conn.execute("SELECT per_user_per_minute, per_team_per_minute FROM rate_limits WHERE route = %s",
                            (route,)).fetchone()
         per_user, per_group = (row["per_user_per_minute"], row["per_team_per_minute"]) if row else RATE_DEFAULTS[route]
