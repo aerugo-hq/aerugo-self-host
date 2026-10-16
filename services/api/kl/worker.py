@@ -369,7 +369,7 @@ def sync_containers(conn, c: dict, containers: list) -> list[dict]:
         results = [confluence.sync_space(conn, c, client, ct["external_id"]) for ct in containers]
     elif c["kind"] == "slack":
         client = slack.client_for(c)
-        results = [slack.sync_channel(conn, c, client, ct["external_id"]) for ct in containers]
+        results = [slack.sync_channel(conn, c, client, ct["external_id"], since=ct.get("since")) for ct in containers]
     elif c["kind"] == "notion":
         client = notion.client_for(c)
         results = [notion.sync_workspace(conn, c, client, ct["external_id"]) for ct in containers]

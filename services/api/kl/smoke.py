@@ -3940,6 +3940,56 @@ def a_drive_sync_follows_its_changes_feed():
 
 
 @check
+def a_slack_sync_rereads_its_recent_days_until_its_reconcile():
+    """Incremental syncs (H6): after its first full read, a Slack channel's sync re-reads only its recent days, so today's new message comes in while an edit to a message weeks old waits; its reconcile, once a day, reads the whole history window, and the edit comes in"""
+    from datetime import timezone as tz
+    tag = secrets.token_hex(3).upper()
+    channel, name, alice = f"CINC{tag}", f"slackinc-{tag.lower()}", f"UINC{tag}"
+    now = time.time()
+    weeks_ago, today = f"{now - 20 * 86400:.6f}", f"{now - 60:.6f}"
+    day = lambda ts: datetime.fromtimestamp(float(ts), tz.utc).strftime("%Y-%m-%d")
+
+    def holds(*messages) -> None:
+        state = {"users": [{"id": alice, "team_id": "T0SMOKE", "name": "alice", "profile": {"real_name": "Alice", "email": "alice@acme.test"}}],
+                 "channels": {channel: {"name": f"inc-{tag.lower()}", "private": True, "members": [alice], "messages": list(messages)}}}
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state, timeout=10).status_code == 200
+
+    def versions() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, source_version FROM kl.documents WHERE source_kind = 'slack' "
+                                     "AND container_ref = %s", (channel,)).fetchall())
+
+    def reads() -> list:
+        return [c for c in httpx.get(f"{FAKE_SLACK}/history-calls", timeout=10).json() if c["channel"] == channel]
+
+    old_day, new_day = f"slack-{channel}-{day(weeks_ago)}", f"slack-{channel}-{day(today)}"
+    try:
+        holds({"ts": weeks_ago, "user": alice, "text": f"Rehearsal plan {tag}"}, {"ts": today, "user": alice, "text": f"Today's note {tag}"})
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        first = versions()
+        assert set(first) == {old_day, new_day}, f"the first, full read: {first}"
+
+        later = f"{time.time() - 30:.6f}"
+        holds({"ts": weeks_ago, "user": alice, "text": f"Rehearsal plan, moved to Monday {tag}"},  # an edit, weeks old
+              {"ts": today, "user": alice, "text": f"Today's note {tag}"}, {"ts": later, "user": alice, "text": f"And another {tag}"})
+        scheduled_sync(name)
+        second = versions()
+        assert reads()[-1]["oldest"] > now - 9 * 86400, f"the second sync read the whole history again: {reads()}"
+        assert second[new_day] != first[new_day], "today's new message didn't come in"
+        assert second[old_day] == first[old_day], "an edit weeks old came in before the reconcile: the sync read everything"
+
+        scheduled_sync(name, reconcile=True)
+        assert reads()[-1]["oldest"] < now - 300 * 86400, f"the reconcile didn't read the whole history window: {reads()}"
+        assert versions()[old_day] != first[old_day], "the reconcile didn't bring the old edit in"
+        print("      the second sync re-read its recent days only (the new message came in, the old edit waited); the reconcile read it all")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga

@@ -328,6 +328,8 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        if self.path == "/slack/history-calls":  # each channel history read, and from when (H6)
+            return self._json(200, SLACK.get("history_calls", []))
         if self.path == "/google/changes-calls":  # the changes feed's reads, and from which token (H6)
             return self._json(200, DRIVE_CALLS)
         if self.path == "/microsoft/deltas":  # the delta calls made, and from which token (H6)
@@ -818,6 +820,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             oldest = float(q.get("oldest") or 0)
+            if q.get("cursor") is None:
+                SLACK.setdefault("history_calls", []).append({"channel": q.get("channel"), "oldest": oldest})  # H6
             top = sorted((m for m in channel.get("messages", []) if float(m["ts"]) > oldest), key=lambda m: -float(m["ts"]))
             return page("messages", [{k: v for k, v in m.items() if k != "replies"} for m in top], has_more=False)
         if method == "conversations.replies":
@@ -1057,7 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._notion("POST", urlparse(self.path), self._body())
         if path == "/slack/setup":  # smoke sets the fake Slack workspace's people and channels
             body = self._body()
-            SLACK.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle"))})
+            SLACK.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle")),
+                          "history_calls": SLACK.get("history_calls", [])})
             return self._json(200, {})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))

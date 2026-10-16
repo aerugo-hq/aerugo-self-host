@@ -17,6 +17,7 @@ Direct messages are never read."""
 import hashlib
 import html
 import re
+import os
 import time
 from datetime import datetime, timezone
 
@@ -38,6 +39,10 @@ SKIPPED = {"channel_join", "channel_leave", "channel_topic", "channel_purpose", 
 MAX_PAGES = 1000
 MAX_MESSAGES = 50000  # per channel per sync: past this the sync fails, rather than reading the rest as deleted
 HISTORY_DAYS = 365
+# An incremental sync (H6) re-reads the channel from the UTC midnight before the earlier of its last sync and this many
+# days ago, so recent edits, deletions, and thread replies carry over every time; older days wait for the daily
+# reconcile, which reads the whole history window.
+RECENT_DAYS = int(os.environ.get("KL_SLACK_RECENT_DAYS", "7"))
 
 
 class SlackError(RuntimeError):
@@ -196,8 +201,18 @@ def items_for(client: SlackClient, channel_id: str, name: str, acl: list[str], n
     return items
 
 
-def sync_channel(conn, connection: dict, client: SlackClient, channel_id: str) -> dict:
+def since_time(cursor: str | None) -> float | None:
+    """A cursor's time as a timestamp, or None for no cursor, or one that isn't an ISO time with its zone."""
+    try:
+        then = datetime.fromisoformat(cursor) if cursor else None
+    except ValueError:
+        return None
+    return then.timestamp() if then is not None and then.tzinfo is not None else None
+
+
+def sync_channel(conn, connection: dict, client: SlackClient, channel_id: str, since: str | None = None) -> dict:
     cfg = connection["config"] or {}
+    started = datetime.now(timezone.utc).isoformat()
     team, users, info = client.team(), client.users(), client.channel(channel_id)
     if not info.get("is_member"):  # the bot was removed: the channel isn't Aerugo's to read any more
         return sync_container(conn, connection, channel_id, "slack", [])
@@ -207,6 +222,9 @@ def sync_channel(conn, connection: dict, client: SlackClient, channel_id: str) -
               if u["team"] == team["id"] and not u["gone"] and not u["bot"] and u["email"]}
     if people:
         record_identities(conn, connection["org_id"], "slack", people)
-    oldest = time.time() - 86400 * int(cfg.get("history_days") or HISTORY_DAYS)
+    window = time.time() - 86400 * int(cfg.get("history_days") or HISTORY_DAYS)
+    last = since_time(since)
+    recent = None if last is None else min(last - 600, time.time() - 86400 * RECENT_DAYS) // 86400 * 86400  # a whole day
+    oldest = window if recent is None or recent <= window else recent
     items = items_for(client, channel_id, f"#{info.get('name') or channel_id}", acl, names, team["url"], oldest)
-    return sync_container(conn, connection, channel_id, "slack", items)
+    return sync_container(conn, connection, channel_id, "slack", items, complete=oldest == window, cursor=started)
