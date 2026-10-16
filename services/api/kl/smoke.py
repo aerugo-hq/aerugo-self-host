@@ -2850,6 +2850,60 @@ def expired_documents_leave_every_table():
 
 
 @check
+def a_released_hold_outlives_its_team():
+    """Retention: a hold placed after a team's purge was scheduled cancels it before anything is destroyed; once released, the team can be purged and the hold stays on record with its name"""
+    import uuid
+    from .authz import fga
+    org, ws = acme_org_id(), f"ph-{uuid.uuid4().hex[:8]}"  # a throwaway team: the seed stays untouched
+    with psycopg.connect(OWNER_DB) as conn:
+        conn.execute("INSERT INTO kl.workspaces (org_id, slug, name, discoverability) VALUES (%s, %s, 'Hold test', 'private')",
+                     (org, ws))
+    admin = ("user:alice", "admin", f"workspace:{ws}")
+    fga.write(writes={admin})
+
+    def purged() -> str:
+        r = api("POST", f"/v1/workspaces/{ws}/purge", "alice", json={"confirm": ws})
+        assert r.status_code == 202, f"purge: {r.status_code} {r.text[:200]}"
+        return r.json()["id"]
+
+    def settled(pid: str) -> dict:
+        deadline = time.monotonic() + PURGE_DELAY + 120
+        while (status := api("GET", f"/v1/purges/{pid}", "alice").json())["status"] in ("scheduled", "running") \
+                and time.monotonic() < deadline:
+            time.sleep(2)
+        return status
+
+    hold = None
+    try:
+        pid = purged()
+        r = api("POST", "/v1/legal-holds", "olivia", json={"workspace": ws, "reason": "smoke: a hold after the purge"})
+        assert r.status_code == 201, f"hold: {r.status_code} {r.text[:200]}"
+        hold = r.json()["id"]
+        status = settled(pid)
+        assert status["status"] == "cancelled" and "legal hold" in str(status["result"]), f"the held team's purge: {status}"
+        assert fga.check(*admin), "the cancelled purge destroyed the held team's authorization"
+        with psycopg.connect(OWNER_DB) as conn:
+            assert conn.execute("SELECT 1 FROM kl.workspaces WHERE slug = %s", (ws,)).fetchone(), "the held team was removed"
+
+        assert api("POST", f"/v1/legal-holds/{hold}/release", "olivia").status_code == 200
+        status = settled(purged())
+        assert status["status"] == "done", f"a team whose hold was released couldn't be purged: {status}"
+        assert status["result"].get("released_holds_kept") == 1 and status["result"]["remaining"] == 0, status["result"]
+        record = [h for h in api("GET", "/v1/retention", "olivia").json()["holds"] if h["id"] == hold]
+        assert record and record[0]["workspace"] == ws and record[0]["released_at"], f"the released hold's record: {record}"
+        print(f"      {ws}: the late hold cancelled its purge; released, the team was purged and the hold kept its name")
+    finally:
+        with psycopg.connect(OWNER_DB) as conn:
+            if hold:
+                conn.execute("DELETE FROM kl.legal_holds WHERE id = %s", (hold,))
+            conn.execute("DELETE FROM kl.workspaces WHERE slug = %s", (ws,))
+        try:
+            fga.write(deletes={admin})
+        except RuntimeError:
+            pass  # the purge removed it, as it should
+
+
+@check
 def retention_policies_have_guardrails():
     """Retention: only org admins set policies and holds; the audit trail is kept at least 30 days; org-wide records take no team"""
     cases = (({"target": "audit_events", "keep_days": 7}, 422),

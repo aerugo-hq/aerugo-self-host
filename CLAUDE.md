@@ -542,6 +542,9 @@ workload identity federation), each fenced per team by the secret's name and off
 `vault.get` and `team_secret` take them; `docs/connectors/secret-stores.md`. Smoke:
 `credentials_can_live_in_vault_aws_or_azure_fenced_per_team`. Not built: Terraform for imports (a one-time upload;
 pipelines push repeatedly) and for secret stores (the deployment's settings, not the API's).
+Also, found by the provider's tests: a team whose legal hold was released can be purged (migration 0050; the
+foreign key had refused it for good), the hold kept on record with the team's name (`legal_holds.team_slug`); a hold
+placed after a purge was scheduled cancels it before anything is destroyed. Smoke: `a_released_hold_outlives_its_team`.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3; next, deployment (E in the build plan), then Q.
