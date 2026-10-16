@@ -60,6 +60,36 @@ export function serviceAccountItem(a) {
                                                         ["enabled", String(a.enabled)], ["org_admin", String(a.org_admin)]]) };
 }
 
+// A connection as aerugo_connection (slice G2): its kind and what it was declared with, as the API reads it back, so
+// adopting it plans no change. A secret Aerugo stored never comes back, so it isn't written: the import keeps it.
+const LISTS = ["projects", "spaces", "labels", "page_trees", "repositories", "drives", "channels", "sites", "catalogs", "databases",
+               "collections", "platforms"];
+const SCALARS = ["domain", "admin_email", "tenant_id", "client_id", "region", "role_arn", "location"];
+export function connectionItem(ws, c) {
+  const s = c.settings || {};
+  const name = local(ws, c.name);
+  const attrs = [["team", hcl(ws)], ["name", hcl(c.name)], ["kind", hcl(c.kind)]];
+  if (c.kind === "directory" && s.provider) attrs.push(["directory", hcl(s.provider)]);
+  if (c.kind === "catalog" && s.provider) attrs.push(["catalog", hcl(s.provider)]);
+  const ownAddress = { google: true, microsoft: true, slack: true, notion: true, github: true }[c.kind]
+    || (c.kind === "directory" && s.provider !== "okta") || (c.kind === "catalog" && ["dataplex", "glue"].includes(s.provider));
+  if (s.api_base && !ownAddress) attrs.push(["site", hcl(s.api_base)]);
+  if (c.kind === "github" && c.installation_id) attrs.push(["installation_id", String(c.installation_id)]);
+  for (const key of SCALARS) if (s[key]) attrs.push([key, hcl(s[key])]);
+  for (const key of LISTS) if (Array.isArray(s[key])) attrs.push([key, `[${s[key].map(hcl).join(", ")}]`]);
+  if (s.company_site) attrs.push(["company_site", "true"]);
+  if (s.company_workspace) attrs.push(["company_workspace", "true"]);
+  if (s.history_days) attrs.push(["history_days", String(s.history_days)]);
+  if (s.every_minutes) attrs.push(["every_minutes", String(s.every_minutes)]);
+  if (!c.enabled) attrs.push(["enabled", "false"]);
+  if (s.credential_ref) attrs.push(["credential_ref", hcl(s.credential_ref)]);
+  const note = s.credential_ref || c.kind === "github" || (c.kind === "catalog" && ["dataplex", "glue"].includes(s.provider)) ? ""
+    : "# Its secret stays where Aerugo stored it: importing keeps it. To rotate it from Terraform, add the write-only\n"
+      + "# secret (api_token, certificate, or service_account_key) and bump credential_version.\n";
+  return { label: `Connection ${c.name}`, type: "aerugo_connection", name, id: `${ws}/${c.name}`, managed: c.managed_by || null,
+           hcl: note + block("aerugo_connection", name, attrs) };
+}
+
 // The configuration that adopts everything here Terraform doesn't manage yet: each resource, then its import block.
 export function adoption(items) {
   return items.filter((i) => i && !i.managed).map((i) => `${i.hcl}\n\n${importBlock(i.type, i.name, i.id)}`).join("\n\n");

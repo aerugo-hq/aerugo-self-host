@@ -51,13 +51,14 @@ def allowed_base(api_base: str) -> bool:
     return not api_base or api_base.rstrip("/") in config.AWS_API_BASES
 
 
-def web_identity_token() -> str:
-    """The runner's own identity token, for AWS to trust: a token file the platform mounts, else the GCP metadata server's."""
+def web_identity_token(audience: str = AUDIENCE) -> str:
+    """The runner's own identity token, for another cloud to trust (AWS, Vault, Entra): a token file the platform
+    mounts, else the GCP metadata server's, for that audience."""
     if config.AWS_WEB_IDENTITY_TOKEN_FILE:
         with open(config.AWS_WEB_IDENTITY_TOKEN_FILE) as f:
             return f.read().strip()
     r = httpx.get(f"{config.GCP_METADATA_BASE}/computeMetadata/v1/instance/service-accounts/default/identity",
-                  params={"audience": AUDIENCE, "format": "full"}, headers={"Metadata-Flavor": "Google"}, timeout=5)
+                  params={"audience": audience, "format": "full"}, headers={"Metadata-Flavor": "Google"}, timeout=5)
     r.raise_for_status()
     return r.text.strip()
 
@@ -82,14 +83,16 @@ def sign(method: str, url: str, region: str, service: str, body: bytes, headers:
     return {**signed, "authorization": f"AWS4-HMAC-SHA256 Credential={creds.key_id}/{scope}, SignedHeaders={';'.join(names)}, Signature={signature}"}
 
 
-class GlueClient:
-    def __init__(self, api_base: str, region: str, role_arn: str, session: str, databases: list[str] | None):
+class AwsRole:
+    """An IAM role the runner assumes with its own identity token, and its calls to AWS's JSON APIs, each SigV4-signed.
+    Glue (below) reads through one; so do AWS Secrets Manager references (kl/secret_refs.py)."""
+
+    def __init__(self, api_base: str, region: str, role_arn: str, session: str):
         if not allowed_base(api_base):
             raise ValueError("that AWS address isn't allowed here")
         if not REGION.fullmatch(region) or not ROLE.fullmatch(role_arn):
             raise ValueError("name the AWS region and the IAM role's ARN")
         self.base, self.region, self.role, self.session = api_base.rstrip("/"), region, role_arn, session[:64]
-        self.databases = [d for d in databases or [] if NAME.fullmatch(d)] or None
         self._creds: Credentials | None = None
 
     def _url(self, service: str, path: str = "/") -> str:
@@ -120,6 +123,12 @@ class GlueClient:
                 return r.json()
             time.sleep(2 ** attempt + random.random())
         raise RuntimeError("unreachable")
+
+
+class GlueClient(AwsRole):
+    def __init__(self, api_base: str, region: str, role_arn: str, session: str, databases: list[str] | None):
+        super().__init__(api_base, region, role_arn, session)
+        self.databases = [d for d in databases or [] if NAME.fullmatch(d)] or None
 
     def _glue(self, action: str, body: dict, key: str) -> list[dict]:
         out, token = [], None

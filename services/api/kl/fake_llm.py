@@ -128,6 +128,12 @@ GCP_TOKEN = "fake-gcp-workload-token"
 # "domain": bool (the company's domain may read it), "upstream": ["<db>.<table>"]}; "people": {email: Entra object id},
 # for Purview, which names people by id. Pages hold one table, so every client's paging is exercised.
 CATALOG: dict = {"tables": [], "people": {}}
+# Fake secret stores (G3): HashiCorp Vault (JWT login with the runner's identity token, then KV v2), AWS Secrets
+# Manager (behind the same STS and SigV4 as Glue), and Azure Key Vault (an Entra token by workload identity
+# federation), each holding the secrets smoke sets through POST /secret-stores as JSON strings.
+SECRET_STORES: dict = {"vault": {}, "aws": {}, "azure": {}}
+VAULT_TOKEN = "fake-vault-client-token"
+AZURE_KV_TOKEN = "fake-azure-key-vault-token"
 CATALOG_PROJECT = "acme-data"
 DATABRICKS = {"client_id": "0b1e6a4e-6d0c-4c7e-9a43-5f2d8c1e7a10", "client_secret": "dbx-smoke-oauth-secret", "token": "dbx-smoke-token"}
 AWS = {"role": "arn:aws:iam::123456789012:role/aerugo-catalog", "key_id": "ASIAFAKESMOKE", "secret": "fake-aws-secret-key",
@@ -353,9 +359,22 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get("Metadata-Flavor") != "Google":
                 return self._json(403, {"error": "Missing Metadata-Flavor: Google"})
             audience = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}.get("audience")
-            return self._xml(200, GCP_IDENTITY) if audience == "sts.amazonaws.com" else self._json(400, {"error": "audience"})
+            return self._xml(200, GCP_IDENTITY if audience == "sts.amazonaws.com" else f"fake-gcp-identity-token-for-{audience}") \
+                if audience else self._json(400, {"error": "audience"})
         if self.path.startswith(("/gcp-catalog/", "/databricks/", "/purview/")):
             return self._catalog("GET", urlparse(self.path), b"")
+        if self.path.startswith("/hcvault/v1/"):  # Vault's KV v2, for its login's token only
+            if self.headers.get("X-Vault-Token") != VAULT_TOKEN:
+                return self._json(403, {"errors": ["permission denied"]})
+            key = urlparse(self.path).path.split("/data/", 1)[-1]
+            value = SECRET_STORES["vault"].get(key)
+            return self._json(200, {"data": {"data": json.loads(value)}}) if value else self._json(404, {"errors": []})
+        if self.path.startswith("/azkv/"):  # Key Vault: /azkv/<vault>/secrets/<name>
+            if self.headers.get("Authorization") != f"Bearer {AZURE_KV_TOKEN}":
+                return self._json(401, {"error": {"code": "Unauthorized"}})
+            parts = urlparse(self.path).path.split("/")
+            value = SECRET_STORES["azure"].get(f"{parts[2]}/{parts[4]}") if len(parts) == 5 and parts[3] == "secrets" else None
+            return self._json(200, {"value": value, "id": self.path}) if value else self._json(404, {"error": {"code": "SecretNotFound"}})
         if self.path == "/gcp-metadata/computeMetadata/v1/instance/service-accounts/default/token":
             if self.headers.get("Metadata-Flavor") != "Google":  # as the real metadata server insists
                 return self._json(403, {"error": "Missing Metadata-Flavor: Google"})
@@ -460,6 +479,11 @@ class Handler(BaseHTTPRequestHandler):
             service = path.split("/")[2]
             if not self._signed_by_role(service, path, raw):
                 return self._json(403, {"__type": "InvalidSignatureException"})
+            if service == "secretsmanager":
+                value = SECRET_STORES["aws"].get(body.get("SecretId"))
+                if self.headers.get("X-Amz-Target") != "secretsmanager.GetSecretValue" or value is None:
+                    return self._json(400, {"__type": "ResourceNotFoundException"})
+                return self._json(200, {"Name": body["SecretId"], "SecretString": value})
             if service == "glue":
                 target = self.headers.get("X-Amz-Target")
                 if target == "AWSGlue.GetDatabases":
@@ -919,6 +943,21 @@ class Handler(BaseHTTPRequestHandler):
             FOLDERS.clear()
             FOLDERS.update(self._body()["folders"])
             return self._json(200, {})
+        if path == "/secret-stores":  # smoke sets the fake Vault's, AWS's, and Azure's secrets
+            for store, values in self._body().items():
+                SECRET_STORES[store].update(values)
+            return self._json(200, {})
+        if path == "/hcvault/v1/auth/jwt/login":  # Vault's JWT auth: the runner's identity token for the vault audience
+            body = self._body()
+            if body.get("role") != "aerugo" or body.get("jwt") != "fake-gcp-identity-token-for-vault":
+                return self._json(403, {"errors": ["permission denied"]})
+            return self._json(200, {"auth": {"client_token": VAULT_TOKEN, "lease_duration": 3600}})
+        if path.startswith("/azure-login/") and path.endswith("/oauth2/v2.0/token"):  # Entra, by workload identity federation
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()).items()}
+            if form.get("client_assertion") != "fake-gcp-identity-token-for-api://AzureADTokenExchange" \
+                    or form.get("scope") != "https://vault.azure.net/.default":
+                return self._json(401, {"error": "invalid_client"})
+            return self._json(200, {"access_token": AZURE_KV_TOKEN, "token_type": "Bearer", "expires_in": 3600})
         if path == "/catalog/setup":  # smoke sets the fake catalogs' tables, and Entra's object ids for Purview
             body = self._body()
             CATALOG.update({"tables": body.get("tables", []), "people": body.get("people", {})})

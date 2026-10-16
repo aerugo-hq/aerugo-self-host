@@ -96,14 +96,15 @@ decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 
 ## What's built
 
-- **Retrieval and knowledge:** hybrid search (pgvector and full text) behind RLS and OpenFGA post-checks, with audit; curated OKF bundles with tiers (gold, silver, evidence); proposals compiled from evidence and reviewed as pull requests; Ask with conversations, focus, and citations; the Map, with entities extracted from text.
-- **Sources:** GitHub (routing each repo to its own team), Google Drive (with Google sign-in linking), CI pipelines pushing with workload tokens, Confluence and Notion export imports. Formats: PDFs, Office files, spreadsheets, OpenDocument, email, plain text, RTF, and OCR for scans and images.
-- **Connections:** create, refresh, change in place, and remove; removal retires what only that team held, its authorization first.
+- **Retrieval and knowledge:** hybrid search (pgvector and full text) behind RLS and OpenFGA post-checks, with audit; curated OKF bundles with tiers (gold, silver, evidence); proposals compiled from evidence and reviewed as pull requests; Ask with conversations, focus, citations, and each claim checked against what it cites; alias expansion, lineage hops, and filters by source and container; decisions as their own items; who to ask (owners, authors, catalog owners, never someone who has left); knowledge health and its review queue; the Map, with entities extracted from text and clusters that keep their colors and names.
+- **Sources:** GitHub (routing each repo to its own team), Google Drive (with Google sign-in linking and Google groups), Jira, Confluence, Slack, Microsoft 365, and Notion live, data catalogs (Dataplex, Unity Catalog, Glue, Purview, DataHub, and dbt and Dataform manifests from CI), directories (Okta, Google Workspace, Entra), CI pipelines pushing with workload tokens, and Confluence and Notion export imports; attachments as their own documents. Formats: PDFs, Office files, spreadsheets, OpenDocument, email, plain text, RTF, OCR for scans and images, transcripts, and, opt-in per team, diagrams, audio, and video through the team's own models.
+- **Connections:** create, refresh, change in place, and remove; removal retires what only that team held, its authorization first; a readers refresh every few minutes and signed webhooks (Jira, Confluence, Slack) for permission changes; credentials in OpenBao, or referenced in GCP Secret Manager, HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault.
+- **Interfaces:** the REST API, MCP (search, ask, the graph as tools), Python and TypeScript clients, a change feed, and OKF export.
 - **Compliance:** data-subject requests, access reviews, retention, legal holds, persistent OpenBao, per-team encryption, pgBackRest backups and the restore drill, personal-data detection, the control map, runbooks, and team purge.
 - **Administration:** teams, members, models and budgets, service accounts, marks for what Terraform manages, alerts, and observability (Grafana, Jaeger, Prometheus).
 - **The web app:** team scopes with documentation-style spaces and an in-place reader; Datavine's design system; light, dark, and system themes.
-- **The Terraform provider:** teams, members, models, budgets, and service accounts.
-- **Tests:** the smoke suite, 21 browser tests, the golden set, and the evaluation-scenario runner (`kl/evals.py`) with its opt-in scenario loader.
+- **The Terraform provider:** teams, members, models, budgets, service accounts, connections of every kind, pipelines, repository routes, retention policies, and legal holds.
+- **Tests:** the smoke suite, the browser tests, the golden set and the evaluation scenario held to one baseline, the clients' tests (`make sdk-test`), and the provider's acceptance tests.
 
 ## What's next, in order
 
@@ -530,9 +531,20 @@ CI job run their tests against stand-ins. A3: the change feed, `GET /v1/changes?
 on them, and the post-check for additions and changes; a removal only to those who could read it, by key alone). A4:
 `GET /v1/workspaces/{ws}/export.okf`, a team's curated pages as an OKF repository (a zip of each page's latest version
 at its bundle path, or `<id>.md`), only what the caller may read, retired pages left out. Smoke checks for each.
+G2 and G3 (governance). G2: the provider's `aerugo_pipeline`, `aerugo_connection_route`, `aerugo_retention_policy`
+(its days change in place), and `aerugo_legal_hold` (destroying it releases the hold), with an acceptance test
+(`TestAccPipelineAndComplianceRules`; the route's runs only against a real GitHub connection, `AERUGO_TEST_ROUTE`);
+and in the app, every connection's "IDs and Terraform" (`connectionItem` in `terraform.js`): its `aerugo_connection`
+as the API reads it back, and the import block that adopts it. G3: credential references to the company's own
+secret stores (`kl/secret_refs.py`, ADR 0012): `hcvault://` (Vault's JWT login with the runner's identity token),
+`awssm://` (Secrets Manager through `glue.AwsRole`, the role the runner assumes), and `azkv://` (Key Vault through
+workload identity federation), each fenced per team by the secret's name and off until the deployment sets it;
+`vault.get` and `team_secret` take them; `docs/connectors/secret-stores.md`. Smoke:
+`credentials_can_live_in_vault_aws_or_azure_fenced_per_team`. Not built: Terraform for imports (a one-time upload;
+pipelines push repeatedly) and for secret stores (the deployment's settings, not the API's).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, and A1 to A4; next G2 and G3.
+done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3; next, deployment (E in the build plan), then Q.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;

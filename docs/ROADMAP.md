@@ -177,8 +177,8 @@ baseline is already in place (only its golden-set part is left), so each source 
 - [x] The services' token gets a policy for exactly their paths, instead of root; provisioning creates it
 
 ### G2. The rest of the Terraform provider
-- [ ] Resources for routes, pipelines, imports, secret stores, and compliance rules
-- [ ] "Manage with Terraform" import snippets for connections that already exist
+- [x] Resources for routes, pipelines, imports, secret stores, and compliance rules (imports and secret stores aren't resources: see decisions)
+- [x] "Manage with Terraform" import snippets for connections that already exist
 
 ### G3. More secret stores
-- [ ] References to HashiCorp Vault, AWS Secrets Manager, and Azure Key Vault, fenced per team as OpenBao's and GCP's are
+- [x] References to HashiCorp Vault, AWS Secrets Manager, and Azure Key Vault, fenced per team as OpenBao's and GCP's are

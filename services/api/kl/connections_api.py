@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import config, confluence, dataplex, datahub, directory, gcp_secrets, gdrive, glue, jira, microsoft365, notion, purview, slack, unity
+from . import config, confluence, dataplex, datahub, directory, gcp_secrets, gdrive, glue, jira, microsoft365, notion, purview, secret_refs, slack, unity
 from .hooks import HOOK_KINDS
 from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
@@ -175,12 +175,14 @@ def team_secret(ws: str, ref: str) -> bool:
     """A credential reference must name a secret under the team's own prefix, so no team's admin can point a connection
     at another team's secrets (which the worker would then send to a source of their choosing)."""
     return bool(re.fullmatch(rf"openbao://secret/kl/{re.escape(config.ORG_SLUG)}/{re.escape(ws)}/connections/[a-z0-9][a-z0-9/_-]{{0,150}}", ref)) \
-        or gcp_secrets.team_owns(config.ORG_SLUG, ws, ref)  # or one it keeps in GCP Secret Manager
+        or gcp_secrets.team_owns(config.ORG_SLUG, ws, ref) \
+        or secret_refs.team_owns(config.ORG_SLUG, ws, ref)  # or one it keeps in GCP, Vault, AWS, or Azure (G3)
 
 
 def ref_rule(ws: str) -> str:
-    return (f"a credential reference must be under openbao://secret/kl/{config.ORG_SLUG}/{ws}/connections/, or be a GCP Secret "
-            f"Manager secret named kl_{config.ORG_SLUG}_{ws}_<name> in a project this deployment allows")
+    return (f"a credential reference must be under openbao://secret/kl/{config.ORG_SLUG}/{ws}/connections/, or name this team's "
+            f"secret in a store this deployment allows: GCP Secret Manager or AWS Secrets Manager as kl_{config.ORG_SLUG}_{ws}_<name>, "
+            f"Vault under kl/{config.ORG_SLUG}/{ws}/, Azure Key Vault as kl--{config.ORG_SLUG}--{ws}--<name>")
 
 
 @router.post("/connections/jira", status_code=201)

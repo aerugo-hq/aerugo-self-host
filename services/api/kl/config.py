@@ -45,6 +45,22 @@ DATAHUB_API_BASES = [b.strip().rstrip("/") for b in _env("KL_DATAHUB_API_BASES",
 # Where the runner's own identity token comes from for AWS (S7, Glue: AssumeRoleWithWebIdentity): a token file when the
 # platform mounts one (EKS, AWS_WEB_IDENTITY_TOKEN_FILE), otherwise the GCP metadata server's identity token.
 AWS_WEB_IDENTITY_TOKEN_FILE = _env("AWS_WEB_IDENTITY_TOKEN_FILE", "")
+# Credential references to the company's own secret stores (G3, ADR 0012), each read as the runner itself. HashiCorp
+# Vault: its one address, and the JWT auth role (and mount, and the audience of the runner's identity token) it logs in
+# with. AWS Secrets Manager: the regions references may name, and the role the runner assumes. Azure Key Vault: the
+# vaults references may name, and the Entra app the runner federates into (no secret). Each is off unless set.
+HCVAULT_ADDR = _env("KL_HCVAULT_ADDR", "").rstrip("/")
+HCVAULT_ROLE = _env("KL_HCVAULT_ROLE", "aerugo")
+HCVAULT_AUTH_PATH = _env("KL_HCVAULT_AUTH_PATH", "jwt")
+HCVAULT_AUDIENCE = _env("KL_HCVAULT_AUDIENCE", "vault")
+AWS_SECRET_REGIONS = [r.strip() for r in _env("KL_AWS_SECRET_REGIONS", "").split(",") if r.strip()]
+AWS_SECRETS_ROLE = _env("KL_AWS_SECRETS_ROLE", "")
+AWS_SECRETS_API_BASE = _env("KL_AWS_SECRETS_API_BASE", "")  # AWS's own endpoints; the dev fake in Compose
+AZURE_KEY_VAULTS = [v.strip() for v in _env("KL_AZURE_KEY_VAULTS", "").split(",") if v.strip()]
+AZURE_TENANT_ID = _env("KL_AZURE_TENANT_ID", "")
+AZURE_CLIENT_ID = _env("KL_AZURE_CLIENT_ID", "")
+AZURE_LOGIN_BASE = _env("KL_AZURE_LOGIN_BASE", "https://login.microsoftonline.com")
+AZURE_KEY_VAULT_BASE = _env("KL_AZURE_KEY_VAULT_BASE", "https://{vault}.vault.azure.net")
 # Jira addresses a connection may use besides Jira Cloud sites (https://<site>.atlassian.net, always allowed): in dev,
 # the fake one smoke runs. Anything else is refused, so a team admin can't point the worker at an internal host.
 JIRA_API_BASES = [b.strip().rstrip("/") for b in _env("KL_JIRA_API_BASES", "").split(",") if b.strip()]

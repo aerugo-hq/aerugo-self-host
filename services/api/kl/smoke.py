@@ -3835,6 +3835,48 @@ def slack_hooks_are_signed_fresh_and_taken_once():
 
 
 @check
+def credentials_can_live_in_vault_aws_or_azure_fenced_per_team():
+    """G3, the company's own secret stores: a connection's credential can be a reference to HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault, each read by the worker as the runner itself (Vault's JWT login, an assumed role, workload identity federation), never stored; each store is fenced per team by the secret's name, so another team's secret, a store or place the deployment doesn't allow, and a malformed reference are refused"""
+    import json as jsonlib
+    tag = secrets.token_hex(3)
+    token = jsonlib.dumps({"token": "ntn_smoke_notion_integration_token"})
+    stores = {"vault": {f"kl/acme/payments/notion-{tag}": token}, "aws": {f"kl_acme_payments_notion{tag}": token},
+              "azure": {f"acme-smoke-vault/kl--acme--payments--notion{tag}": token}}
+    refs = {"vault": f"hcvault://secret/kl/acme/payments/notion-{tag}", "aws": f"awssm://us-east-1/kl_acme_payments_notion{tag}",
+            "azure": f"azkv://acme-smoke-vault/kl--acme--payments--notion{tag}"}
+    refused = {"another team's Vault secret": "hcvault://secret/kl/acme/finance/notion",
+               "another team's AWS secret": "awssm://us-east-1/kl_acme_finance_notion",
+               "a prefix another team's name starts with": "awssm://us-east-1/kl_acme_payments-x_notion",
+               "an AWS region the deployment doesn't allow": f"awssm://eu-west-1/kl_acme_payments_notion{tag}",
+               "another team's Key Vault secret": "azkv://acme-smoke-vault/kl--acme--finance--notion",
+               "a Key Vault the deployment doesn't allow": f"azkv://someone-elses-vault/kl--acme--payments--notion{tag}",
+               "a malformed reference": "hcvault://secret/../kl/acme/payments/x"}
+    assert httpx.post(f"{FAKE_CATALOG}/secret-stores", json=stores, timeout=10).status_code == 200
+    body = lambda name, ref: {"name": name, "api_base": f"{FAKE_NOTION}/v1", "credential_ref": ref, "every_minutes": 10080}
+    for problem, ref in refused.items():
+        r = api("POST", "/v1/workspaces/payments/connections/notion", "alice", json=body(f"refused-{tag}", ref))
+        assert r.status_code == 422, f"{problem} was accepted: {r.status_code}"
+    names = {store: f"g3-{store}-{tag}" for store in refs}
+    try:
+        for store, ref in refs.items():
+            r = api("POST", "/v1/workspaces/payments/connections/notion", "alice", json=body(names[store], ref))
+            assert r.status_code == 201, f"{store}: {r.status_code} {r.text[:200]}"
+
+        def states():
+            return {store: api("GET", f"/v1/workspaces/payments/connections/{name}", "alice").json() for store, name in names.items()}
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and any(s["status"] == "pending" for s in states().values()):
+            time.sleep(2)
+        got = states()
+        assert all(s["status"] == "ready" for s in got.values()), \
+            f"a store's secret wasn't read as the runner: {[(k, s['status'], s.get('last_error')) for k, s in got.items()]}"
+        assert all(got[store]["settings"]["credential_ref"] == refs[store] for store in refs), "a team's own reference wasn't read back"
+    finally:
+        for name in names.values():
+            api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+
+
+@check
 def notion_pages_reach_only_the_connecting_team():
     """S6, Notion live: what's shared with an integration (pages, child pages under their parents, a data source's rows) is readable by the connecting team's members and no one else, never the whole org, since Notion doesn't say who can read a page; a page in the trash or never shared isn't read; a page unshared leaves on the next sync; an export's copy of a page the live connector reads is retired; a token that isn't an integration's, an internal address, and another team's secret are refused"""
     import io
