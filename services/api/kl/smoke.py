@@ -3631,6 +3631,75 @@ def a_failed_change_never_strands_or_loses_a_secret():
 
 
 @check
+def team_rows_stay_in_their_team_and_the_change_feed_keeps_ninety_days():
+    """Permissions audit (P1 to P3): the database itself keeps asset owners, review history, and media choices to their own team, and a document's authors to those who may read it, so a query that forgets a join reveals nothing; a team can choose only its own models for its media; and the change feed keeps 90 days, telling a client that asks from before"""
+    from . import db
+    tag = secrets.token_hex(3)
+    org, team = acme_org_id(), f"p1-{tag}"
+    stranger, bob, alice, olivia = [f"user:stranger-{tag}"], ["user:bob", "org:acme", "group:finance"], ["user:alice", "org:acme"], ["user:olivia", "org:acme"]
+    with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
+        team_id = conn.execute("INSERT INTO kl.workspaces (org_id, slug, name, discoverability) VALUES (%s, %s, 'P1 test', 'private') "
+                               "RETURNING id", (org, team)).fetchone()["id"]
+        asset = conn.execute("INSERT INTO kl.assets (org_id, workspace_id, kind, namespace, name) VALUES (%s, %s, 'dataset', 'edw', %s) "
+                             "RETURNING id", (org, team_id, f"P1_{tag}")).fetchone()["id"]
+        conn.execute("INSERT INTO kl.asset_owners (org_id, workspace_id, asset_id, email, source) VALUES (%s, %s, %s, 'owner@acme.test', %s)",
+                     (org, team_id, asset, f"smoke-{tag}"))
+        doc = conn.execute("INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, content_hash, "
+                           "classification, acl_principals) VALUES (%s, 'seed', %s, 'v1', %s, 'P1 test', %s, 'internal', %s) RETURNING id",
+                           (org, f"https://kb.acme.test/p1-{tag}", f"p1-{tag}", tag, ["user:alice"])).fetchone()["id"]
+        conn.execute("INSERT INTO kl.document_authors (org_id, document_id, login, commits, last_at, at_commit) VALUES (%s, %s, %s, 1, now(), 'c')",
+                     (org, doc, f"author-{tag}"))
+        page = conn.execute("SELECT k.id FROM kl.concepts k JOIN kl.workspace_documents wd ON wd.document_id = k.document_id "
+                            "JOIN kl.workspaces w ON w.id = wd.workspace_id WHERE w.slug = 'commons' AND 'org:acme' = ANY(k.acl_principals) "
+                            "LIMIT 1").fetchone()["id"]  # a page the whole org may read, bob included
+        conn.execute("INSERT INTO kl.page_reviews (org_id, workspace_id, concept_id, action, by_user, note) VALUES (%s, %s, %s, 'confirm', 'olivia', %s)",
+                     (org, team_id, page, f"a team's own note {tag}"))
+        conn.execute("INSERT INTO kl.team_media (workspace_id, org_id, updated_by) VALUES (%s, %s, 'olivia')", (team_id, org))
+        payments_model = conn.execute("SELECT m.id FROM kl.model_endpoints m JOIN kl.workspaces w ON w.id = m.workspace_id "
+                                      "WHERE w.slug = 'payments' LIMIT 1").fetchone()
+        finance = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'finance'").fetchone()["id"]
+        old = conn.execute("UPDATE kl.document_changes SET at = now() - interval '100 days' WHERE id = "  # the oldest change, aged:
+                           "(SELECT min(id) FROM kl.document_changes WHERE org_id = %s) RETURNING id", (org,)).fetchone()["id"]  # ids grow with time
+    rows = {"asset_owners": ("source", f"smoke-{tag}"), "document_authors": ("login", f"author-{tag}"),
+            "page_reviews": ("note", f"a team's own note {tag}"), "team_media": ("workspace_id", team_id)}
+
+    def seen(principals: list[str], teams: tuple = ()) -> dict:
+        with db.scoped(org, principals, **({"teams": list(teams)} if teams else {})) as conn:
+            return {table: conn.execute(f"SELECT count(*) AS n FROM {table} WHERE {column} = %s", (value,)).fetchone()["n"]
+                    for table, (column, value) in rows.items()}
+
+    try:
+        assert seen(stranger) == dict.fromkeys(rows, 0), f"a stranger read team rows directly: {seen(stranger)}"
+        assert seen(bob) == dict.fromkeys(rows, 0), f"someone outside the team, who may read the page, read its team's rows: {seen(bob)}"
+        assert seen(alice)["document_authors"] == 1, "the document's reader can't see who wrote it"
+        assert seen(olivia, (team,)) == {"asset_owners": 1, "document_authors": 0, "page_reviews": 1, "team_media": 1}, \
+            f"the team's own transaction should see its rows: {seen(olivia, (team,))}"
+        for what, sql, args in (("another team's media", "INSERT INTO team_media (workspace_id, org_id, updated_by) VALUES (%s, %s, 'x')", (finance, org)),
+                                ("another team's model", "UPDATE team_media SET vision_model_id = %s WHERE workspace_id = %s",
+                                 (payments_model["id"] if payments_model else None, team_id))):
+            if args[0] is None:
+                continue
+            try:
+                with db.scoped(org, olivia, teams=[team]) as conn:
+                    changed = conn.execute(sql, args).rowcount
+                raise AssertionError(f"a team's transaction could set {what} ({changed} row)")
+            except psycopg.errors.InsufficientPrivilege:
+                pass  # refused by the database, as it should be
+
+        run_job("retention.apply")
+        with psycopg.connect(OWNER_DB) as conn:
+            kept = conn.execute("SELECT count(*) FROM kl.document_changes WHERE id = %s", (old,)).fetchone()[0]
+        assert kept == 0, "a change older than the feed's 90 days was kept"
+        r = api("GET", "/v1/changes", "bob", params={"since": old - 1})
+        assert r.status_code == 410 and "90 days" in r.text, f"a client asking from before the feed's window wasn't told: {r.status_code} {r.text[:200]}"
+        print("      team rows reached only their team; media took only the team's own models; a 100-day-old change was pruned")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.documents WHERE id = %s", (doc,))
+            conn.execute("DELETE FROM kl.workspaces WHERE id = %s", (team_id,))  # its asset, owners, reviews, and media go with it
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga

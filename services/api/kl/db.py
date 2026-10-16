@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from . import config
-from .principals import is_valid
+from .principals import is_team, is_valid
 
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
@@ -55,15 +55,18 @@ def resolve_org_id(slug: str) -> str:
 
 
 @contextmanager
-def scoped(org_id: str, principals: list[str]):
-    bad = [p for p in principals if not is_valid(p)]
+def scoped(org_id: str, principals: list[str], teams: list[str] = ()):
+    """One transaction in the caller's RLS context. `teams` names the teams whose own rows (asset owners, review
+    history, media choices) this transaction may touch, as the API decided in OpenFGA before opening it; with none,
+    those rows stay hidden (migration 0053)."""
+    bad = [p for p in principals if not is_valid(p)] + [t for t in teams if not is_team(t)]
     if bad or not principals:
-        raise ValueError(f"refusing to build an RLS context from principals {principals!r}")
+        raise ValueError(f"refusing to build an RLS context from principals {principals!r} and teams {list(teams)!r}")
     with connect() as conn:
         with conn.transaction():
             conn.execute(
-                "SELECT set_config('kl.org_id', %s, true), set_config('kl.principals', %s, true)",
-                (org_id, ",".join(principals)),
+                "SELECT set_config('kl.org_id', %s, true), set_config('kl.principals', %s, true), set_config('kl.teams', %s, true)",
+                (org_id, ",".join(principals), ",".join(teams)),
             )
             # Add the caller's linked source identities (ext:github.<login>, ...) so ACL arrays that
             # hold source identities match. Links live in principal_aliases; unlinked grants nothing.

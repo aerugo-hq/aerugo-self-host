@@ -527,7 +527,8 @@ def handle_retention_apply(conn, job) -> dict:
         fga.write(deletes=tuples)
     with conn.transaction():
         counts = conn.execute("SELECT kl.apply_retention() AS c").fetchone()["c"] or {}
-    return {**counts, "tuples": len(tuples)}
+        pruned = conn.execute("SELECT kl.prune_changes(%s) AS n", (config.CHANGE_FEED_DAYS,)).fetchone()["n"]  # P3
+    return {**counts, "tuples": len(tuples), "changes_pruned": pruned}
 
 
 def handle_pipeline_push(conn, job) -> dict:

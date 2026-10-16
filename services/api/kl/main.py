@@ -2923,6 +2923,10 @@ def changes(since: int = Query(default=0, ge=0), limit: int = Query(default=100,
     could read it before, and never says more than its key."""
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
+        floor = conn.execute("SELECT before_id FROM change_feed_floor").fetchone()
+        if since and floor and since < floor["before_id"] - 1:  # P3: the feed keeps a window, and says when a cursor is past it
+            raise HTTPException(410, f"the change feed keeps {config.CHANGE_FEED_DAYS} days, and changes after this cursor "
+                                     "have been pruned: read everything again, then follow the feed from its next cursor")
         rows = conn.execute(CHANGES_SQL, {"since": since, "limit": limit}).fetchall()
         live = sorted({r["external_key"] for r in rows if r["change"] != "removed"})
         viewable = fga.batch_check(caller.fga_user, "viewer", [f"document:{k}" for k in live]) if live else set()
@@ -3004,9 +3008,9 @@ FROM concepts k WHERE k.concept_key = ANY(%(keys)s)"""
 LATEST_REVIEW_SQL = """
 SELECT DISTINCT ON (concept_id) concept_id, action, by_user, at, at_hash, note FROM page_reviews
 WHERE concept_id = ANY(%(ids)s) ORDER BY concept_id, at DESC, id DESC"""
-RETIRED_SQL = """
-SELECT k.concept_key FROM (SELECT DISTINCT ON (concept_id) concept_id, action FROM page_reviews ORDER BY concept_id, at DESC, id DESC) r
-JOIN concepts k ON k.id = r.concept_id WHERE r.action = 'retire'"""
+# Retired pages leave everyone's search, not only their team's: kl.retired_concepts() says which, and nothing of the
+# reviews (migration 0053), and concepts' own RLS keeps it to pages the caller may read.
+RETIRED_SQL = "SELECT k.concept_key FROM concepts k WHERE k.id IN (SELECT kl.retired_concepts())"
 
 
 class ReviewIn(BaseModel):
@@ -3023,7 +3027,7 @@ def team_health(ws: str, caller: Caller = Depends(authenticate)):
     require_workspace_admin(caller, ws)
     org_id = resolve_org_id(config.ORG_SLUG)
     now = datetime.now(timezone.utc)
-    with scoped(org_id, caller.principals) as conn:
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:  # its own review history (migration 0053)
         rows = conn.execute(HEALTH_PAGES_SQL, {"ws": ws}).fetchall()
         keys, ids = [r["concept_key"] for r in rows], [r["id"] for r in rows]
         shared = conn.execute(SHARED_NAMES_SQL).fetchall()
@@ -3069,7 +3073,7 @@ def review_page(ws: str, key: str, body: ReviewIn, caller: Caller = Depends(auth
     if not CONCEPT_KEY.fullmatch(key):
         raise HTTPException(404, "page not found")
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:
         page = next((r for r in conn.execute(HEALTH_PAGES_SQL, {"ws": ws}).fetchall() if r["concept_key"] == key), None)
         if not page:
             raise HTTPException(404, "page not found")
@@ -3091,7 +3095,7 @@ def get_media(ws: str, caller: Caller = Depends(authenticate)):
     """The models this team chose to read diagrams (vision) and audio and video (speech); none means not read."""
     require_workspace_admin(caller, ws)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:  # its own media (migration 0053)
         row = conn.execute("""SELECT v.name AS vision_model, s.name AS speech_model, t.updated_by, t.updated_at FROM team_media t
                               JOIN workspaces w ON w.id = t.workspace_id LEFT JOIN model_endpoints v ON v.id = t.vision_model_id
                               LEFT JOIN model_endpoints s ON s.id = t.speech_model_id WHERE w.slug = %s""", (ws,)).fetchone()
@@ -3105,7 +3109,7 @@ def set_media(ws: str, body: MediaIn, caller: Caller = Depends(authenticate)):
     from its own registry. Each reads only what its allowed classifications include; the team's next syncs use them."""
     require_workspace_admin(caller, ws)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:
         team = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not team:
             raise HTTPException(404, "workspace not found")
@@ -3209,13 +3213,13 @@ def concept_people(key: str, caller: Caller = Depends(authenticate)):
     revealed; an owning team's members are listed only when the caller is on that team, so a private team's
     membership never leaks."""
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    mine = memberships(caller)  # the asker's own teams, from OpenFGA: their asset owners only (migration 0053)
+    with scoped(org_id, caller.principals, teams=sorted(mine)) as conn:
         c = visible_concept(conn, org_id, caller, key)
         if c:
             v = conn.execute("SELECT content, key_ref FROM concept_versions WHERE concept_id = %s AND hash = %s",
                              (c["id"], c["latest_hash"])).fetchone()
             meta = okf.parse(originals.open_one(v["content"], v["key_ref"]), key).meta if v else {}
-            mine = memberships(caller)
             members = {}
             for owner in (meta.get("x-kl") or {}).get("owners") or []:
                 kind, _, team = str(owner).partition(":")
