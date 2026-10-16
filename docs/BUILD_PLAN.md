@@ -45,7 +45,7 @@ fake in `kl/fake_llm.py`, its smoke check `confluence_pages_carry_confluences_ow
    before relying on smoke (S1 did this over HTTP; do the same).
 6. **No silent widening in the app either.** The UI never offers an option that broadens readers without saying so
    plainly (the company-site checkbox's wording is the model).
-7. **Migrations are additive and numbered** (`kl/migrations/00NN_<name>.sql`, next is 0049). Grant what the roles
+7. **Migrations are additive and numbered** (`kl/migrations/00NN_<name>.sql`, next is 0050). Grant what the roles
    need (`kl_app` for the API, `kl_ingest` for the worker), as earlier migrations do.
 
 ## 3. Where things are

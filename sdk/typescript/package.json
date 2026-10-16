@@ -1,0 +1,13 @@
+{
+  "name": "@aerugo/client",
+  "version": "0.1.0",
+  "description": "Aerugo's TypeScript client: search, Ask, documents, the change feed, and pipeline pushes, as the token's own user.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test test/client.test.ts"
+  },
+  "license": "Apache-2.0"
+}

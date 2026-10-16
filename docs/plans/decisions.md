@@ -125,3 +125,14 @@ such choice took the narrower, fail-closed option and is listed here, with its a
    list still show it, until someone confirms it again or removes it at its source.
 4. **Cluster names are built in the browser** (E3), from the titles of the nodes the viewer was sent, so a name never
    mixes in what they can't read (invariant 16).
+
+## A1 to A4. Agents and integration
+
+1. **The change feed shows a removal by its key alone** (A3), to those who could read the document before: the
+   document is gone, so there's nothing left to post-check, and RLS on its readers at removal is the gate.
+2. **A change of readers reaches the union of old and new readers** (A3), so someone who lost a document can learn it
+   changed only while the post-check still lets them read it; once it doesn't, they see nothing more of it.
+3. **The SDKs aren't published** (A2): they live in `sdk/`, versioned with the API; publishing to PyPI and npm is a
+   release step for later.
+4. **The OKF export is a zip over the API** (A4), not a Git push: a team pushes it to its own repository, so Aerugo
+   never writes to anyone's Git.

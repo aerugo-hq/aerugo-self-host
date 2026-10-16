@@ -4751,6 +4751,87 @@ def search_follows_lineage_only_through_the_askers_teams():
 
 
 @check
+def the_graph_tools_walk_only_what_the_caller_may_see():
+    """A1, the graph as tools: a node's neighbors, the shortest path between two nodes, and why two nodes are linked each come with their links' provenance; none passes through, or names, a node the caller can't see; a hidden end is not found; the same tools over MCP"""
+    curated_ready()
+    mine = api("GET", "/v1/graph/neighbors", "alice", params={"key": "kb-sev1-playbook"})
+    assert mine.status_code == 200, mine.text[:200]
+    near = {n["id"]: n for n in mine.json()["neighbors"]}
+    assert "kb-ledger" in near and all(l.get("kind") for l in near["kb-ledger"]["links"]), f"a neighbor came without its link: {near.get('kb-ledger')}"
+    hidden = [k for k in near if k.startswith("kb-") and api("GET", f"/v1/concepts/{k}", "alice").status_code != 200]
+    assert not hidden, f"a neighbor alice can't read was named: {hidden}"
+    walk = api("GET", "/v1/graph/path", "alice", params={"from": "kb-sev1-playbook", "to": "kb-incident-comms"}).json()
+    assert walk["path"] and walk["path"][0]["id"] == "kb-sev1-playbook" and walk["path"][-1]["id"] == "kb-incident-comms", walk
+    assert len(walk["hops"]) == len(walk["path"]) - 1 and all(h.get("kind") for h in walk["hops"]), walk["hops"]
+    for user, page in (("alice", "kb-legal-escalation"), ("bob", "kb-sev1-playbook")):
+        if api("GET", f"/v1/concepts/{page}", user).status_code == 404:  # a page they can't read
+            assert api("GET", "/v1/graph/path", user, params={"from": page, "to": "kb-incident-comms"}).status_code == 404, f"{user} walked from {page}"
+            assert api("GET", "/v1/graph/neighbors", user, params={"key": page}).status_code == 404, f"{user} saw {page}'s neighbors"
+    why = api("GET", "/v1/graph/why", "alice", params={"a": "kb-sev1-playbook", "b": "kb-ledger"}).json()
+    assert why["links"] and all("kind" in l for l in why["links"]), f"why two pages are linked wasn't said: {why}"
+    over = mcp_call("alice", "why_linked", {"a": "kb-sev1-playbook", "b": "kb-ledger"})
+    assert over["links"] == why["links"], f"MCP's answer differs from the API's: {over}"
+    assert mcp_call("alice", "path", {"source": "kb-sev1-playbook", "target": "kb-incident-comms"})["path"], "MCP's path came back empty"
+
+
+@check
+def the_change_feed_shows_only_what_each_caller_could_read():
+    """A3, the change feed: a document added, its readers changed, and removed each show up in order, from a cursor, to someone who could read it; someone who never could sees none of it; someone who lost it sees none of it once the post-check says they can't read it"""
+    from .authz import fga
+    tag = uuid.uuid4().hex[:6]
+    key = f"a3-{tag}"
+    tuples = {("user:alice", "viewer", f"document:{key}"), ("user:bob", "viewer", f"document:{key}")}
+
+    def feed(user, since):
+        r = api("GET", "/v1/changes", user, params={"since": since, "limit": 500})
+        assert r.status_code == 200, r.text[:200]
+        return r.json()
+    start = feed("olivia", 0)
+    while start["more"]:
+        start = feed("olivia", start["next"])
+    since = start["next"]
+    try:
+        fga.write(writes=tuples)
+        with psycopg.connect(OWNER_DB) as conn:
+            org = acme_org_id()
+            conn.execute("INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, content_hash, "
+                         "classification, acl_principals) VALUES (%s, 'seed', %s, 'v1', %s, %s, 'h1', 'internal', %s)",
+                         (org, f"https://kb.acme.test/{key}", key, f"Feed {tag}", ["user:alice", "user:bob"]))
+            conn.execute("UPDATE kl.documents SET acl_principals = %s, content_hash = 'h2' WHERE external_key = %s", (["user:alice"], key))
+        fga.write(deletes={("user:bob", "viewer", f"document:{key}")})
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("UPDATE kl.documents SET content_hash = 'h3' WHERE external_key = %s", (key,))
+            conn.execute("DELETE FROM kl.documents WHERE external_key = %s", (key,))
+        hers = [(c["key"], c["change"]) for c in feed("alice", since)["changes"] if c["key"] == key]
+        assert hers == [(key, "added"), (key, "changed"), (key, "changed"), (key, "removed")], f"the feed lost or reordered changes: {hers}"
+        his = [(c["key"], c["change"]) for c in feed("bob", since)["changes"] if c["key"] == key]
+        assert his == [], f"someone who lost a document still saw its changes, or saw it before losing it from the post-check: {his}"
+        assert not [c for c in feed("dave", since)["changes"] if c["key"] == key], "someone who never could read it saw its changes"
+    finally:
+        doomed = {t for t in tuples if fga.read({"user": t[0], "relation": t[1], "object": t[2]})}
+        if doomed:
+            fga.write(deletes=doomed)
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.documents WHERE external_key = %s", (key,))
+
+
+@check
+def a_team_exports_its_curated_pages_as_an_okf_repository():
+    """A4, OKF export: a team member downloads the team's curated pages as an OKF repository (a zip of each page's latest version at its own path, front matter and all), only those they may read; someone outside the team gets nothing"""
+    import io
+    import zipfile
+    curated_ready()
+    r = api("GET", "/v1/workspaces/payments/export.okf", "alice")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip", f"{r.status_code} {r.text[:200]}"
+    files = zipfile.ZipFile(io.BytesIO(r.content))
+    texts = {n: files.read(n).decode() for n in files.namelist()}
+    sev1 = next((t for t in texts.values() if "id: kb-sev1-playbook" in t), None)
+    assert sev1 and sev1.startswith("---") and "owners:" in sev1, f"the export lacks the Sev1 playbook as written: {sorted(texts)}"
+    assert all(n.endswith(".md") and ".." not in n and not n.startswith("/") for n in texts), sorted(texts)
+    assert api("GET", "/v1/workspaces/payments/export.okf", "dave").status_code == 404, "someone outside the team exported its pages"
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid

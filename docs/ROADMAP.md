@@ -160,16 +160,16 @@ baseline is already in place (only its golden-set part is left), so each source 
 ## 4. Agents and integration (K12)
 
 ### A1. The remaining MCP tools
-- [ ] `neighbors`, `path`, and `why-linked`: the graph as tools, within the caller's permissions
+- [x] `neighbors`, `path`, and `why-linked`: the graph as tools, within the caller's permissions
 
 ### A2. An SDK
-- [ ] Python and TypeScript clients for search, Ask, documents, and pushes
+- [x] Python and TypeScript clients for search, Ask, documents, and pushes
 
 ### A3. A change feed
-- [ ] What changed since a cursor, per caller: only what they may see
+- [x] What changed since a cursor, per caller: only what they may see
 
 ### A4. OKF export
-- [ ] A team's curated pages, as an OKF repository
+- [x] A team's curated pages, as an OKF repository
 
 ## 5. Governance and security
 

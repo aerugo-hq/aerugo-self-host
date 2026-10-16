@@ -520,9 +520,19 @@ update (shown until its content changes), or retires (search and Ask leave it ou
 the Map's clusters keep their colors across reloads (`stableColors`: each cluster's anchor, the member whose id sorts
 first, chooses its color, biggest first) and are named from their pages' titles in the browser (`clusterNames`), so a
 name is only ever built from what the viewer was given; the Map shows them as a legend. Smoke and browser tests for each.
+A1 to A4 (agents and integration). A1: the graph as tools, `GET /v1/graph/neighbors`, `/v1/graph/path` (breadth
+first, up to six hops), and `/v1/graph/why`, and the MCP tools `neighbors`, `path`, and `why_linked`, all read from
+the caller's own map (`visible_graph`, over `knowledge_map`: visible nodes, links between visible ends), each link with
+its provenance (`link_of`); a hidden end is a 404. A2: clients in `sdk/` (Python `aerugo`, TypeScript
+`@aerugo/client`): search, Ask, documents, the change feed, and pushes, as the token's own user; `make sdk-test` and a
+CI job run their tests against stand-ins. A3: the change feed, `GET /v1/changes?since=` (migration 0049: a trigger on
+`documents` writes `document_changes` with the readers at that moment, the union of old and new when they change; RLS
+on them, and the post-check for additions and changes; a removal only to those who could read it, by key alone). A4:
+`GET /v1/workspaces/{ws}/export.okf`, a team's curated pages as an OKF repository (a zip of each page's latest version
+at its bundle path, or `<id>.md`), only what the caller may read, retired pages left out. Smoke checks for each.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1, S2 to S8, Q1 to Q8, and E1 to E3; next A1 to A4; G2 and G3.
+done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, and A1 to A4; next G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;
