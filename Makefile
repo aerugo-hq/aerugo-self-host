@@ -74,11 +74,13 @@ eval-scenario: env
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm smoke python -m kl.evals
 
-# Record the evaluation set's scorecard as its baseline (slice K1): from then on, make eval-scenario fails when a case
-# gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
+# Record both evaluation sets' scorecards as their baseline (slices K1 and Q1): the golden set on the plain seed first,
+# then the scenario, which it loads. From then on, make eval, make eval-scenario, and smoke fail when a case gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
 # with a permission leak, or one that fails, is never recorded: the baseline you had stays.
 eval-baseline: env
 >docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm -T smoke python -m kl.eval --record > services/api/kl/evals_baseline.tmp
+>mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 >docker compose --profile smoke run --rm -T smoke python -m kl.evals --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 

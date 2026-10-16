@@ -15,7 +15,10 @@ Faithfulness and facts need a judge model (KL_EVAL_JUDGE_*). The judge reads cit
 egress like any model: a passage its classifications don't allow is never sent, and that answer is
 reported as withheld rather than graded.
 
-Each run is stored in kl.eval_runs, so quality can be compared over time.
+Each run is stored in kl.eval_runs, so quality can be compared over time, and its scorecard is held to the golden
+set's baseline in kl/evals_baseline.json (Q1), beside the scenario's: a question that finds less, or MRR falling past
+the tolerance, fails the run. `--record` prints the baseline file with the golden set's scorecard replaced, only from a
+run that passed.
 """
 import json
 import os
@@ -183,6 +186,48 @@ def ask_with(model: str) -> Callable[[str, str], dict | None]:
     return ask
 
 
+# ------------------------------------------------------------------ claims (Q3)
+def claim_samples(golden: dict | None = None) -> list[tuple[float, bool]]:
+    """Labeled claims from the golden set: each key fact against the right documents' text (supported), and against
+    another question's right documents (not), each read as the question's user, through the API's own gates."""
+    from .claims import support, words
+    from .smoke import api
+    golden = golden or load()
+    text: dict[tuple[str, str], str] = {}
+
+    def body(user: str, key: str) -> str:
+        if (user, key) not in text:
+            r = api("GET", f"/v1/documents/{key}/content", user)
+            text[(user, key)] = " ".join(s.get("body") or "" for s in r.json().get("sections", [])) if r.status_code == 200 else ""
+        return text[(user, key)]
+    cases = [c for c in golden["cases"] if c.get("facts") and c.get("relevant")]
+    samples = []
+    for i, case in enumerate(cases):
+        other = cases[(i + 1) % len(cases)]
+        for fact in case["facts"]:
+            claim = words(fact)
+            samples.append((max(support(claim, body(case["user"], k)) for k in case["relevant"]), True))
+            if set(other["relevant"]) - set(case["relevant"]):
+                samples.append((max(support(claim, body(case["user"], k)) for k in set(other["relevant"]) - set(case["relevant"])), False))
+    return samples
+
+
+def calibrate_claims(golden: dict | None = None) -> dict | None:
+    """Calibrate the claim threshold on the golden set and store it for the org; None when the set is too small."""
+    import psycopg
+    from .claims import calibrate
+    golden = golden or load()
+    fitted = calibrate(claim_samples(golden))
+    if fitted:
+        with psycopg.connect(os.environ["KL_OWNER_DATABASE_URL"]) as conn:
+            conn.execute("""INSERT INTO kl.claim_calibration (org_id, threshold, accuracy, samples, golden_version)
+                            SELECT id, %s, %s, %s, %s FROM kl.orgs WHERE slug = %s
+                            ON CONFLICT (org_id) DO UPDATE SET threshold = EXCLUDED.threshold, accuracy = EXCLUDED.accuracy,
+                              samples = EXCLUDED.samples, golden_version = EXCLUDED.golden_version, calibrated_at = now()""",
+                         (fitted["threshold"], fitted["accuracy"], fitted["samples"], golden["version"], os.environ.get("KL_ORG_SLUG", "acme")))
+    return fitted
+
+
 # ------------------------------------------------------------------ the run
 def store(report: dict) -> None:
     import psycopg
@@ -196,7 +241,12 @@ def store(report: dict) -> None:
                      (report["version"], Jsonb(metrics), report["passed"], Jsonb(details)))
 
 
-def main() -> int:
+def main(argv: list[str]) -> int:
+    from .evals import gate, golden_scorecard, with_set
+    recording = "--record" in argv
+    baseline_out = sys.stdout
+    if recording:  # stdout becomes the baseline's file: everything but its JSON goes to stderr instead
+        sys.stdout = sys.stderr
     report = run(search_keys)
     if reranker_set():
         report["without_reranker"] = run(lambda user, query: search_keys(user, query, rerank=False))
@@ -235,9 +285,22 @@ def main() -> int:
         print(f"cited a right source {am['cited_right']}  faithfulness {am['faithfulness']}  key facts {am['facts']}")
         for metric, v in a["failed"].items():
             print(f"BELOW THRESHOLD: {metric} {v['got']} < {v['need']}")
+    fitted = calibrate_claims()
+    print(f"\nclaims threshold {fitted['threshold']} (accuracy {fitted['accuracy']} over {fitted['samples']} labeled claims)"
+          if fitted else "\nclaims threshold: the default (the golden set has too few key facts to calibrate it)")
+    card = golden_scorecard(report)
+    if recording:
+        if not report["passed"]:
+            print("FAIL: a run below threshold, or with a leak, is never recorded", file=sys.stderr)
+            return 1
+        print(json.dumps(with_set("golden", card), indent=2, sort_keys=True), file=baseline_out)
+        print("Recorded as the golden set's baseline: commit evals_baseline.json.", file=sys.stderr)
+        return 0
+    regressed = gate("golden", card, sys.stdout)
+    report["passed"] = report["passed"] and not regressed
     print("PASS" if report["passed"] else "FAIL")
     return 0 if report["passed"] else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

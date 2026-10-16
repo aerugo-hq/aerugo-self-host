@@ -2,12 +2,16 @@
 confidence is poorly calibrated, worst of all when it answers from retrieved text (ADR 0010). The signals are whether
 anything supports an answer at all, the tier of what the answer actually cites (gold: a person verified it; silver:
 reviewed; evidence: raw), how many separate sources it rests on, and whether it cites a page something newer replaces.
-Every level comes with its reasons. Calibrating the thresholds against each company's evaluation set comes next."""
+Every level comes with its reasons. Claims (Q3) count too: an answer whose claims its citations don't support is
+never high, and one with none supported is low."""
 
 
-def confidence(found: bool, cited: list[dict], supersedes: list[tuple[str, str]]) -> dict:
+def confidence(found: bool, cited: list[dict], supersedes: list[tuple[str, str]], claims: list[dict] | None = None,
+               calibrated: bool = True) -> dict:
     """found: whether there was an answer at all. cited: the sources the answer cites, each {"id", "tier"}.
-    supersedes: (newer, older) pairs among the sources. Returns {"level": "high" | "medium" | "low", "reasons": [...]}."""
+    supersedes: (newer, older) pairs among the sources. claims: the answer's claims as `claims.check` judged them;
+    calibrated: whether their threshold came from the evaluation set. Returns {"level": "high" | "medium" | "low",
+    "reasons": [...]}."""
     if not found:
         return {"level": "low", "reasons": ["Nothing you can read supports an answer."]}
     if not cited:
@@ -27,9 +31,13 @@ def confidence(found: bool, cited: list[dict], supersedes: list[tuple[str, str]]
     replaced = sorted({older for newer, older in supersedes if older in ids})
     if replaced:
         reasons.append(f"Cites {plural(len(replaced), 'superseded page')}; something newer replaces it.")
-    if (gold or (silver and len(ids) > 1)) and not replaced:
+    unsupported = [c for c in claims or [] if not c["supported"]]
+    if unsupported:
+        reasons.append(f"{plural(len(unsupported), 'claim')} of {len(claims)} not supported by what {'it cites' if len(unsupported) == 1 else 'they cite'}"
+                       + ("." if calibrated else ", by an uncalibrated threshold."))
+    if (gold or (silver and len(ids) > 1)) and not replaced and not unsupported:
         level = "high"
-    elif gold or silver or len(ids) > 1:
+    elif (gold or silver or len(ids) > 1) and len(unsupported) < len(claims or [None]):
         level = "medium"
     else:
         level = "low"

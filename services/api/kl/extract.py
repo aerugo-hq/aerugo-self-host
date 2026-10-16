@@ -25,15 +25,17 @@ import xml.etree.ElementTree as ET
 import zipfile
 from html.parser import HTMLParser
 
+from .gateway import GatewayError
 from .markdown import parse as parse_markdown
+from .media import AUDIO_FORMATS, TRANSCRIPT_FORMATS, VIDEO_FORMATS, Media, parse_cues, transcript_markdown
 
 # pypdf logs warnings about damaged files; those files are refused with an ExtractionError instead.
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 TEXT_FORMATS = (".md", ".markdown", ".html", ".htm", ".txt", ".csv", ".eml", ".rtf")
 IMAGE_FORMATS = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
-BINARY_FORMATS = (".docx", ".pptx", ".pdf", ".xlsx", ".odt", ".ods", ".odp") + IMAGE_FORMATS
-SUPPORTED = TEXT_FORMATS + BINARY_FORMATS
+BINARY_FORMATS = (".docx", ".pptx", ".pdf", ".xlsx", ".odt", ".ods", ".odp") + IMAGE_FORMATS + AUDIO_FORMATS + VIDEO_FORMATS
+SUPPORTED = TEXT_FORMATS + TRANSCRIPT_FORMATS + BINARY_FORMATS
 MAX_UNZIPPED = 100 * 1024 * 1024  # Office and OpenDocument files are zips; refuse ones that inflate past this
 MAX_PDF_PAGES = 2000
 MAX_TABLE_ROWS = 5000  # rows indexed from one sheet or CSV; a larger one is indexed in part, and says so
@@ -52,9 +54,31 @@ def supported(path: str) -> bool:
     return path.lower().endswith(SUPPORTED)
 
 
-def extract(path: str, data: bytes, fallback_title: str) -> tuple[str, list[tuple[str | None, str]]]:
+def extract(path: str, data: bytes, fallback_title: str, media: Media | None = None) -> tuple[str, list[tuple[str | None, str]]]:
+    """A file as (title, [(heading, body)]). media: the models the file's team chose for diagrams, audio, and video
+    (Q8), already limited to what the file's classification allows; without one, images are OCR alone, and audio and
+    video aren't read."""
     name = path.lower()
-    if name.endswith((".md", ".markdown")):
+    if name.endswith(TRANSCRIPT_FORMATS):  # a source's own transcript: a section per minute, by when it starts
+        markdown = transcript_markdown(parse_cues(data.decode("utf-8", errors="replace")))
+    elif name.endswith(AUDIO_FORMATS + VIDEO_FORMATS):
+        if not media or not media.speech:
+            raise ExtractionError("audio and video are read only by a speech model the team chose")
+        try:
+            markdown = transcript_markdown(media.speech(data, path.rsplit("/", 1)[-1]))
+        except GatewayError as e:  # one file the model couldn't read is reported, never the whole sync stopped
+            raise ExtractionError(f"the team's speech model couldn't read it: {e}")
+    elif name.endswith(IMAGE_FORMATS) and media and media.vision:  # a diagram described, beside what OCR reads
+        try:
+            seen = _image(data, name.rsplit(".", 1)[-1])
+        except ExtractionError:
+            seen = ""
+        try:
+            described = media.vision(data, name.rsplit(".", 1)[-1]).strip()
+        except GatewayError as e:  # one file the model couldn't read is reported, never the whole sync stopped
+            raise ExtractionError(f"the team's vision model couldn't read it: {e}")
+        markdown = f"## Diagram\n\n{described}" + (f"\n\n## Text in it\n\n{seen}" if seen.strip() else "")
+    elif name.endswith((".md", ".markdown")):
         markdown = data.decode("utf-8", errors="replace")
     elif name.endswith((".html", ".htm")):
         markdown = _html(data.decode("utf-8", errors="replace"))

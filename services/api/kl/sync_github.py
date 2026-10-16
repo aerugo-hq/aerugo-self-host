@@ -10,6 +10,7 @@ Permissions are mirrored twice, on purpose:
     back the post-check. If the two ever disagree, the post-check drops the document.
 """
 import hashlib
+import re
 
 from .authz import fga
 from .extract import BINARY_FORMATS, ExtractionError, extract, supported
@@ -57,6 +58,35 @@ def leave_former_teams(conn, connection: dict, full_name: str, team) -> int:
     return conn.execute("DELETE FROM workspace_documents wd USING documents d WHERE wd.document_id = d.id "
                         "AND d.container_ref = %s AND (d.connection_id IS NULL OR d.connection_id = %s) "
                         "AND wd.workspace_id = ANY(%s::uuid[])", (full_name, connection["id"], sorted(former))).rowcount
+
+
+LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+
+
+def authors_of(commits: list[dict]) -> list[tuple[str, int, str | None]]:
+    """A file's authors from its commits: (GitHub login, commits, the latest one's date), most commits first. A commit
+    whose author isn't a GitHub account names no one."""
+    counts: dict[str, list] = {}
+    for c in commits or []:
+        login = str((c.get("author") or {}).get("login") or "")
+        if LOGIN.fullmatch(login) and not login.endswith("[bot]"):
+            at = ((c.get("commit") or {}).get("author") or {}).get("date")
+            held = counts.setdefault(login, [0, None])
+            held[0] += 1
+            held[1] = max(filter(None, (held[1], at)), default=None)
+    return sorted(((login, n, at) for login, (n, at) in counts.items()), key=lambda a: (-a[1], a[0]))
+
+
+def record_authors(conn, org_id, doc_id, connector, full_name: str, path: str, commit: str) -> int:
+    """Who wrote a file, read again only when it changed since they were last read."""
+    if conn.execute("SELECT 1 FROM document_authors WHERE document_id = %s AND at_commit = %s LIMIT 1", (doc_id, commit)).fetchone():
+        return 0
+    authors = authors_of(connector.file_commits(full_name, path, commit))
+    with conn.transaction():
+        conn.execute("DELETE FROM document_authors WHERE document_id = %s", (doc_id,))
+        conn.cursor().executemany("INSERT INTO document_authors (org_id, document_id, login, commits, last_at, at_commit) VALUES (%s, %s, %s, %s, %s, %s)",
+                                  [(org_id, doc_id, login, n, at, commit) for login, n, at in authors])
+    return len(authors)
 
 
 def sync_repo(conn, connection: dict, connector, container: dict) -> dict:
@@ -119,6 +149,7 @@ def sync_repo(conn, connection: dict, connector, container: dict) -> dict:
                 for ordinal, (heading, body) in enumerate(sections):
                     conn.execute("INSERT INTO chunks (org_id, document_id, ordinal, heading_path, body, acl_principals) "
                                  "VALUES (%s, %s, %s, %s, %s, %s)", (org_id, doc_id, ordinal, heading, body, acl))
+                record_authors(conn, org_id, doc_id, connector, full_name, f["path"], commit)  # Q7: who wrote it
                 changed += 1
             # Bronze concepts mirror their source's readers; update them in the same transaction so a
             # revoked reader loses the concept the moment they lose the document.
@@ -160,6 +191,11 @@ def sync_knowledge(conn, connection: dict, connector, full_name: str, commit: st
     result = index_bundle(conn, org_id=connection["org_id"], workspace_id=team_for(connection, full_name),
                           container_ref=full_name, version=commit, files=texts, acl=acl,
                           uri_for=lambda path: f"https://github.com/{full_name}/blob/{commit}{path}")
+    for path in texts:  # Q7: who wrote each curated page, read again only when its file changed
+        doc = conn.execute("SELECT id FROM documents WHERE container_ref = %s AND source_uri = %s",
+                           (full_name, f"https://github.com/{full_name}/blob/{commit}{path}")).fetchone()
+        if doc:
+            record_authors(conn, connection["org_id"], doc["id"], connector, full_name, path.lstrip("/"), commit)
     with conn.transaction():
         leave_former_teams(conn, connection, full_name, team_for(connection, full_name))  # routed repos move (F1)
         keys = [r["external_key"] for r in conn.execute(

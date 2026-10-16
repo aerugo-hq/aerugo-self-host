@@ -98,3 +98,19 @@ such choice took the narrower, fail-closed option and is listed here, with its a
    only the next content sync reads bodies. It only narrows or keeps who reads what.
 3. **A webhook only ever queues a readers refresh of its own connection,** whatever the event says; each connection
    has its own hook and secret, so one team's secret can't trigger another's refresh.
+
+## Q1 to Q8. Quality
+
+1. **Claims are checked by words, not a model** (Q3): the share of a sentence's content words its cited passage holds,
+   at a threshold calibrated on the golden set. A paraphrase can read as unsupported, never the other way round. A
+   team's own model judging entailment comes on top later, never instead.
+2. **The claim threshold is calibrated from only five key facts** in the golden set today; until the set has at least
+   eight labeled claims of both kinds, answers use the default (0.5) and say so.
+3. **Attachments get their page's readers exactly** (Q7), and Drive's "attachments" aren't separate: a Drive file is a
+   document already.
+4. **Git authors name people only through links they made** (Q7): an author no one in Aerugo has linked is never named.
+5. **Media models are opt-in per team, and egress-checked per file** (Q8): no vision or speech model reads anything a
+   team didn't choose, or anything its allowed classifications exclude; without a speech model, audio and video aren't
+   indexed at all.
+6. **Q2's measurement can't show a gain yet:** the lookup and cross-team cases were already at their best. The new
+   channels are proven by smoke instead.

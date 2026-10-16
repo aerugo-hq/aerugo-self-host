@@ -16,13 +16,16 @@ import httpx
 from . import config
 from .connectors import Container, Health
 from .principals import is_valid
+from .attachments import MAX_BYTES as MAX_ATTACHMENT, MAX_PER_PAGE, attachment_item
+from .decisions import heading as decision_heading, is_decision
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
 
 PROJECT = re.compile(r"^[A-Z][A-Z0-9_]{0,49}$")
 ISSUE = re.compile(r"^[A-Z][A-Z0-9_]{0,49}-[0-9]{1,9}$")
 SITE = re.compile(r"^https://[a-z0-9][a-z0-9-]{0,62}\.atlassian\.net$")  # Jira Cloud
-FIELDS = "summary,description,comment,status,assignee,reporter,issuetype,updated,security,labels"
+FIELDS = "summary,description,comment,status,assignee,reporter,issuetype,updated,security,labels,resolution,resolutiondate,attachment"
+ATTACHMENT_ID = re.compile(r"^[0-9]{1,20}$")
 ANYONE = {"applicationRole", "anyone"}  # permission holders meaning "anyone with access to this Jira"
 BLOCKS = {"paragraph", "heading", "listItem", "blockquote", "codeBlock", "panel", "tableRow", "rule"}
 
@@ -86,8 +89,12 @@ def issue_sections(issue: dict) -> tuple[str, list[tuple[str | None, str]]]:
     sections = [(None, "\n".join(facts + ([description] if description else [])))]
     for c in ((f.get("comment") or {}).get("comments") or [])[:200]:
         text = adf_text(c.get("body"))
-        if text:
-            sections.append((f"Comment by {name(c.get('author'))} on {str(c.get('created') or '')[:10]}", text))
+        if text:  # a comment that records a decision is one (Q5): who decided, and when
+            by, at = name(c.get("author")), str(c.get("created") or "")[:10]
+            sections.append((decision_heading(by, at) if is_decision(text) else f"Comment by {by} on {at}", text))
+    if f.get("resolution") and f.get("resolutiondate"):
+        sections.append((decision_heading(name(f.get("assignee")) if f.get("assignee") else None, str(f["resolutiondate"])[:10]),
+                         f"Resolved as {(f['resolution'] or {}).get('name') or 'resolved'}: {f.get('summary') or ''}".strip()))
     return f"{issue['key']}: {f.get('summary') or ''}".strip(), sections
 
 
@@ -98,6 +105,20 @@ class JiraClient:
         self.base = api_base.rstrip("/")
         auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
         self.headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
+
+    def download(self, attachment_id: str) -> bytes:
+        """An attachment's bytes from this site, never a redirect elsewhere, up to the attachments' cap."""
+        if not ATTACHMENT_ID.fullmatch(attachment_id):
+            raise ValueError("unexpected attachment id")
+        with httpx.stream("GET", f"{self.base}/rest/api/3/attachment/content/{attachment_id}", params={"redirect": "false"},
+                          headers=self.headers, timeout=60, follow_redirects=False) as r:
+            r.raise_for_status()
+            data = b""
+            for chunk in r.iter_bytes():
+                data += chunk
+                if len(data) > MAX_ATTACHMENT:
+                    raise ValueError("the attachment is larger than the cap")
+            return data
 
     def _get(self, path: str, **params):
         r = httpx.get(f"{self.base}/rest/api/3/{path}", params={k: v for k, v in params.items() if v is not None},
@@ -185,6 +206,15 @@ def sync_project(conn, connection: dict, client: JiraClient, project: str) -> di
                           version=str((issue.get("fields") or {}).get("updated") or issue.get("id") or ""),
                           title=f"{issue['key']}: {(issue.get('fields') or {}).get('summary') or ''}",
                           path=issue["key"], acl=acl, sections=lambda issue=issue: issue_sections(issue)))
+        for a in ((issue.get("fields") or {}).get("attachment") or [])[:MAX_PER_PAGE]:  # Q7: with exactly the issue's readers
+            aid, content = str(a.get("id") or ""), str(a.get("content") or "")
+            if not ATTACHMENT_ID.fullmatch(aid) or not content.startswith(f"{client.base}/rest/api/3/attachment/content/"):
+                continue
+            item = attachment_item(f"jira-att-{aid}", f"{client.base}/browse/{issue['key']}", aid, str(a.get("filename") or ""), a.get("size"),
+                                   f"{issue['key']}: {(issue.get('fields') or {}).get('summary') or ''}", f"{client.base}/browse/{issue['key']}",
+                                   issue["key"], acl, lambda aid=aid: client.download(aid))
+            if item:
+                items.append(item)
     if seen:
         record_identities(conn, connection["org_id"], "atlassian", seen)
     return sync_container(conn, connection, project, "jira", items)

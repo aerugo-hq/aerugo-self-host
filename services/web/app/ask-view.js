@@ -277,6 +277,11 @@ export default function AskView({ me, id: route, scope: workingIn = "org" }) {
                 h("span", { className: `dot ${CONFIDENCE_DOT[m.confidence.level] || "evidence"}`, "aria-hidden": true }),
                 h("b", null, `${m.confidence.level.charAt(0).toUpperCase()}${m.confidence.level.slice(1)} confidence`),
                 h("span", null, m.confidence.reasons.join(" "))),
+              // Claims its citations don't support (Q3), each said plainly, so the reader knows which sentence to doubt.
+              m.hidden || !(m.claims || []).some((c) => !c.supported) ? null : h("div", { className: "claims-unsupported", role: "note" },
+                h("b", null, "Not supported by what it cites:"),
+                h("ul", null, m.claims.filter((c) => !c.supported).map((c, n) => h("li", { key: n }, c.text,
+                  c.cites.length ? h("span", { className: "muted small" }, ` (cites ${c.cites.map((x) => `[${x}]`).join(" ")})`) : h("span", { className: "muted small" }, " (cites nothing)"))))),
               h("div", { className: "msg-meta" },
                 h("span", { className: "muted small" }, m.model),
                 m.hidden ? null : h("button", { type: "button", className: "btn btn-ghost btn-sm", "aria-pressed": i === pick,

@@ -1374,7 +1374,7 @@ def unreadable_documents_fail_loudly():
         z.writestr("word/document.xml", b"\0" * (101 * 1024 * 1024))  # ~100 KB on disk, 101 MB inflated
     cases = {"scan.pdf": (make_pdf([""]), "OCR"), "broken.pdf": (b"%PDF-1.4 junk", "readable PDF"),
              "fake.docx": (b"not a zip", "Office file"), "bomb.docx": (bomb.getvalue(), "inflate"),
-             "empty.html": (b"<script>x()</script>", "no text"), "clip.mp4": (b"hi", "unsupported"),
+             "empty.html": (b"<script>x()</script>", "no text"), "clip.mp4": (b"hi", "speech model"), "tool.exe": (b"MZ", "unsupported"),
              "fake.png": (b"not an image", "readable image"),
              "bomb.xlsx": (bomb.getvalue(), "inflate"), "broken.odt": (b"not a zip", "Office file"),
              "empty.csv": (b"\n\n", "no text")}
@@ -1481,6 +1481,186 @@ def retrieval_meets_the_golden_set():
     m = report["metrics"]
     print(f"      {len(report['cases'])} questions: hit@1 {m['hit_at_1']}, MRR {m['mrr']}, found@5 {m['found_at_5']}"
           + (f"; not first: {', '.join(q for _, q, _ in misses)}" if misses else ""))
+
+
+@check
+def a_query_naming_an_alias_finds_the_entitys_other_names():
+    """Q2, entity resolution in search: a query naming one of an entity's aliases also finds a document that names the entity another way (another alias, or the page's title), for someone who may see the curated page declaring those aliases; someone who can't see that page gets no such expansion, even for a document they may read"""
+    from .authz import fga
+    curated_ready()
+    tag = uuid.uuid4().hex[:6]
+    key = f"q2-{tag}-notes"
+    tuples = {(f"user:{u}", "viewer", f"document:{key}") for u in ("alice", "bob")}
+    try:
+        with psycopg.connect(OWNER_DB) as conn:
+            org = acme_org_id()
+            commons = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'commons'").fetchone()[0]
+            doc = conn.execute(
+                "INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, "
+                "content_hash, classification, acl_principals) VALUES (%s, 'seed', %s, 'v1', %s, %s, %s, 'internal', %s) "
+                "RETURNING id", (org, f"https://kb.acme.test/{key}", key, f"Incident notes {tag}", key, ["user:alice", "user:bob"])).fetchone()[0]
+            conn.execute("INSERT INTO kl.chunks (org_id, document_id, ordinal, heading_path, body, acl_principals) VALUES (%s, %s, 0, NULL, %s, %s)",
+                         (org, doc, f"We opened the Sev1 Playbook and paged the on-call, as noted {tag}.", ["user:alice", "user:bob"]))
+            conn.execute("INSERT INTO kl.workspace_documents (workspace_id, document_id, org_id) VALUES (%s, %s, %s)", (commons, doc, org))
+        fga.write(writes=tuples)
+
+        def hit(user):
+            results = api("GET", "/v1/search", user, params={"q": "payments sev1", "scope": "org", "limit": 50}).json()["results"]
+            return next((h for h in results if h["id"] == key), None)
+        found = hit("alice")  # "payments sev1" is an alias of the Sev1 playbook; the notes say "Sev1 Playbook"
+        assert found and "alias" in found["matched"], f"a query naming an alias didn't find the entity's other names: {found}"
+        theirs = hit("bob")  # bob may read the notes, but not the payments page that declares the aliases
+        assert not theirs or "alias" not in theirs["matched"], "an alias from a page someone can't see expanded their search"
+    finally:
+        doomed = {t for t in tuples if fga.read({"user": t[0], "relation": t[1], "object": t[2]})}
+        if doomed:
+            fga.write(deletes=doomed)
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.documents WHERE external_key = %s", (key,))
+
+
+@check
+def who_to_ask_never_suggests_someone_who_has_left():
+    """Q6, who to ask knows who has left: someone a directory says has left isn't suggested about a page, even as a member of its owning team; they're listed as gone, and their team is suggested instead; once the directory lists them active again, or isn't there, they're suggested as before"""
+    curated_ready()
+    name = f"q6-dir-{secrets.token_hex(3)}"
+
+    def people(user):
+        r = api("GET", "/v1/concepts/kb-sev1-playbook/people", user)
+        assert r.status_code == 200, r.text[:200]
+        return r.json()
+
+    before = people("alice")
+    assert "carol" in {p["user"] for p in before["people"]}, f"carol isn't among who to ask about the Sev1 playbook to begin with: {before}"
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = acme_org_id()
+        payments = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'payments'").fetchone()[0]
+        cid = conn.execute(  # a directory as its sync leaves it, without a sync: one that never runs during the check
+            "INSERT INTO kl.connections (org_id, workspace_id, kind, name, config, credential_ref, created_by, status, last_synced_at) "
+            "VALUES (%s, %s, 'directory', %s, %s::jsonb, 'openbao://secret/kl/connections/q6-none', 'smoke', 'ready', now()) RETURNING id",
+            (org, payments, name, json.dumps({"provider": "okta", "every_minutes": 10080}))).fetchone()[0]
+        conn.execute("INSERT INTO kl.directory_people (org_id, connection_id, email, display_name, active) VALUES (%s, %s, 'carol@acme.test', 'Carol', false)",
+                     (org, cid))
+    try:
+        after = people("alice")
+        assert "carol" not in {p["user"] for p in after["people"]}, f"someone who has left was suggested: {after['people']}"
+        gone = {g["user"]: g for g in after["left"]}
+        assert "carol" in gone and "payments" in gone["carol"]["instead"], f"who left, and their team instead, weren't said: {after['left']}"
+        assert "payments" in {t["team"] for t in after["teams"]}, f"their team wasn't suggested: {after['teams']}"
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("UPDATE kl.directory_people SET active = true WHERE connection_id = %s", (cid,))
+        assert "carol" in {p["user"] for p in people("alice")["people"]}, "someone back in the directory wasn't suggested again"
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.connections WHERE id = %s", (cid,))
+
+
+@check
+def who_wrote_a_page_in_git_is_who_to_ask():
+    """Q7, Git authors: the people who wrote a page in Git (its commits' authors) are among who to ask about it, with how much they wrote, as far as they've linked their GitHub accounts; an author nobody linked is named as no one; a bot's commits count for nobody"""
+    from .authz import fga
+    from .sync_github import authors_of
+    commits = [{"author": {"login": "dave-gh"}, "commit": {"author": {"date": "2026-09-01T10:00:00Z"}}},
+               {"author": {"login": "dave-gh"}, "commit": {"author": {"date": "2026-09-03T10:00:00Z"}}},
+               {"author": {"login": "renovate[bot]"}}, {"author": None}, {"author": {"login": "stranger-gh"}}]
+    assert authors_of(commits) == [("dave-gh", 2, "2026-09-03T10:00:00Z"), ("stranger-gh", 1, None)], authors_of(commits)
+    curated_ready()
+    tag = secrets.token_hex(3)
+    login = f"dave-gh{tag}"
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = acme_org_id()
+        doc = conn.execute("SELECT document_id FROM kl.concepts WHERE concept_key = 'kb-sev1-playbook'").fetchone()[0]
+        conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, 'user:dave', 'smoke')",
+                     (org, f"ext:github.{login}"))
+        conn.cursor().executemany("INSERT INTO kl.document_authors (org_id, document_id, login, commits, at_commit) VALUES (%s, %s, %s, %s, 'smoke')",
+                                  [(org, doc, login, 3), (org, doc, f"nobody-gh{tag}", 5)])
+    try:
+        people = {p["user"]: p["reasons"] for p in api("GET", "/v1/concepts/kb-sev1-playbook/people", "alice").json()["people"]}
+        assert "wrote it (3 commits)" in people.get("dave", []), f"who wrote the page isn't among who to ask: {people}"
+        assert not any(u.startswith("nobody-gh") for u in people), f"an author nobody linked was named: {people}"
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.document_authors WHERE login = ANY(%s)", ([login, f"nobody-gh{tag}"],))
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = %s", (f"ext:github.{login}",))
+
+
+@check
+def attachments_are_their_own_documents_with_their_pages_readers():
+    """Q7, attachments: a Jira issue's attached file becomes its own document, read through the extractors, with exactly the issue's readers, and linked to its issue by address; a format nothing reads isn't one"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    key = f"ATT{tag}"
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    principal = f"ext:atlassian.{alice['accountId'].replace(':', '.')}"
+    link = {("user:alice", "owner", f"identity:{principal[4:]}")}
+    att = f"{int(tag, 16) % 10**9}"
+    setup = {"projects": {key: {"name": "Attachments", "company_wide": False, "browsers": [alice], "issues": [
+        {"key": f"{key}-1", "summary": f"Cutover runbook {tag}", "description": "See the attached notes.",
+         "attachments": [{"id": att, "filename": "notes.txt", "text": f"Rehearse the cutover twice {tag}."},
+                         {"id": f"{att}9", "filename": "diagram.sketch", "text": "binary"}]}]}}}
+    name = f"att-{tag.lower()}"
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, 'user:alice', 'smoke') "
+                     "ON CONFLICT DO NOTHING", (acme_org_id(), principal))
+    fga.write(writes=link)
+
+    def hits(user):
+        return {h["id"] for h in api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+    try:
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=setup, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
+            "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and f"jira-att-{att}" not in hits("alice"):
+            time.sleep(2)
+        assert f"jira-att-{att}" in hits("alice"), "the attached file never became its own document"
+        assert f"jira-att-{att}" not in hits("bob"), "an attachment reached someone its issue doesn't"
+        page = api("GET", f"/v1/documents/jira-att-{att}/content", "alice").text
+        assert "Rehearse the cutover twice" in page and f"/browse/{key}-1" in page, f"the attachment's text, or its issue, is missing: {page[:300]}"
+        assert f"jira-att-{att}9" not in hits("alice"), "a format nothing reads became a document"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        fga.write(deletes=link)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = %s", (principal,))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def diagrams_audio_and_video_are_read_by_the_models_a_team_chose():
+    """Q8, diagrams, audio, and video: a source's own transcript becomes sections by when each minute starts; with no speech model chosen, audio isn't read; a team admin opts in with models from the team's own registry (another team's, or a non-admin, refused); then audio is transcribed into timestamped sections and a diagram described beside its OCR, each only by a model whose allowed classifications include the content's"""
+    from .extract import ExtractionError, extract
+    from .media import media_for
+    ensure_fake_models()
+    vtt = b"WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nWelcome to the rehearsal.\n\n00:01:30.000 --> 00:01:33.000\nWe fail over at noon.\n"
+    _, sections = extract("talk.vtt", vtt, "Rehearsal")
+    assert [h for h, _ in sections] == ["At 00:00:01", "At 00:01:30"], f"a transcript's sections aren't by time: {sections}"
+    try:
+        extract("standup.mp3", b"ID3fake", "Standup")
+        raise AssertionError("audio was read without a speech model")
+    except ExtractionError:
+        pass
+    assert api("PUT", "/v1/workspaces/payments/media", "bob", json={"vision_model": "smoke-fake"}).status_code in (403, 404), "a non-admin opted a team in"
+    assert api("PUT", "/v1/workspaces/payments/media", "alice", json={"vision_model": "no-such-model"}).status_code == 422, "a model outside the registry was taken"
+    r = api("PUT", "/v1/workspaces/payments/media", "alice", json={"vision_model": "smoke-fake", "speech_model": "smoke-fake"})
+    assert r.status_code == 200, r.text[:200]
+    try:
+        assert api("GET", "/v1/workspaces/payments/media", "alice").json()["speech_model"] == "smoke-fake"
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            conn.execute("SET search_path = kl, public")
+            team = conn.execute("SELECT id FROM workspaces WHERE slug = 'payments'").fetchone()["id"]
+            media = media_for(conn, team, "internal")
+            refused = media_for(conn, team, "restricted")  # the fake model's allowed classifications stop short of this
+        assert media and media.speech and media.vision, "the team's chosen models weren't handed to the extractors"
+        assert refused is None, "a model was handed content its allowed classifications don't include"
+        _, heard = extract("standup.mp3", b"ID3fake", "Standup", media)
+        assert [h for h, _ in heard] == ["At 00:00:00", "At 00:01:15"] and "fail over at noon" in heard[1][1], f"the transcript wasn't timestamped: {heard}"
+        png = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000" "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
+        _, seen = extract("flow.png", png, "Flow", media)
+        assert seen[0][0] == "Diagram" and "Ledger" in seen[0][1], f"the diagram wasn't described: {seen}"
+    finally:
+        api("PUT", "/v1/workspaces/payments/media", "alice", json={})
 
 
 @check
@@ -1645,6 +1825,29 @@ def answers_are_graded_against_their_sources():
     plain = api("POST", "/v1/ask", "alice", json={"question": PAGE_QUESTION, "model": "payments/smoke-fake"})
     assert plain.status_code == 200 and all("passage" not in c for c in plain.json()["citations"]), \
         "ask returned passages nobody asked for"
+
+
+@check
+def each_claim_of_an_answer_is_checked_against_what_it_cites():
+    """Q3, claim-level checking: each sentence of an answer is checked against the passages it cites; an honest answer's claims are supported, an invented one's aren't, which makes its confidence low and says why; the claims are kept with the conversation, and hidden with the answer; the threshold is calibrated on the golden set's key facts and stored, and answers use it"""
+    from .eval import calibrate_claims, claim_samples
+    ensure_fake_models()
+    reset_fake()
+    honest = api("POST", "/v1/ask", "alice", json={"question": PAGE_QUESTION, "model": "payments/smoke-fake"}).json()
+    assert honest["claims"] and all(c["supported"] for c in honest["claims"]), f"an honest answer's claims weren't supported: {honest['claims']}"
+    httpx.post(f"{FAKE_LLM}/mode", json={"answer": "unfaithful"}, timeout=10)
+    try:
+        lying = api("POST", "/v1/ask", "alice", json={"question": PAGE_QUESTION, "model": "payments/smoke-fake"}).json()
+    finally:
+        reset_fake()
+    assert lying["claims"] and not any(c["supported"] for c in lying["claims"]), f"an invented claim was supported: {lying['claims']}"
+    assert lying["confidence"]["level"] == "low" and any("not supported" in r for r in lying["confidence"]["reasons"]), lying["confidence"]
+    samples = claim_samples()
+    assert any(label for _, label in samples) and not all(label for _, label in samples), f"the golden set gave no labeled claims: {samples}"
+    fitted = calibrate_claims()
+    with psycopg.connect(OWNER_DB) as conn:
+        held = conn.execute("SELECT threshold FROM kl.claim_calibration c JOIN kl.orgs o ON o.id = c.org_id WHERE o.slug = 'acme'").fetchone()
+    assert (fitted is None) == (held is None) and (not held or abs(held[0] - fitted["threshold"]) < 1e-6), f"the calibrated threshold wasn't stored: {fitted} {held}"
 
 
 @check
@@ -2881,8 +3084,8 @@ def confluence_pages_carry_confluences_own_permissions():
         "users": {acct[w]: {"email": f"{w}@acme.test", "name": w.title()} for w in acct},
         "groups": {group: {"name": f"payments-{tag.lower()}", "members": [acct["bob"], acct["carol"]]}},
         "spaces": {key: {"id": str(base + 9), "name": f"Payments Engineering {tag}", "users": [acct["alice"]], "groups": [group],
-                         "pages": [page("guide", "Guide", labels=["runbook"]),
-                                   page("leads", "Leads", restricted_users=[acct["carol"]]),
+                         "pages": [page("guide", "Guide", labels=["runbook"], attachments=[f"guide-notes-{tag}.txt"]),
+                                   page("leads", "Leads", restricted_users=[acct["carol"]], attachments=[f"salaries-{tag}.xlsx"]),
                                    page("under", "Under", parentId=ids["leads"]),
                                    page("nobody", "Nobody", parentId=ids["leads"], restricted_users=[acct["alice"]])],
                          "blogposts": [page("news", "News")]}}}
@@ -2936,6 +3139,9 @@ def confluence_pages_carry_confluences_own_permissions():
         while time.monotonic() < deadline and not finds("alice", "guide"):
             time.sleep(3)
         assert finds("alice", "guide"), "the space's page never arrived"
+        guide = api("GET", f"/v1/documents/confluence-{ids['guide']}/content", "alice").text
+        assert f"guide-notes-{tag}" in guide and f"salaries-{tag}" not in guide, \
+            "a page listed another page's attachments (one only its own readers may see)"
         assert finds("bob", "guide") and finds("carol", "guide"), "the space's group's members can't read its page"
         assert finds("carol", "leads") and not finds("alice", "leads") and not finds("bob", "leads"), "a restricted page leaked"
         assert finds("carol", "under") and not finds("alice", "under") and not finds("bob", "under"), \
@@ -3028,6 +3234,50 @@ def jira_issues_carry_jiras_own_permissions():
         fga.write(deletes=links)
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag.lower()}",))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def decisions_are_their_own_items_latest_first():
+    """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    key = f"DEC{tag}"
+    olivia = {"accountId": f"557058:olivia{tag.lower()}", "emailAddress": "olivia@acme.test", "displayName": "Olivia"}
+    principal = f"ext:atlassian.{olivia['accountId'].replace(':', '.')}"
+    link = {("user:alice", "owner", f"identity:{principal[4:]}")}
+    setup = {"projects": {key: {"name": "Decisions", "company_wide": False, "browsers": [olivia], "issues": [
+        {"key": f"{key}-1", "summary": f"Order history cutover {tag}", "description": "When we cut over.",
+         "assignee": {"displayName": "Olivia"}, "resolution": {"name": "Done"}, "resolutiondate": "2025-07-01T09:00:00.000+0000",
+         "comments": [{"author": "Olivia", "created": "2025-03-01T09:00:00.000+0000", "body": f"We decided to cut over in Q2 {tag}."},
+                      {"author": "Bob", "created": "2025-04-01T09:00:00.000+0000", "body": f"Looks good to me {tag}."},
+                      {"author": "Olivia", "created": "2025-06-01T09:00:00.000+0000", "body": f"Decision: we moved the cutover to Q3 {tag}."}]}]}}}
+    name = f"decisions-{tag.lower()}"
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, 'user:alice', 'smoke') "
+                     "ON CONFLICT DO NOTHING", (acme_org_id(), principal))
+    fga.write(writes=link)
+    try:
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=setup, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
+            "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        listed = []
+        while time.monotonic() < deadline and len(listed) < 3:
+            listed = api("GET", "/v1/decisions", "alice", params={"q": tag}).json()["decisions"]
+            time.sleep(2)
+        assert [(d["at"], d["by"]) for d in listed] == [("2025-07-01", "Olivia"), ("2025-06-01", "Olivia"), ("2025-03-01", "Olivia")], \
+            f"the decisions weren't listed latest first, with who and when: {listed}"
+        assert "Q3" in listed[1]["text"] and "Q2" in listed[1]["replaces"]["text"], f"a decision didn't say what it replaced: {listed[1]}"
+        assert not any("Looks good" in d["text"] for d in listed), "a comment that decides nothing was listed as a decision"
+        assert listed[0]["document"]["id"] == f"jira-{key}-1", listed[0]
+        assert api("GET", "/v1/decisions", "bob", params={"q": tag}).json()["decisions"] == [], "someone who can't read the issue saw its decisions"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        fga.write(deletes=link)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = %s", (principal,))
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
 
 
@@ -4349,6 +4599,53 @@ def mcp_graph_tools_follow_the_same_permissions():
 
 
 @check
+def search_follows_lineage_only_through_the_askers_teams():
+    """Q4, lineage in search and Ask: a question naming a job ("what breaks if we retire it?") finds the pages describing what it feeds, through the lineage the asker's own teams reported, each page post-checked; a result says what the assets it describes feed; someone outside the reporting team gets no lineage hop, even to a page they may read"""
+    from .authz import fga
+    tag = uuid.uuid4().hex[:8]
+    job, table, dash = f"Q4_LOAD_{tag}", f"Q4_TABLE_{tag}", f"Q4_DASH_{tag}"
+    events = {"events": [{"job": {"namespace": "q4", "name": job}, "inputs": [], "outputs": [{"namespace": "q4", "name": table}]},
+                         {"job": {"namespace": "q4", "name": f"q4_report_{tag}"}, "inputs": [{"namespace": "q4", "name": table}],
+                          "outputs": [{"namespace": "q4", "name": dash}]}]}
+    pages = {f"q4-{tag}-table": ("The orders table", table, ["user:alice"]), f"q4-{tag}-dash": ("The revenue dashboard", dash, ["user:alice", "user:bob"])}
+    tuples = {(p, "viewer", f"document:{key}") for key, (_, _, readers) in pages.items() for p in readers}
+    try:
+        assert api("POST", "/v1/workspaces/payments/lineage", "alice", json=events).status_code == 200
+        with psycopg.connect(OWNER_DB) as conn:
+            org = acme_org_id()
+            payments = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'payments'").fetchone()[0]
+            for key, (title, alias, readers) in pages.items():
+                doc = conn.execute("INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, content_hash, "
+                                   "classification, acl_principals, tier) VALUES (%s, 'okf', %s, 'v1', %s, %s, %s, 'internal', %s, 'silver') RETURNING id",
+                                   (org, f"https://kb.acme.test/{key}", key, title, key, readers)).fetchone()[0]
+                conn.execute("INSERT INTO kl.chunks (org_id, document_id, ordinal, heading_path, body, acl_principals) VALUES (%s, %s, 0, NULL, %s, %s)",
+                             (org, doc, f"{title}: what it holds, and who looks after it.", readers))
+                conn.execute("INSERT INTO kl.workspace_documents (workspace_id, document_id, org_id) VALUES (%s, %s, %s)", (payments, doc, org))
+                conn.execute("INSERT INTO kl.concepts (org_id, concept_key, tier, document_id, title, acl_principals, aliases) "
+                             "VALUES (%s, %s, 'silver', %s, %s, %s, %s)", (org, key, doc, title, readers, [alias]))
+        fga.write(writes=tuples)
+
+        def results(user):
+            r = api("GET", "/v1/search", user, params={"q": f"what breaks if we retire {job}", "scope": "org", "limit": 20})
+            assert r.status_code == 200, r.text[:200]
+            return {h["id"]: h for h in r.json()["results"]}
+        mine = results("alice")
+        assert {f"q4-{tag}-table", f"q4-{tag}-dash"} <= set(mine) and "lineage" in mine[f"q4-{tag}-dash"]["matched"], \
+            f"the walk didn't reach the pages describing what the job feeds: {sorted(mine)}"
+        assert dash in mine[f"q4-{tag}-table"].get("reaches", []), f"a result didn't say what its asset feeds: {mine[f'q4-{tag}-table']}"
+        theirs = results("bob")  # bob may read the dashboard's page, but isn't on the team that reported the lineage
+        assert f"q4-{tag}-table" not in theirs, "the walk passed through a page the asker can't read"
+        assert f"q4-{tag}-dash" not in theirs or "lineage" not in theirs[f"q4-{tag}-dash"]["matched"], "another team's lineage carried a search"
+    finally:
+        doomed = {t for t in tuples if fga.read({"user": t[0], "relation": t[1], "object": t[2]})}
+        if doomed:
+            fga.write(deletes=doomed)
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.documents WHERE external_key = ANY(%s)", (list(pages),))
+            conn.execute("DELETE FROM kl.assets WHERE namespace = 'q4' AND name LIKE %s", (f"%{tag}",))
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid
@@ -4396,7 +4693,7 @@ def who_to_ask_comes_from_the_page_and_never_leaks():
         assert api("GET", "/v1/concepts/kb-sev1-playbook/people", user).status_code == 404, \
             f"{user} learned who to ask about a page they can't read"
     named = who_to_ask({"x-kl": {"owners": ["group:legal"]}}, {}, [])
-    assert named == {"people": [], "teams": [{"team": "legal", "reason": "owns it", "members_shown": False}]}, named
+    assert named == {"people": [], "teams": [{"team": "legal", "reason": "owns it", "members_shown": False}], "left": []}, named
 
 
 @check

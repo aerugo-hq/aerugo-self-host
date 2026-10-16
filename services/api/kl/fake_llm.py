@@ -333,6 +333,14 @@ class Handler(BaseHTTPRequestHandler):
         site = self.path.split("/")[1]
         if site in JIRA_SITES and self.path.startswith(f"/{site}/rest/api/3/"):
             return self._jira(urlparse(self.path), JIRA_SITES[site])
+        if self.path.startswith("/confluence/wiki/download/attachments/"):  # an attachment's bytes (Q7)
+            import base64
+            if self.headers.get("Authorization") != "Basic " + base64.b64encode(CONFLUENCE_AUTH.encode()).decode():
+                return self._json(401, {"message": "Unauthorized"})
+            aid = urlparse(self.path).path.rsplit("/", 1)[-1]
+            found = next((a for s in CONFLUENCE["spaces"].values() for kind in ("pages", "blogposts") for c in s.get(kind, [])
+                          for a in c.get("attachments", []) if isinstance(a, dict) and a.get("id") == aid), None)
+            return self._bytes(found["text"].encode()) if found else self._json(404, {})
         if self.path.startswith("/confluence/wiki/"):
             return self._confluence(urlparse(self.path))
         if self.path.startswith("/okta/api/v1/users"):
@@ -556,6 +564,13 @@ class Handler(BaseHTTPRequestHandler):
                         Credentials(AWS["key_id"], AWS["secret"], AWS["session"]), when)
         return expected["authorization"] == auth
 
+    def _bytes(self, data: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _xml(self, status: int, body: str) -> None:
         data = body.encode()
         self.send_response(status)
@@ -640,7 +655,10 @@ class Handler(BaseHTTPRequestHandler):
             c = content.get(parts[3]) or {}
             if parts[4] == "labels":
                 return self._json(200, {"results": [{"name": label} for label in c.get("labels", [])], "_links": {}})
-            return self._json(200, {"results": [{"title": t} for t in c.get("attachments", [])], "_links": {}})
+            files = [a if isinstance(a, dict) else {"title": a} for a in c.get("attachments", [])]
+            return self._json(200, {"results": [{"title": a["title"], **({"id": a["id"], "fileSize": len(a.get("text", "")),
+                                                                          "version": {"number": 1}, "downloadLink": f"/download/attachments/{c['id']}/{a['id']}"}
+                                                                         if a.get("id") else {})} for a in files], "_links": {}})
         return self._json(404, {"message": "Not found"})
 
     def _notion(self, method, url, body):
@@ -836,12 +854,18 @@ class Handler(BaseHTTPRequestHandler):
             issues = [{"id": i["key"], "key": i["key"], "fields": {
                 "summary": i["summary"], "description": doc(i.get("description", "")), "updated": i.get("updated", "2026-10-01T10:00:00.000+0000"),
                 "security": i.get("security"), "issuetype": {"name": "Task"}, "status": {"name": "To Do"}, "labels": [],
-                "assignee": None, "reporter": {"displayName": "Smoke"},
-                "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": "2026-10-01T10:00:00.000+0000",
+                "assignee": i.get("assignee"), "reporter": {"displayName": "Smoke"},
+                "resolution": i.get("resolution"), "resolutiondate": i.get("resolutiondate"),
+                "attachment": [{"id": a["id"], "filename": a["filename"], "size": len(a["text"]),
+                                "content": f"http://{self.headers.get('Host')}/{url.path.split('/')[1]}/rest/api/3/attachment/content/{a['id']}"} for a in i.get("attachments", [])],
+                "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": c.get("created", "2026-10-01T10:00:00.000+0000"),
                                           "body": doc(c["body"])} for c in i.get("comments", [])]}}}
                 for i in projects.get(key, {}).get("issues", [])]
             return self._json(200, {"issues": issues, "isLast": True})
         parts = rest.split("/")
+        if len(parts) == 3 and parts[:2] == ["attachment", "content"]:  # an attachment's bytes (Q7)
+            found = next((a for p in projects.values() for i in p.get("issues", []) for a in i.get("attachments", []) if a["id"] == parts[2]), None)
+            return self._bytes(found["text"].encode()) if found else self._json(404, {})
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "permissionscheme" and parts[1] in projects:
             holder = "applicationRole" if projects[parts[1]].get("company_wide") else "projectRole"
             return self._json(200, {"permissions": [{"permission": "BROWSE_PROJECTS", "holder": {"type": holder}}]})
@@ -963,9 +987,19 @@ class Handler(BaseHTTPRequestHandler):
             results = [{"index": i, "relevance_score": len(asked & words(d)) / (1 + len(asked))} for i, d in enumerate(docs)]
             results.sort(key=lambda r: r["relevance_score"], reverse=True)
             return self._json(200, {"results": results[: request.get("top_n") or len(results)]})
+        if path == "/v1/audio/transcriptions":  # a speech model (Q8): a fixed transcript, with timestamps
+            REQUESTS.append({"transcribe": self.headers.get("Content-Type", "")[:40]})
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            return self._json(200, {"text": "Standup.", "segments": [{"start": 0.0, "text": "Standup: the cutover rehearsal went well."},
+                                                                    {"start": 75.0, "text": "Next, we fail over at noon on Friday."}]})
         if path != "/v1/chat/completions":
             return self._json(404, {})
         request = self._body()
+        last = (request.get("messages") or [{}])[-1].get("content")
+        if isinstance(last, list) and any(p.get("type") == "image_url" for p in last):  # a vision model (Q8)
+            REQUESTS.append({"vision": True})
+            return self._json(200, {"choices": [{"message": {"role": "assistant", "content": "A flowchart: Orders feed the Ledger, which feeds Settlement."}}],
+                                    "usage": {"prompt_tokens": 80, "completion_tokens": 14}})
         REQUESTS.append(request)
         messages = request.get("messages") or []
         system = next((m.get("content", "") for m in messages if m.get("role") == "system"), "")

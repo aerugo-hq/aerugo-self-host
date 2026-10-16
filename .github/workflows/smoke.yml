@@ -29,6 +29,9 @@ jobs:
       - name: Smoke suite
         run: make smoke
 
+      - name: Golden set (no leak; no regression against its baseline)
+        run: make eval
+
       - name: Evaluation set (no leak; no regression against the baseline)
         run: make eval-scenario
 
