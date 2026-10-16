@@ -25,6 +25,7 @@ from .extract import extract, supported
 from .principals import is_valid
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
+from . import source_http
 
 SITE = re.compile(r"^[a-z0-9-]+\.sharepoint\.com,[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12},"
                   r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")  # hostname,site collection id,web id
@@ -91,14 +92,14 @@ class M365Client(GraphClient):
     def content(self, drive: str, item: str) -> bytes:
         """A file's bytes: Graph answers with a redirect to a short-lived download address, followed only on the
         tenant's own SharePoint host (or the dev fake), without the Graph token."""
-        r = httpx.get(f"{self.base}/v1.0/drives/{drive}/items/{item}/content", timeout=60, follow_redirects=False,
+        r = source_http.get(f"{self.base}/v1.0/drives/{drive}/items/{item}/content", timeout=60, follow_redirects=False,
                       headers={"Authorization": f"Bearer {self._access_token()}"})
         if r.status_code == 200:
             return r.content
         where = r.headers.get("location") or ""
         if r.status_code not in (301, 302, 303, 307) or not (SHAREPOINT.match(where) or where.startswith(f"{self.base}/")):
             raise ValueError("Graph's download address isn't SharePoint's")
-        got = httpx.get(where, timeout=120, follow_redirects=False)
+        got = source_http.get(where, timeout=120, follow_redirects=False)
         got.raise_for_status()
         return got.content
 

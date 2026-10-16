@@ -12,9 +12,7 @@ import datetime
 import hashlib
 import hmac
 import json
-import random
 import re
-import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -25,6 +23,7 @@ from . import config
 from .catalogs import Entry, entry_key, owners_of
 from .connectors import Container, Health
 from .principals import is_valid
+from . import source_http
 
 REGION = re.compile(r"^[a-z]{2}(-gov)?-[a-z]+-[1-9]$")
 ROLE = re.compile(r"^arn:aws(-cn|-us-gov)?:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$")
@@ -35,7 +34,6 @@ READS = {"SELECT", "ALL"}
 TABLE_RESOURCES = ("Table", "TableWithColumns")
 AUDIENCE = "sts.amazonaws.com"
 MAX_PAGES = 500
-RETRIES = 5
 NS = {"sts": "https://sts.amazonaws.com/doc/2011-06-15/"}
 
 
@@ -51,13 +49,18 @@ def allowed_base(api_base: str) -> bool:
     return not api_base or api_base.rstrip("/") in config.AWS_API_BASES
 
 
+def aws_throttled(r: httpx.Response) -> bool:
+    """AWS's throttling: a 400 whose error type says so (ThrottlingException, Throttling), besides 429 and 503."""
+    return r.status_code == 400 and "throttl" in (r.headers.get("x-amzn-ErrorType", "") + r.text[:300]).lower()
+
+
 def web_identity_token(audience: str = AUDIENCE) -> str:
     """The runner's own identity token, for another cloud to trust (AWS, Vault, Entra): a token file the platform
     mounts, else the GCP metadata server's, for that audience."""
     if config.AWS_WEB_IDENTITY_TOKEN_FILE:
         with open(config.AWS_WEB_IDENTITY_TOKEN_FILE) as f:
             return f.read().strip()
-    r = httpx.get(f"{config.GCP_METADATA_BASE}/computeMetadata/v1/instance/service-accounts/default/identity",
+    r = source_http.get(f"{config.GCP_METADATA_BASE}/computeMetadata/v1/instance/service-accounts/default/identity",
                   params={"audience": audience, "format": "full"}, headers={"Metadata-Flavor": "Google"}, timeout=5)
     r.raise_for_status()
     return r.text.strip()
@@ -101,7 +104,7 @@ class AwsRole:
     def _credentials(self) -> Credentials:
         """The role's temporary credentials, for the runner's own identity token; AWS signs none of this request."""
         if not self._creds:
-            r = httpx.post(self._url("sts"), timeout=15, data={
+            r = source_http.post(self._url("sts"), timeout=15, data={
                 "Action": "AssumeRoleWithWebIdentity", "Version": "2011-06-15", "RoleArn": self.role,
                 "RoleSessionName": self.session, "WebIdentityToken": web_identity_token(), "DurationSeconds": "3600"})
             r.raise_for_status()
@@ -115,14 +118,10 @@ class AwsRole:
 
     def _call(self, service: str, path: str, body: dict, headers: dict) -> dict:
         data, url = json.dumps(body).encode(), self._url(service, path)
-        for attempt in range(RETRIES + 1):
-            r = httpx.post(url, content=data, timeout=30, headers=sign("POST", url, self.region, service, data, headers, self._credentials()))
-            throttled = r.status_code == 429 or (r.status_code == 400 and "Throttling" in r.text[:500])
-            if not throttled or attempt == RETRIES:
-                r.raise_for_status()
-                return r.json()
-            time.sleep(2 ** attempt + random.random())
-        raise RuntimeError("unreachable")
+        r = source_http.post(url, content=data, timeout=30, throttled=aws_throttled,  # AWS's throttling, waited out (H2)
+                             headers=sign("POST", url, self.region, service, data, headers, self._credentials()))
+        r.raise_for_status()
+        return r.json()
 
 
 class GlueClient(AwsRole):

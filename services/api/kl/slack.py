@@ -16,7 +16,6 @@ a deletion, a message Slack's retention removed, or a day that fell out of the w
 Direct messages are never read."""
 import hashlib
 import html
-import random
 import re
 import time
 from datetime import datetime, timezone
@@ -28,6 +27,7 @@ from .connectors import Container, Health
 from .principals import is_valid
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
+from . import source_http
 
 SLACK_API = "https://slack.com/api"
 CHANNEL = re.compile(r"^[CG][A-Z0-9]{2,20}$")
@@ -37,7 +37,6 @@ SKIPPED = {"channel_join", "channel_leave", "channel_topic", "channel_purpose", 
            "channel_unarchive", "pinned_item", "unpinned_item", "group_join", "group_leave", "bot_add", "bot_remove"}
 MAX_PAGES = 1000
 MAX_MESSAGES = 50000  # per channel per sync: past this the sync fails, rather than reading the rest as deleted
-RETRIES = 5
 HISTORY_DAYS = 365
 
 
@@ -69,19 +68,12 @@ class SlackClient:
         self._users: dict | None = None
 
     def _call(self, method: str, **params) -> dict:
-        attempt = 0
-        while True:
-            r = httpx.get(f"{self.base}/{method}", params=params, headers=self.headers, timeout=30)
-            if r.status_code == 429 and attempt < RETRIES:  # Slack's rate limits name how long to wait
-                wait = r.headers.get("Retry-After")
-                time.sleep(float(wait) if wait and wait.isdigit() else 2 ** attempt + random.random())
-                attempt += 1
-                continue
-            r.raise_for_status()
-            body = r.json()
-            if not body.get("ok"):
-                raise SlackError(str(body.get("error") or "not ok")[:100])
-            return body
+        r = source_http.get(f"{self.base}/{method}", params=params, headers=self.headers, timeout=30)  # its limits, waited out (H2)
+        r.raise_for_status()
+        body = r.json()
+        if not body.get("ok"):
+            raise SlackError(str(body.get("error") or "not ok")[:100])
+        return body
 
     def _pages(self, method: str, key: str, **params) -> list:
         out, cursor = [], None

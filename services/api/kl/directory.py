@@ -10,7 +10,6 @@ listed more than once counts as active if any listing is, and someone a director
 left (a listing cut short fails the sync instead, so it's never read as everyone leaving)."""
 import base64
 import hashlib
-import random
 import re
 import time
 import uuid
@@ -26,6 +25,7 @@ from .gdrive import GOOGLE_TOKEN, service_account_token
 from .principals import is_valid
 from .sync_items import record_identities
 from .vault import vault
+from . import source_http
 
 OKTA_SITE = re.compile(r"^https://[a-z0-9][a-z0-9-]{0,62}\.(okta|oktapreview|okta-emea|okta-gov)\.com$")
 ACTIVE = {"ACTIVE", "PASSWORD_EXPIRED", "LOCKED_OUT", "RECOVERY"}  # can still sign in; suspended and deprovisioned can't
@@ -36,7 +36,6 @@ GOOGLE_SCOPES = ("https://www.googleapis.com/auth/admin.directory.user.readonly"
                  "https://www.googleapis.com/auth/admin.directory.group.readonly",
                  "https://www.googleapis.com/auth/admin.directory.group.member.readonly")
 MAX_GROUP_MEMBERS = 2000  # a bigger group grants nothing (fail closed): each member becomes a reader of each file
-RETRIES = 5
 GRAPH = "https://graph.microsoft.com"  # Microsoft Graph; its tokens come from login.microsoftonline.com
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"  # the app's own granted permissions: User.Read.All, GroupMember.Read.All
 ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
@@ -108,7 +107,7 @@ class OktaClient:
     def _pages(self, path: str, **params) -> list[dict]:
         out, url, first = [], f"{self.base}{path}", True
         for _ in range(MAX_PAGES):
-            r = httpx.get(url, params=params if first else None, headers=self.headers, timeout=30)
+            r = source_http.get(url, params=params if first else None, headers=self.headers, timeout=30)
             r.raise_for_status()
             out += r.json()
             following = (r.links.get("next") or {}).get("url")
@@ -164,16 +163,10 @@ class GoogleDirectoryClient:
     def _get(self, path: str, **params) -> dict:
         if not self._token:
             self._token = service_account_token(self._sa, GOOGLE_SCOPES, self._token_url(), subject=self.admin)
-        attempt = 0
-        while True:
-            r = httpx.get(f"{self.base}/admin/directory/v1/{path}", params=params, timeout=30,
-                          headers={"Authorization": f"Bearer {self._token}"})
-            if attempt == RETRIES or not rate_limited(r):
-                r.raise_for_status()
-                return r.json()
-            wait = r.headers.get("Retry-After")  # Google's limits page: back off exponentially, with jitter
-            time.sleep(float(wait) if wait and wait.isdigit() else 2 ** attempt + random.random())
-            attempt += 1
+        r = source_http.get(f"{self.base}/admin/directory/v1/{path}", params=params, timeout=30, throttled=rate_limited,
+                            headers={"Authorization": f"Bearer {self._token}"})  # Google's limits: waited out (H2)
+        r.raise_for_status()
+        return r.json()
 
     def _pages(self, path: str, key: str, **params) -> list[dict]:
         out, token = [], None
@@ -265,7 +258,7 @@ class GraphClient:
             assertion = jwt.encode({"aud": self._token_url(), "iss": self.client, "sub": self.client, "jti": str(uuid.uuid4()),
                                     "nbf": now, "iat": now, "exp": now + 300}, self._cert["private_key"], algorithm="PS256",
                                    headers={"typ": "JWT", "x5t#S256": self._cert["thumbprint"]})
-            r = httpx.post(self._token_url(), timeout=15, data={
+            r = source_http.post(self._token_url(), timeout=15, data={
                 "grant_type": "client_credentials", "client_id": self.client, "scope": self.scope,
                 "client_assertion_type": ASSERTION_TYPE, "client_assertion": assertion})
             r.raise_for_status()
@@ -276,16 +269,10 @@ class GraphClient:
         return self._call("GET", url, params, headers)
 
     def _call(self, method: str, url: str, params: dict | None, headers: dict | None = None, body: dict | None = None) -> dict:
-        attempt = 0
-        while True:
-            r = httpx.request(method, url, params=params, json=body, timeout=30,
-                              headers={"Authorization": f"Bearer {self._access_token()}", **(headers or {})})
-            if attempt == RETRIES or r.status_code not in (429, 503, 504):  # Graph's throttling, and its busy answers
-                r.raise_for_status()
-                return r.json()
-            wait = r.headers.get("Retry-After")
-            time.sleep(float(wait) if wait and wait.isdigit() else 2 ** attempt + random.random())
-            attempt += 1
+        r = source_http.send(method, url, params=params, json=body, timeout=30, throttled=lambda r: r.status_code == 504,
+                             headers={"Authorization": f"Bearer {self._access_token()}", **(headers or {})})  # and Graph's 504s
+        r.raise_for_status()
+        return r.json()
 
     def _pages(self, path: str, params: dict, headers: dict | None = None) -> list[dict]:
         out, url, query = [], f"{self.base}/v1.0/{path}", params

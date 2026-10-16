@@ -12,6 +12,7 @@ from .catalogs import Entry, entry_key, owners_of
 from .connectors import Container, Health
 from .principals import is_valid
 from .vault import vault
+from . import source_http
 
 HOST = re.compile(r"^https://[a-z0-9][a-z0-9.-]{0,120}\.(cloud\.databricks\.com|azuredatabricks\.net|gcp\.databricks\.com)$")
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
@@ -35,14 +36,14 @@ class UnityClient:
     def _access_token(self) -> str:
         """OAuth machine-to-machine: the service principal's own client credentials, for this workspace only."""
         if not self._token:
-            r = httpx.post(f"{self.base}/oidc/v1/token", data={"grant_type": "client_credentials", "scope": "all-apis"},
+            r = source_http.post(f"{self.base}/oidc/v1/token", data={"grant_type": "client_credentials", "scope": "all-apis"},
                            auth=self._auth, timeout=15)
             r.raise_for_status()
             self._token = r.json()["access_token"]
         return self._token
 
     def _get(self, path: str, **params) -> dict:
-        r = httpx.get(f"{self.base}{path}", params=params, headers={"Authorization": f"Bearer {self._access_token()}"}, timeout=30)
+        r = source_http.get(f"{self.base}{path}", params=params, headers={"Authorization": f"Bearer {self._access_token()}"}, timeout=30)
         r.raise_for_status()
         return r.json()
 

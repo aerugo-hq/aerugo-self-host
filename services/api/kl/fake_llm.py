@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,7 +24,12 @@ RERANKS: list[dict] = []
 ALERTS: list[dict] = []  # what the app's alert webhook posted (slice P); never reset, alerts arrive late
 ANSWER = "According to the sources, page the on-call first [1]."
 UNFAITHFUL = "The CFO approves every refund personally [1]."  # nothing in any source says this
-MODE = {"answer": ANSWER, "delay": 0.0}  # delay: seconds each answer and rerank takes, when smoke asks (H5)
+MODE = {"answer": ANSWER, "delay": 0.0}
+# H2: any source's fake can be throttled. POST /throttle {"prefix", "count", "status", "retry_after"} answers the next
+# `count` calls whose path starts with prefix with status (429 or 503), and Retry-After when given; GET /throttle says
+# how many it answered so. Smoke proves a sync survives it.
+THROTTLE = {"prefix": "", "left": 0, "status": 429, "retry_after": None, "answered": 0}
+THROTTLE_LOCK = threading.Lock()  # delay: seconds each answer and rerank takes, when smoke asks (H5)
 STOP = {"according", "sources", "source", "first", "that", "this", "with", "from", "they", "their", "there",
         "what", "when", "which", "about", "should", "would"}
 ISSUER = os.environ.get("KL_FAKE_OIDC_ISSUER", "http://fake-llm:8080/oidc")
@@ -296,7 +302,27 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self) -> dict:
         return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
 
+    def _throttled(self) -> bool:
+        """Answer this call as throttled, when smoke asked for that (H2)."""
+        with THROTTLE_LOCK:
+            if THROTTLE["left"] <= 0 or not THROTTLE["prefix"] or not self.path.startswith(THROTTLE["prefix"]):
+                return False
+            THROTTLE["left"] -= 1
+            THROTTLE["answered"] += 1
+            status, after = THROTTLE["status"], THROTTLE["retry_after"]
+        self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+        self.send_response(status)
+        if after is not None:
+            self.send_header("Retry-After", str(after))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
+
     def do_GET(self):
+        if self.path == "/throttle":
+            return self._json(200, {"answered": THROTTLE["answered"], "left": THROTTLE["left"]})
+        if self._throttled():
+            return None
         if self.path == "/requests":
             return self._json(200, REQUESTS)
         if self.path == "/reranks":
@@ -916,6 +942,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.rstrip("/")
+        if path == "/throttle":
+            body = self._body()
+            with THROTTLE_LOCK:
+                THROTTLE.update({"prefix": str(body.get("prefix") or ""), "left": int(body.get("count") or 0), "answered": 0,
+                                 "status": int(body.get("status") or 429), "retry_after": body.get("retry_after")})
+            return self._json(200, {})
+        if self._throttled():
+            return None
         if path == "/alerts":  # the test webhook: the app posts alerts here when an org admin points it here
             ALERTS.append(self._body())
             return self._json(200, {})

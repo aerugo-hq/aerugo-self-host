@@ -20,6 +20,7 @@ from .attachments import MAX_BYTES as MAX_ATTACHMENT, MAX_PER_PAGE, attachment_i
 from .decisions import heading as decision_heading, is_decision
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
+from . import source_http
 
 PROJECT = re.compile(r"^[A-Z][A-Z0-9_]{0,49}$")
 ISSUE = re.compile(r"^[A-Z][A-Z0-9_]{0,49}-[0-9]{1,9}$")
@@ -121,7 +122,7 @@ class JiraClient:
             return data
 
     def _get(self, path: str, **params):
-        r = httpx.get(f"{self.base}/rest/api/3/{path}", params={k: v for k, v in params.items() if v is not None},
+        r = source_http.get(f"{self.base}/rest/api/3/{path}", params={k: v for k, v in params.items() if v is not None},
                       headers=self.headers, timeout=30)
         r.raise_for_status()
         return r.json()

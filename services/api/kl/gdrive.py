@@ -28,6 +28,7 @@ from .principals import is_valid
 from .sync_github import leave_former_teams, team_for
 from .sync_items import record_identities
 from .vault import vault
+from . import source_http
 
 GOOGLE_API = "https://www.googleapis.com"
 GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
@@ -56,7 +57,7 @@ def service_account_token(account: dict, scopes: tuple[str, ...], token_url: str
     claims = {"iss": account["client_email"], "scope": " ".join(scopes), "aud": token_url, "iat": now, "exp": now + 3600}
     if subject:
         claims["sub"] = subject
-    r = httpx.post(token_url, data={"grant_type": JWT_GRANT,
+    r = source_http.post(token_url, data={"grant_type": JWT_GRANT,
                                     "assertion": jwt.encode(claims, account["private_key"], algorithm="RS256")}, timeout=15)
     r.raise_for_status()
     return r.json()["access_token"]
@@ -86,7 +87,7 @@ class DriveClient:
             if self._sa:
                 self._token = service_account_token(self._sa, (SA_SCOPE,), self._token_url())
             else:
-                r = httpx.post(self._token_url(), data=self._grant, timeout=15)
+                r = source_http.post(self._token_url(), data=self._grant, timeout=15)
                 r.raise_for_status()
                 self._token = r.json()["access_token"]
         return self._token
@@ -96,7 +97,7 @@ class DriveClient:
         return bool(self._sa)
 
     def _get(self, path: str, **params) -> httpx.Response:
-        r = httpx.get(f"{self.base}/drive/v3/{path}", params=params, timeout=60,
+        r = source_http.get(f"{self.base}/drive/v3/{path}", params=params, timeout=60,
                       headers={"Authorization": f"Bearer {self._access_token()}"})
         r.raise_for_status()
         return r

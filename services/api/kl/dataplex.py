@@ -15,6 +15,7 @@ from .catalogs import Entry, entry_key, owners_of
 from .connectors import Container, Health
 from .gdrive import directory_groups
 from .principals import is_valid
+from . import source_http
 
 GOOGLE = "https://googleapis.com"  # the sentinel for Google's own hosts: dataplex., bigquery., datalineage.googleapis.com
 PROJECT = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
@@ -48,7 +49,7 @@ class DataplexClient:
         return self._token
 
     def _call(self, method: str, url: str, **kw) -> dict:
-        r = httpx.request(method, url, headers={"Authorization": f"Bearer {self._access_token()}"}, timeout=30, **kw)
+        r = source_http.send(method, url, headers={"Authorization": f"Bearer {self._access_token()}"}, timeout=30, **kw)
         r.raise_for_status()
         return r.json()
 

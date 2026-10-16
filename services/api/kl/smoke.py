@@ -3715,6 +3715,56 @@ def the_claim_checker_never_passes_a_contradiction():
 
 
 @check
+def a_throttled_source_slows_a_sync_but_never_fails_it():
+    """Rate limits (H2): Jira answering 429 with Retry-After, and Confluence answering 503 without saying how long, are waited out and tried again, so each connection syncs to the end with every one of its jobs done on its first attempt"""
+    tag = secrets.token_hex(3).upper()
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    acct, page = f"557058:cfthr{tag.lower()}", str(int(tag, 16) * 10 + 7)
+    sources = (
+        ("jira", FAKE_JIRA, {"projects": {f"THR{tag}": {"name": f"Throttled {tag}", "company_wide": False, "browsers": [alice], "issues": [
+            {"key": f"THR{tag}-1", "summary": f"Throttled issue {tag}", "description": "Waited out."}]}}},
+         "/jira/rest/api/3/", 429, 1, f"jira-THR{tag}-1",
+         {"email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [f"THR{tag}"]}),
+        ("confluence", FAKE_CONFLUENCE, {"users": {acct: {"email": "alice@acme.test", "name": "Alice"}}, "groups": {}, "spaces": {
+            f"THR{tag}": {"id": str(int(tag, 16) * 10 + 9), "name": f"Throttled {tag}", "users": [acct], "groups": [],
+                          "pages": [{"id": page, "title": f"Throttled page {tag}", "body": "<p>Waited out.</p>", "version": 1}], "blogposts": []}}},
+         "/confluence/wiki/", 503, None, f"confluence-{page}",
+         {"email": "confluence-bot@acme.test", "api_token": "smoke-confluence-token", "spaces": [f"THR{tag}"]}),
+    )
+    names = []
+    try:
+        for kind, fake, setup, prefix, status, after, key, body in sources:
+            assert httpx.post(f"{fake}/setup", json=setup, timeout=10).status_code == 200
+            assert httpx.post(f"{FAKE_LLM}/throttle", json={"prefix": prefix, "count": 4, "status": status, "retry_after": after},
+                              timeout=10).status_code == 200
+            name = f"thr-{kind}-{tag.lower()}"
+            names.append(name)
+            r = api("POST", f"/v1/workspaces/payments/connections/{kind}", "alice",
+                    json={"name": name, "api_base": fake, "every_minutes": 10080, **body})
+            assert r.status_code == 201, f"{kind}: {r.status_code} {r.text[:200]}"
+            deadline, jobs, there = time.monotonic() + 180, [], None
+            while time.monotonic() < deadline:
+                with psycopg.connect(OWNER_DB) as conn:
+                    there = conn.execute("SELECT 1 FROM kl.documents WHERE external_key = %s", (key,)).fetchone()
+                    jobs = conn.execute("SELECT j.kind, j.status, j.attempts, j.last_error FROM kl.jobs j JOIN kl.connections c "
+                                        "ON j.payload->>'connection_id' = c.id::text WHERE c.name = %s ORDER BY j.id", (name,)).fetchall()
+                if there and jobs and all(s in ("done", "failed") for _, s, _, _ in jobs):
+                    break
+                time.sleep(1)
+            answered = httpx.get(f"{FAKE_LLM}/throttle", timeout=10).json()["answered"]
+            assert answered == 4, f"{kind}: the fake throttled {answered} call(s), not 4, so this proves nothing"
+            assert there, f"{kind}: a throttled sync never brought its item in: {jobs}"
+            assert all(s == "done" and n == 1 for _, s, n, _ in jobs), f"{kind}: a throttled call failed a job: {jobs}"
+        print("      Jira's 429s and Confluence's 503s were waited out: both synced, every job on its first attempt")
+    finally:
+        httpx.post(f"{FAKE_LLM}/throttle", json={"count": 0}, timeout=10)
+        for name in names:
+            api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga

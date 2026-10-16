@@ -29,6 +29,7 @@ from .attachments import MAX_BYTES as MAX_ATTACHMENT, MAX_PER_PAGE, attachment_i
 from .decisions import confluence_items, heading as decision_heading
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
+from . import source_http
 
 SPACE_KEY = re.compile(r"^~?[A-Za-z0-9_-]{1,255}$")  # personal spaces start with ~
 CONTENT_ID = re.compile(r"^[0-9]{1,20}$")
@@ -233,7 +234,7 @@ class ConfluenceClient:
         self.headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
 
     def _get(self, path: str, **params):
-        r = httpx.get(f"{self.base}/wiki/{path.lstrip('/')}", params={k: v for k, v in params.items() if v is not None},
+        r = source_http.get(f"{self.base}/wiki/{path.lstrip('/')}", params={k: v for k, v in params.items() if v is not None},
                       headers=self.headers, timeout=30)
         r.raise_for_status()
         return r.json()
