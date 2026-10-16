@@ -15,6 +15,7 @@ import ComplianceView from "./compliance-view.js";
 import ConceptView from "./concept-view.js";
 import DeveloperView from "./developer-view.js";
 import DocumentsView, { SpaceView } from "./documents-view.js";
+import HealthView from "./health-view.js";
 import HomeView from "./home-view.js";
 import { Icon } from "./icons.js";
 import MapView from "./map-view.js";
@@ -27,7 +28,7 @@ import { Empty, Status } from "./ui.js";
 
 // G then a letter, from anywhere but a text field: the same places the sidebar goes, in the scope you're in.
 const GO = { h: "home", m: "map", s: "search", q: "ask", d: "documents", p: "proposals", a: "admin", c: "compliance", v: "developer", l: "accounts" };
-const TEAM_PAGES = { home: "Overview", documents: "Documents", ask: "Ask", search: "Search", map: "Map", proposals: "Proposals", settings: "Team settings", concepts: "Document" };
+const TEAM_PAGES = { home: "Overview", documents: "Documents", ask: "Ask", search: "Search", map: "Map", proposals: "Proposals", settings: "Team settings", health: "Knowledge health", concepts: "Document" };
 const ORG_PAGES = { home: "Home", documents: "Documents", ask: "Ask", search: "Search", map: "Map", proposals: "Proposals", admin: "Admin", alerts: "Alerts",
                     compliance: "Compliance", developer: "Developer", accounts: "Connected accounts", concepts: "Document" };
 
@@ -172,6 +173,7 @@ export default function App() {
       case "map": return h(MapView, { team });
       case "proposals": return h(ProposalsView, { me, id: where.arg, team }); // this team's proposals only
       case "settings": return h(AdminView, { me, section: where.arg, team });
+      case "health": return teamAdmin ? h(HealthView, { team, teamName }) : h(HomeView, { me, alerts, team, teamName });
       case "concepts": return h(ConceptView, { id: where.arg });
       default: return h(HomeView, { me, alerts, team, teamName });
     }
@@ -210,6 +212,7 @@ export default function App() {
           item("ask", "ask", "Ask"),
           item("proposals", "draft", "Proposals"),
           teamAdmin ? group("Team") : null,
+          teamAdmin ? item("health", "check", "Knowledge health") : null,
           teamAdmin ? item("settings", "sliders", "Team settings") : null)
         : h("nav", { className: "sb-nav", "aria-label": "Pages across acme" },
           item("home", "home", "Home"),

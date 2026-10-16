@@ -160,6 +160,41 @@ def test_the_data_catalog_form_fits_each_catalog(page):
     expect(form.get_by_text("readable only by the people DataHub names as its owners")).to_be_visible()
 
 
+def test_knowledge_health_lists_pages_that_need_someone(page):
+    sign_in(page, "alice")  # payments' admin
+    page.goto(f"{WEB}/#/t/payments/health")
+    expect(page.get_by_role("heading", name="Knowledge health")).to_be_visible()
+    expect(page.get_by_text("curated pages")).to_be_visible(timeout=30_000)  # the summary says how many need someone
+    filters = page.get_by_role("group", name="Show pages that are")
+    if filters.count():
+        expect(filters.get_by_role("button", name=re.compile(r"^All "))).to_have_attribute("aria-pressed", "true")
+
+
+def test_search_narrows_to_a_source(page):
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/search")
+    page.get_by_role("searchbox").or_(page.get_by_label("Search", exact=True)).first.fill("payments")
+    page.keyboard.press("Enter")
+    expect(page.get_by_text(re.compile(r"results? for"))).to_be_visible(timeout=30_000)
+    sources = page.get_by_role("group", name="Only from these sources")
+    if sources.count():
+        first = sources.get_by_role("button").first
+        first.click()
+        expect(first).to_have_attribute("aria-pressed", "true")
+
+
+def test_the_maps_clusters_are_named_and_keep_their_colors(page):
+    sign_in(page, "olivia")  # every team's curated pages, linked: the map has clusters
+    page.goto(f"{WEB}/#/map")
+    legend = page.get_by_role("list", name="Clusters on the map")
+    expect(legend.get_by_role("listitem").first).to_be_visible(timeout=60_000)
+    before = [(item.inner_text(), item.locator(".swatch").get_attribute("class")) for item in legend.get_by_role("listitem").all()]
+    page.reload()
+    expect(legend.get_by_role("listitem").first).to_be_visible(timeout=60_000)
+    after = [(item.inner_text(), item.locator(".swatch").get_attribute("class")) for item in legend.get_by_role("listitem").all()]
+    assert before == after, f"the clusters' names or colors changed on reload: {before} then {after}"
+
+
 def test_olivia_sets_up_and_removes_google_sign_in(page):
     sign_in(page, "olivia")
     page.goto(f"{WEB}/#/compliance/platform")

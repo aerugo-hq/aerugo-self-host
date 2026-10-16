@@ -114,3 +114,14 @@ such choice took the narrower, fail-closed option and is listed here, with its a
    indexed at all.
 6. **Q2's measurement can't show a gain yet:** the lookup and cross-team cases were already at their best. The new
    channels are proven by smoke instead.
+
+## E1 to E3. Experience
+
+1. **Facets count only what the caller may already see** (E1), among the top 50 results: never a count of what's
+   hidden (invariant 11).
+2. **"Contradicted" is read as conflicting names and replaced pages** (E2), which Aerugo can tell for certain; two pages
+   saying different things about the same fact needs claim-level comparison across pages, not built.
+3. **Retiring a page leaves its source alone** (E2): search and Ask stop returning it, and the Map and the documents
+   list still show it, until someone confirms it again or removes it at its source.
+4. **Cluster names are built in the browser** (E3), from the titles of the nodes the viewer was sent, so a name never
+   mixes in what they can't read (invariant 16).
