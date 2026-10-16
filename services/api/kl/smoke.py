@@ -3396,6 +3396,126 @@ def jira_issues_carry_jiras_own_permissions():
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
 
 
+# A second worker for the C1 check: it runs one job the way the stack's worker would, then exits. Its claim is made by
+# the check (a running job, as the claim leaves it), so the stack's own worker never races it for the job.
+SECOND_WORKER = """
+import signal, sys
+import psycopg
+from psycopg.rows import dict_row
+from kl import worker
+signal.signal(signal.SIGTERM, worker._stop)
+with psycopg.connect(worker.INGEST_DB, row_factory=dict_row, autocommit=True) as conn:
+    conn.execute("SELECT set_config('kl.org_id', %s, false)", (sys.argv[1],))
+    job = conn.execute("SELECT id, org_id, kind, payload, attempts, max_attempts FROM jobs WHERE id = %s",
+                       (int(sys.argv[2]),)).fetchone()
+    worker.run(conn, job)
+"""
+
+
+@check
+def a_stopped_or_killed_worker_never_strands_a_sync():
+    """Jobs (C1): a worker stopped mid-sync (SIGTERM, as a deploy does) puts its job back at once, its attempt not counted; one killed mid-sync (SIGKILL, out of memory) stops renewing its lease, so the stack's worker takes the job over; either way the connection syncs to completion"""
+    import signal
+    import subprocess
+    import tempfile
+    tag = secrets.token_hex(3).upper()
+    key, name, org = f"LEASE{tag}", f"lease-{tag.lower()}", acme_org_id()
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+
+    def setup(n: int, delay: float = 0.0) -> None:  # n issues, each with an attachment the fake serves after `delay` seconds
+        issues = [{"key": f"{key}-{i}", "summary": f"Cutover step {i} {tag}", "description": f"Step {i} of the cutover {tag}.",
+                   "attachments": [{"id": f"{int(tag, 16)}{i:03d}", "filename": "notes.txt", "text": f"Notes for step {i} {tag}."}]}
+                  for i in range(1, n + 1)]
+        site = {"delay": delay, "projects": {key: {"name": f"Lease {tag}", "company_wide": False, "browsers": [alice], "issues": issues}}}
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=site, timeout=10).status_code == 200
+
+    def indexed() -> int:  # the connection's issues (not their attachments) in the index
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.documents WHERE external_key LIKE %s", (f"jira-{key}-%",)).fetchone()[0]
+
+    def job(jid: int) -> dict:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return conn.execute("SELECT status, attempts, last_error FROM kl.jobs WHERE id = %s", (jid,)).fetchone()
+
+    def wait(ok, seconds: float, what: str) -> None:
+        deadline = time.monotonic() + seconds
+        while not ok():
+            assert time.monotonic() < deadline, what
+            time.sleep(0.5)
+
+    def second_worker(cid: str, log) -> tuple[int, subprocess.Popen]:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # the job, as a worker's claim leaves it
+            jid = conn.execute("INSERT INTO kl.jobs (org_id, kind, payload, status, attempts, locked_at, lease_until) "
+                               "VALUES (%s, 'connection.sync', %s, 'running', 1, now(), now() + interval '6 seconds') RETURNING id",
+                               (org, json.dumps({"connection_id": cid, "reason": "smoke"}))).fetchone()[0]
+        env = {**os.environ, "KL_JOB_LEASE_SECONDS": "6", "PYTHONUNBUFFERED": "1"}
+        return jid, subprocess.Popen([sys.executable, "-c", SECOND_WORKER, org, str(jid)], env=env, stdout=log, stderr=log)
+
+    def tail(log) -> str:
+        log.seek(0)
+        return log.read().decode(errors="replace")[-1500:]
+
+    proc = None
+    try:
+        setup(2)
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
+            "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key],
+            "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        with psycopg.connect(OWNER_DB) as conn:
+            cid = str(conn.execute("SELECT id FROM kl.connections WHERE name = %s", (name,)).fetchone()[0])
+
+        def idle() -> bool:  # nothing of this connection's queued or running
+            with psycopg.connect(OWNER_DB) as conn:
+                return not conn.execute("SELECT 1 FROM kl.jobs WHERE status IN ('queued', 'running') AND payload->>'connection_id' = %s",
+                                        (cid,)).fetchone()
+        wait(lambda: indexed() == 2 and idle(), 120, "the connection's first sync never finished")
+
+        # Stopped: SIGTERM mid-sync. The worker stops at its next safe point and puts the job back, uncounted.
+        with tempfile.TemporaryFile() as log:
+            setup(12, delay=0.5)
+            jid, proc = second_worker(cid, log)
+            wait(lambda: indexed() > 2 or proc.poll() is not None, 60, "the second worker never started the sync")
+            assert proc.poll() is None and job(jid)["status"] == "running", f"the second worker stopped on its own:\n{tail(log)}"
+            proc.send_signal(signal.SIGTERM)
+            stopped_at = indexed()
+            try:
+                proc.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                raise AssertionError(f"a stopped worker didn't stop at a safe point within 4 seconds:\n{tail(log)}")
+            assert proc.returncode == 0, f"the stopped worker didn't exit cleanly ({proc.returncode}):\n{tail(log)}"
+            assert stopped_at < 12 and job(jid)["status"] != "done", f"the stopped worker finished the sync instead of putting it back: {job(jid)}"
+            setup(12)
+            wait(lambda: job(jid)["status"] in ("done", "failed"), 90, f"the stopped worker's job was never taken up again: {job(jid)}")
+            done = job(jid)
+            assert done["status"] == "done" and done["attempts"] == 1, f"a shutdown counted against the job, or it failed: {done}"
+            assert indexed() == 12, f"after the stop, the sync didn't complete: {indexed()} of 12 issues"
+
+        # Killed: SIGKILL mid-sync. Nothing runs on the way out; the lease runs out and the stack's worker takes over.
+        with tempfile.TemporaryFile() as log:
+            setup(20, delay=0.5)
+            jid, proc = second_worker(cid, log)
+            wait(lambda: indexed() > 12 or proc.poll() is not None, 60, "the second worker never started the sync")
+            assert proc.poll() is None and job(jid)["status"] == "running", f"the second worker stopped on its own:\n{tail(log)}"
+            proc.kill()
+            proc.wait(timeout=10)
+            killed_at = indexed()
+            assert killed_at < 20 and job(jid)["status"] == "running", f"the kill didn't land mid-sync: {killed_at} of 20, {job(jid)}"
+            setup(20)
+            wait(lambda: job(jid)["status"] in ("done", "failed"), 120, f"the killed worker's job was never taken over: {job(jid)}")
+            done = job(jid)
+            assert done["status"] == "done" and done["attempts"] == 2, f"the takeover didn't run the job once more: {done}"
+            assert indexed() == 20, f"after the kill, the sync didn't complete: {indexed()} of 20 issues"
+        print(f"      stopped at {stopped_at} of 12 issues and put back; killed at {killed_at} of 20 and taken over; both synced to the end")
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+        httpx.post(f"{FAKE_JIRA}/setup", json={}, timeout=10)
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
 @check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""

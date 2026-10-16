@@ -8,6 +8,7 @@ and anything the source no longer has, or no longer lets anyone read, is removed
 from dataclasses import dataclass
 from typing import Callable
 
+from . import shutdown
 from .authz import fga
 from .sync_github import leave_former_teams, team_for
 
@@ -44,7 +45,7 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
         "SELECT id, external_key, content_hash FROM documents WHERE source_kind = %s AND container_ref = %s AND connection_id = %s",
         (source_kind, container, connection["id"]))}
     keep, changed, unreadable, writes, deletes = set(), 0, [], set(), set()
-    for item in items:
+    for item in shutdown.each(items):  # a worker asked to stop stops between items (C1)
         if not item.acl:  # nobody may read it: it isn't indexed at all
             continue
         prev = existing.get(item.key)

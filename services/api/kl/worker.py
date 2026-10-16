@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import signal
+import threading
 import time
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, catalogs, config, confluence, curator, dataplex, datahub, directory, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, slack, telemetry, unity
+from . import alerting, catalogs, config, confluence, curator, dataplex, datahub, directory, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -39,16 +40,31 @@ def source_kind_of(c: dict) -> str:
     return (c["config"] or {})["provider"] if c["kind"] == "catalog" else c["kind"]
 SCHEDULER_SECONDS = float(os.environ.get("KL_SCHEDULER_SECONDS", "60"))  # how often to look for stale ones
 
+LEASE_SECONDS = float(os.environ.get("KL_JOB_LEASE_SECONDS", "120"))  # how long a job outlives a dead worker (C1)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("kl.worker")
-_stopping = False
 
 CLAIM_SQL = """
-UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_at = now(), updated_at = now()
+UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_at = now(),
+                lease_until = now() + %s * interval '1 second', updated_at = now()
 WHERE id = (SELECT id FROM jobs
             WHERE status = 'queued' AND run_after <= now()
             ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
-RETURNING id, kind, payload, attempts, max_attempts
+RETURNING id, org_id, kind, payload, attempts, max_attempts
+"""
+
+# C1: a running job's lease. The claim's attempt number fences each run: a worker whose lease ran out and whose job was
+# taken over can neither renew it nor settle it, so a run that comes back late changes nothing.
+FENCE = " AND attempts = %s AND status = 'running'"
+RENEW_SQL = "UPDATE jobs SET lease_until = now() + %s * interval '1 second' WHERE id = %s" + FENCE
+# Put back by a stopping worker, at once: the attempt isn't the job's failure, so it doesn't count.
+REQUEUE_SQL = "UPDATE jobs SET status = 'queued', attempts = attempts - 1, run_after = now(), updated_at = now() WHERE id = %s" + FENCE
+# Jobs whose worker died: the lease ran out (or, for a job claimed before leases, an hour has passed since its claim).
+REAP_SQL = """
+SELECT id, org_id, kind, payload, attempts, max_attempts FROM jobs
+WHERE status = 'running' AND COALESCE(lease_until, locked_at + interval '1 hour') < now()
+FOR UPDATE SKIP LOCKED
 """
 
 # Reconciliation: re-sync every ready connection that hasn't synced within the window, unless a
@@ -334,6 +350,7 @@ def handle_connection_refresh_readers(conn, job) -> dict:
 
 def sync_containers(conn, c: dict, containers: list) -> list[dict]:
     """Each selected container of a connection through its connector: a content sync, or (readers_only) S8's refresh."""
+    containers = shutdown.each(containers)  # a worker asked to stop stops between containers (C1)
     if c["kind"] == "google":  # shared drives (slice F2)
         client = gdrive.client_for(c)
         results = [gdrive.sync_drive(conn, c, client, ct["external_id"]) for ct in containers]
@@ -677,45 +694,103 @@ HEARTBEAT_SQL = ("INSERT INTO heartbeats (org_id, service) VALUES (kl.current_or
 
 
 # ------------------------------------------------------------------ loop
-def finish(conn, job, error: str | None = None) -> None:
+def finish(conn, job, error: str | None = None) -> bool:
+    """Settle a run: done, failed for good, or queued again with backoff. Only the run holding the job's current claim
+    settles it (FENCE); one whose job was taken over after its lease ran out changes nothing and says so."""
+    fence = (job["id"], job["attempts"])
     if error is None:
-        conn.execute("UPDATE jobs SET status = 'done', last_error = NULL, updated_at = now() WHERE id = %s",
-                     (job["id"],))
+        settled = conn.execute("UPDATE jobs SET status = 'done', last_error = NULL, updated_at = now() WHERE id = %s" + FENCE,
+                               fence).rowcount
     elif job["attempts"] >= job["max_attempts"]:
-        conn.execute("UPDATE jobs SET status = 'failed', last_error = %s, updated_at = now() WHERE id = %s",
-                     (error, job["id"]))
-        if job["kind"] in ("connection.discover", "connection.sync", "connection.refresh_readers"):
+        settled = conn.execute("UPDATE jobs SET status = 'failed', last_error = %s, updated_at = now() WHERE id = %s" + FENCE,
+                               (error, *fence)).rowcount
+        if settled and job["kind"] in ("connection.discover", "connection.sync", "connection.refresh_readers"):
             conn.execute(CONNECTION_FAILED_SQL, (error, job["payload"].get("connection_id")))
     else:
         delay = min(300, 5 * 2 ** (job["attempts"] - 1))
-        conn.execute("UPDATE jobs SET status = 'queued', last_error = %s, "
-                     "run_after = now() + %s * interval '1 second', updated_at = now() WHERE id = %s",
-                     (error, delay, job["id"]))
+        settled = conn.execute("UPDATE jobs SET status = 'queued', last_error = %s, run_after = now() + %s * interval '1 second', "
+                               "updated_at = now() WHERE id = %s" + FENCE, (error, delay, *fence)).rowcount
+    if not settled:
+        log.warning("job %s %s: its lease ran out and it was taken over, so this run's outcome is dropped", job["id"], job["kind"])
+    return bool(settled)
+
+
+class Lease:
+    """A claimed job's lease (C1), renewed every third of LEASE_SECONDS from a connection of its own for as long as this
+    process lives. A worker that's killed stops renewing, and the reaper puts the job back once the lease runs out.
+    ponytail: it renews however long the job takes, so a job that hangs keeps its lease; a per-kind time limit that
+    stops renewing is M7."""
+
+    def __init__(self, job: dict) -> None:
+        self.job, self.done = job, threading.Event()
+        self.thread = threading.Thread(target=self._renew, name=f"lease-{job['id']}", daemon=True)
+
+    def __enter__(self) -> "Lease":
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.done.set()
+        self.thread.join(timeout=5)
+
+    def _renew(self) -> None:  # the claim set the first lease, so a short job never opens a connection here
+        job, conn = self.job, None
+        while not self.done.wait(LEASE_SECONDS / 3):
+            try:
+                if conn is None:
+                    conn = psycopg.connect(INGEST_DB, autocommit=True)
+                    conn.execute("SELECT set_config('kl.org_id', %s, false)", (str(job["org_id"]),))
+                if not conn.execute(RENEW_SQL, (LEASE_SECONDS, job["id"], job["attempts"])).rowcount and not self.done.is_set():
+                    log.info("job %s is no longer this worker's; its lease isn't renewed", job["id"])
+                    break
+            except psycopg.Error as e:  # the database blinked: try again next time, before the lease runs out
+                log.warning("job %s: lease not renewed (%s); trying again", job["id"], type(e).__name__)
+                if conn is not None:
+                    conn.close()
+                conn = None
+        if conn is not None:
+            conn.close()
 
 
 def run(conn, job) -> None:
     handler = HANDLERS.get(job["kind"])
     started = time.monotonic()
-    try:
-        with telemetry.span("job", kind=job["kind"], attempt=job["attempts"]):
-            if handler is None:
-                raise RuntimeError(f"no handler for job kind {job['kind']!r}")
-            result = handler(conn, job)
-        finish(conn, job)
-        telemetry.job_finished(job["kind"], "done", time.monotonic() - started)
-        log.info("job %s %s done: %s", job["id"], job["kind"], result)
-    except Exception as e:  # noqa: BLE001 - every failure is recorded on the job, never lost
-        error = f"{type(e).__name__}: {e}"[:500]
-        log.warning("job %s %s failed (attempt %s/%s): %s",
-                    job["id"], job["kind"], job["attempts"], job["max_attempts"], error)
-        finish(conn, job, error)
-        telemetry.job_finished(job["kind"], "failed" if job["attempts"] >= job["max_attempts"] else "retried",
-                               time.monotonic() - started)
+    with Lease(job):
+        try:
+            with telemetry.span("job", kind=job["kind"], attempt=job["attempts"]):
+                if handler is None:
+                    raise RuntimeError(f"no handler for job kind {job['kind']!r}")
+                result = handler(conn, job)
+            finish(conn, job)
+            telemetry.job_finished(job["kind"], "done", time.monotonic() - started)
+            log.info("job %s %s done: %s", job["id"], job["kind"], result)
+        except shutdown.Stopped:  # stopped at a safe point (SIGTERM): back in the queue at once, the attempt not counted
+            conn.execute(REQUEUE_SQL, (job["id"], job["attempts"]))
+            telemetry.job_finished(job["kind"], "stopped", time.monotonic() - started)
+            log.info("job %s %s put back in the queue: the worker is stopping", job["id"], job["kind"])
+        except Exception as e:  # noqa: BLE001 - every failure is recorded on the job, never lost
+            error = f"{type(e).__name__}: {e}"[:500]
+            log.warning("job %s %s failed (attempt %s/%s): %s",
+                        job["id"], job["kind"], job["attempts"], job["max_attempts"], error)
+            finish(conn, job, error)
+            telemetry.job_finished(job["kind"], "failed" if job["attempts"] >= job["max_attempts"] else "retried",
+                                   time.monotonic() - started)
 
 
-def _stop(*_):
-    global _stopping
-    _stopping = True
+def reap(conn) -> int:
+    """Put back every job whose lease ran out, because its worker died mid-job (C1). The attempt counts, so a job that
+    kills its worker every time (out of memory on one huge item) fails after max_attempts instead of looping forever."""
+    with conn.transaction():
+        expired = conn.execute(REAP_SQL).fetchall()
+        for job in expired:
+            finish(conn, job, "its worker stopped before finishing (the job's lease ran out)")
+    if expired:
+        log.warning("took over %s job(s) whose worker stopped: %s", len(expired), ", ".join(f"{j['id']} {j['kind']}" for j in expired))
+    return len(expired)
+
+
+def _stop(*_) -> None:
+    shutdown.requested.set()
 
 
 def main() -> None:
@@ -723,7 +798,7 @@ def main() -> None:
     telemetry.register_worker_gauges()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    while not _stopping:
+    while not shutdown.requested.is_set():
         try:
             with psycopg.connect(INGEST_DB, row_factory=dict_row, autocommit=True) as conn:
                 org_id = conn.execute("SELECT kl.resolve_org(%s) AS id", (config.ORG_SLUG,)).fetchone()["id"]
@@ -732,8 +807,9 @@ def main() -> None:
                 conn.execute("SELECT set_config('kl.org_id', %s, false)", (str(org_id),))
                 log.info("worker ready (org %s; re-sync window %s min)", config.ORG_SLUG, RESYNC_MINUTES)
                 next_schedule = 0.0
-                while not _stopping:
+                while not shutdown.requested.is_set():
                     if time.monotonic() >= next_schedule:
+                        reap(conn)  # first, so a sync taken over counts as pending and isn't scheduled twice
                         scheduled = conn.execute(SCHEDULE_SQL, (RESYNC_MINUTES,)).fetchall()
                         if scheduled:
                             log.info("scheduled re-sync for %s connection(s)", len(scheduled))
@@ -764,7 +840,7 @@ def main() -> None:
                             log.warning("originals not encrypted: %s", type(e).__name__)
                         next_schedule = time.monotonic() + SCHEDULER_SECONDS
                     with conn.transaction():
-                        job = conn.execute(CLAIM_SQL).fetchone()
+                        job = conn.execute(CLAIM_SQL, (LEASE_SECONDS,)).fetchone()
                     if job is None:
                         time.sleep(POLL_SECONDS)
                         continue
