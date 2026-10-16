@@ -97,6 +97,21 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
             "unreadable": unreadable[:20]}
 
 
+def retire_unlisted(conn, connection: dict, source_kind: str, containers: list[str]) -> int:
+    """A connection's documents in a container it no longer reads (taken out of its scope, one its account lost, a
+    Slack channel its bot left) go, authorization first: a container nothing syncs would keep its readers frozen."""
+    rows = conn.execute("SELECT id, external_key FROM documents WHERE connection_id = %s AND source_kind = %s "
+                        "AND NOT (container_ref = ANY(%s))", (connection["id"], source_kind, containers)).fetchall()
+    if not rows:
+        return 0
+    held = {(t["user"], t["relation"], t["object"]) for r in rows for t in fga.read({"object": f"document:{r['external_key']}"})}
+    if held:
+        fga.write(deletes=held)
+    with conn.transaction():
+        conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([r["id"] for r in rows],))
+    return len(rows)
+
+
 def record_identities(conn, org_id, source: str, people: dict[str, dict]) -> int:
     """The source's people as the connector saw them (ADR 0011): {id as in ext:<source>.<id>: {"email", "name"}}, so
     identity matching can link each one to whoever signs in with the same verified company email. Only what the

@@ -99,6 +99,13 @@ MICROSOFT = os.environ.get("KL_FAKE_MICROSOFT", "http://fake-llm:8080/microsoft"
 GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False}
 GRAPH_TOKEN = "fake-graph-token"
 GRAPH_REQUESTS: list = []
+# A fake Slack Web API (S4): a workspace, its people, and channels with members and messages (threads with their
+# replies), which smoke sets through POST /slack/setup. Like Slack it answers 200 with ok: false for a bad token, pages
+# with an opaque cursor, and, when smoke asks (throttle), answers one history call with 429 and Retry-After.
+SLACK: dict = {"team": {"id": "T0SMOKE", "name": "Acme", "url": "https://acme-smoke.slack.com"}, "users": [], "channels": {},
+               "throttle": False}
+SLACK_TOKEN = "xoxb-smoke-slack-token"
+SLACK_PAGE = 2
 # A fake GCP (ADR 0011): the metadata server's token, for the runner's own workload identity, and Secret Manager's
 # access endpoint, holding the secrets smoke sets through POST /gcp/secrets as JSON objects.
 GCP_SECRETS: dict = {}
@@ -274,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, GRAPH_REQUESTS)
         if self.path.startswith("/microsoft/v1.0/"):
             return self._graph(urlparse(self.path))
+        if self.path.startswith("/slack/api/"):
+            return self._slack(urlparse(self.path))
         if self.path.startswith("/google/admin/directory/v1/"):
             return self._admin(urlparse(self.path))
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
@@ -383,6 +392,55 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"results": [{"name": label} for label in c.get("labels", [])], "_links": {}})
             return self._json(200, {"results": [{"title": t} for t in c.get("attachments", [])], "_links": {}})
         return self._json(404, {"message": "Not found"})
+
+    def _slack(self, url):
+        """The Web API methods the connector calls, at Slack's own paths, each answering as Slack does."""
+        if self.headers.get("Authorization") != f"Bearer {SLACK_TOKEN}":
+            return self._json(200, {"ok": False, "error": "invalid_auth"})
+        method, q = url.path[len("/slack/api/"):], {k: v[0] for k, v in parse_qs(url.query).items()}
+        team, channels = SLACK["team"], SLACK["channels"]
+        start = int((q.get("cursor") or "c:0")[2:])
+
+        def page(key, items, **more):
+            body = {"ok": True, key: items[start:start + SLACK_PAGE], **more}
+            if start + SLACK_PAGE < len(items):
+                body["response_metadata"] = {"next_cursor": f"c:{start + SLACK_PAGE}"}
+            return self._json(200, body)
+        channel = channels.get(q.get("channel", ""))
+        if method == "auth.test":
+            return self._json(200, {"ok": True, "team": team["name"], "team_id": team["id"], "user": "aerugo", "url": team["url"] + "/"})
+        if method == "conversations.list":
+            return page("channels", [{"id": cid, "name": c["name"], "is_private": c.get("private", False), "is_member": c.get("bot_member", True),
+                                      "is_ext_shared": c.get("shared", False), "is_shared": c.get("shared", False)} for cid, c in channels.items()])
+        if method == "users.list":
+            return page("members", SLACK["users"])
+        if channel is None:
+            return self._json(200, {"ok": False, "error": "channel_not_found"})
+        if method == "conversations.info":
+            return self._json(200, {"ok": True, "channel": {"id": q["channel"], "name": channel["name"], "is_private": channel.get("private", False),
+                                                            "is_member": channel.get("bot_member", True),
+                                                            "is_ext_shared": channel.get("shared", False), "is_shared": channel.get("shared", False)}})
+        if not channel.get("bot_member", True):
+            return self._json(200, {"ok": False, "error": "not_in_channel"})
+        if method == "conversations.members":
+            return page("members", channel.get("members", []))
+        if method == "conversations.history":
+            if SLACK.get("throttle"):
+                SLACK["throttle"] = False
+                self.send_response(429)
+                self.send_header("Retry-After", "1")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            oldest = float(q.get("oldest") or 0)
+            top = sorted((m for m in channel.get("messages", []) if float(m["ts"]) > oldest), key=lambda m: -float(m["ts"]))
+            return page("messages", [{k: v for k, v in m.items() if k != "replies"} for m in top], has_more=False)
+        if method == "conversations.replies":
+            parent = next((m for m in channel.get("messages", []) if m["ts"] == q.get("ts")), None)
+            if parent is None:
+                return self._json(200, {"ok": False, "error": "thread_not_found"})
+            return page("messages", [{k: v for k, v in parent.items() if k != "replies"}] + parent.get("replies", []), has_more=False)
+        self._json(200, {"ok": False, "error": "unknown_method"})
 
     def _graph(self, url):
         """Graph's users, deleted users, groups, and transitive members: small pages, each with an absolute
@@ -516,6 +574,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if path == "/gcp/secrets":  # smoke sets the fake Secret Manager's secrets, each a JSON object
             GCP_SECRETS.update(self._body()["secrets"])
+            return self._json(200, {})
+        if path == "/slack/setup":  # smoke sets the fake Slack workspace's people and channels
+            body = self._body()
+            SLACK.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle"))})
             return self._json(200, {})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))

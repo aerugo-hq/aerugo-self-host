@@ -2860,6 +2860,7 @@ FAKE_OKTA = "http://fake-llm:8080/okta"  # a fake Okta, inside the fake model (s
 FAKE_GCP = "http://fake-llm:8080/gcp"  # a fake GCP Secret Manager, inside the fake model (smoke only)
 FAKE_CONFLUENCE = "http://fake-llm:8080/confluence"  # a fake Confluence Cloud, inside the fake model (smoke only)
 FAKE_MICROSOFT = "http://fake-llm:8080/microsoft"  # a fake Microsoft Graph and Entra token endpoint (smoke only)
+FAKE_SLACK = "http://fake-llm:8080/slack"  # a fake Slack workspace (its Web API at /api), inside the fake model (smoke only)
 
 
 @check
@@ -3097,6 +3098,106 @@ def a_connection_never_touches_another_connections_documents():
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag.lower()}",))
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def slack_messages_carry_each_channels_own_readers():
+    """S4, Slack: a bot reads the channels it's in; a private channel's messages reach its members, a public channel's the whole org on a workspace confirmed as the company's, a channel shared with another organization only this workspace's members; a thread is one document; an edit, a deletion, a member removed, and the bot leaving a channel all carry over on the next sync; a rate limit is waited out; a user token, an internal address, a malformed channel, and another team's secret are refused"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    uid = {u: f"U{u.upper()}{tag}" for u in ("alice", "bob", "carol", "dave")}
+    person = lambda u, **more: {"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}, **more}
+    ts = lambda n: f"17600{n:05d}.000{n:03d}"
+    private, public, shared, gone = (f"C{x}{tag}" for x in ("PRIV", "PUB", "CONN", "BYE"))
+    channels = lambda: {
+        private: {"name": f"pay-{tag.lower()}", "private": True, "members": [uid["alice"], uid["carol"], f"UOTHER{tag}"], "messages": [
+            {"ts": ts(1), "user": uid["alice"], "text": f"Cutover rehearsal {tag} on Friday"},
+            {"ts": ts(2), "user": uid["carol"], "text": f"Rollback owner {tag}?", "thread_ts": ts(2), "reply_count": 1,
+             "replies": [{"ts": ts(3), "user": uid["alice"], "text": f"Carol owns rollback {tag}", "thread_ts": ts(2)}]}]},
+        public: {"name": f"general-{tag.lower()}", "members": [uid["alice"], uid["bob"]], "messages": [
+            {"ts": ts(10), "user": uid["bob"], "text": f"Office move {tag} next week"}]},
+        shared: {"name": f"connect-{tag.lower()}", "shared": True, "members": [uid["bob"], f"UOTHER{tag}"], "messages": [
+            {"ts": ts(20), "user": uid["bob"], "text": f"Vendor contract {tag} draft"}]},
+        gone: {"name": f"bye-{tag.lower()}", "bot_member": False, "members": [uid["dave"]], "messages": [
+            {"ts": ts(30), "user": uid["dave"], "text": f"Never indexed {tag}"}]}}
+    state = {"users": [person(u) for u in uid], "channels": channels(), "throttle": True}
+    principal = lambda u: f"ext:slack.{uid[u]}"
+    links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in uid}
+    name = f"slack-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    body = {"name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "company_workspace": True,
+            "history_days": 3650, "every_minutes": 60}  # its messages are a year old: a window of ten years reads them
+
+    def hits(u):
+        return {h["id"]: h for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    day = lambda channel: f"slack-{channel}-2025-10-09"
+    thread = f"slack-{private}-{ts(2)}"
+
+    def synced_after(moment):
+        got = api("GET", path, "alice").json()
+        return got.get("last_synced_at") and datetime.fromisoformat(got["last_synced_at"]) > moment
+
+    def resync(new_state):
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=new_state, timeout=10).status_code == 200
+        moment = datetime.fromisoformat(api("GET", path, "alice").json()["last_synced_at"])
+        assert api("POST", path + "/refresh", "alice").status_code == 202
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and not synced_after(moment):
+            time.sleep(2)
+        assert synced_after(moment), "the Slack connection didn't sync again"
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u in uid:  # each has linked their Slack account
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
+    fga.write(writes=links)
+    try:
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state, timeout=10).status_code == 200
+        refusals = {"a user token was accepted": {**body, "bot_token": "xoxp-a-person"},
+                    "an internal address was accepted": {**body, "api_base": "http://10.0.0.5"},
+                    "a malformed channel was accepted": {**body, "channels": ["general"]},
+                    "a reference to another team's secret was accepted": {**body, "bot_token": None,
+                                                                         "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}}
+        for problem, attempt in refusals.items():
+            assert api("POST", "/v1/workspaces/payments/connections/slack", "alice", json=attempt).status_code == 422, problem
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline and day(private) not in hits("alice"):
+            time.sleep(3)
+        alice, bob, carol, dave = (hits(u) for u in ("alice", "bob", "carol", "dave"))
+        assert day(private) in alice and thread in carol and day(private) not in bob and thread not in dave, \
+            "a private channel's messages didn't reach exactly its members"
+        assert day(public) in dave and day(public) in carol, "a public channel on the company's own workspace didn't reach the org"
+        assert day(shared) in bob and day(shared) not in alice and day(shared) not in dave, \
+            "a channel shared with another organization reached people outside it"
+        assert not any(k.startswith(f"slack-{gone}") for k in alice | dave), "a channel the bot isn't in was indexed"
+        assert alice[day(private)]["source_kind"] == "slack"
+        doc = api("GET", f"/v1/documents/{thread}/content", "alice").json()
+        assert f"Carol owns rollback {tag}" in json.dumps(doc), "a thread's reply isn't in its document"
+        named = api("GET", "/v1/documents", "alice", params={"scope": "org", "key": thread}).json()["documents"]
+        assert named and named[0]["container"]["name"] == f"#pay-{tag.lower()}", f"the thread isn't named by its channel: {named}"
+
+        edited = channels()
+        edited[private]["messages"][0] = {"ts": ts(1), "user": uid["alice"], "text": f"Cutover rehearsal moved {tag} to Monday",
+                                          "edited": {"ts": ts(4)}}
+        edited[private]["members"] = [uid["alice"], f"UOTHER{tag}"]  # carol leaves the private channel
+        edited[shared]["messages"] = []  # the vendor message is deleted
+        edited[public]["bot_member"] = False  # the bot leaves #general
+        resync({**state, "channels": edited, "throttle": False})
+        content = json.dumps(api("GET", f"/v1/documents/{day(private)}/content", "alice").json())
+        assert "moved" in content and "on Friday" not in content, "an edit didn't carry over"
+        assert thread not in hits("carol") and day(private) not in hits("carol"), "someone removed from a channel still finds it"
+        assert day(shared) not in hits("bob"), "a deleted message stayed indexed"
+        assert day(public) not in hits("dave"), "a channel the bot left stayed indexed"
+    finally:
+        api("DELETE", path, "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in uid],))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'slack' AND external_id LIKE %s", (f"%{tag}",))
 
 
 @check

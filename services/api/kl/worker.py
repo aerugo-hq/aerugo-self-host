@@ -13,17 +13,19 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, config, confluence, curator, directory, gdrive, imports, jira, knowledge, links, okf, originals, pipelines, privacy, telemetry
+from . import alerting, config, confluence, curator, directory, gdrive, imports, jira, knowledge, links, okf, originals, pipelines, privacy, slack, telemetry
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import embed, passage_text, vector_literal
 from .github import load_app
 from .sync_github import repo_key, sync_repo
+from .sync_items import retire_unlisted
 from .vault import vault
 
 INGEST_DB = os.environ.get("KL_INGEST_DATABASE_URL", "postgresql://kl_ingest:ingest-dev-only@postgres:5432/kl")
 POLL_SECONDS = float(os.environ.get("KL_WORKER_POLL_SECONDS", "2"))
 RESYNC_MINUTES = float(os.environ.get("KL_RESYNC_MINUTES", "10"))      # freshness window per connection
+OWNED_KINDS = {"jira", "confluence", "slack"}  # kinds whose documents carry their connection (migration 0040)
 SCHEDULER_SECONDS = float(os.environ.get("KL_SCHEDULER_SECONDS", "60"))  # how often to look for stale ones
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -203,6 +205,9 @@ def handle_connection_discover(conn, job) -> dict:
     elif c["kind"] == "confluence":  # S1: spaces, as the connection's account sees them
         connector = confluence.client_for(c)
         wanted = c["config"].get("spaces")  # None: every space the account can read
+    elif c["kind"] == "slack":  # S4: the channels its bot is in
+        connector = slack.client_for(c)
+        wanted = c["config"].get("channels")  # None: every channel the bot is in
     elif c["kind"] == "directory":  # ADR 0011: who's at the company, and who has left
         connector = directory.client_for(c)
         wanted = None
@@ -252,16 +257,21 @@ def handle_connection_sync(conn, job) -> dict:
     elif c["kind"] == "confluence":
         client = confluence.client_for(c)
         results = [confluence.sync_space(conn, c, client, ct["external_id"]) for ct in containers]
+    elif c["kind"] == "slack":
+        client = slack.client_for(c)
+        results = [slack.sync_channel(conn, c, client, ct["external_id"]) for ct in containers]
     elif c["kind"] == "directory":
         results = [directory.sync_directory(conn, c, directory.client_for(c))]
     else:
         raise RuntimeError(f"no connector for kind {c['kind']!r}")
+    retired = retire_unlisted(conn, c, c["kind"], [ct["external_id"] for ct in containers]) \
+        if c["kind"] in OWNED_KINDS else 0  # a container it no longer reads keeps nothing (migration 0040)
     embedded = embed_missing(conn)
     bronze = materialize_bronze(conn)
     linked = {**links.refresh(conn), "personal_data": privacy.scan(conn)}  # map links (N), personal data (I5)
     with conn.transaction():
         conn.execute("UPDATE connections SET last_synced_at = now(), updated_at = now() WHERE id = %s", (cid,))
-        audit(conn, c["org_id"], "connection.sync", {"connection_id": str(cid), "repos": results, "embedded": embedded,
+        audit(conn, c["org_id"], "connection.sync", {"connection_id": str(cid), "repos": results, "retired": retired, "embedded": embedded,
                                                      "bronze": bronze, **linked})
     return {"repos": len(results), "files": sum(r["files"] for r in results), "embedded": embedded}
 
@@ -479,7 +489,8 @@ def handle_import_retire(conn, job) -> dict:
     return {"documents": removed, "tuples": len(tuples)}
 
 
-SOURCE_KINDS = {"github": ["github", "okf"], "google": ["gdrive"], "jira": ["jira"], "confluence": ["confluence"]}  # what each kind of connection's documents are
+SOURCE_KINDS = {"github": ["github", "okf"], "google": ["gdrive"], "jira": ["jira"], "confluence": ["confluence"],
+                "slack": ["slack"]}  # what each kind of connection's documents are
 
 
 def handle_connection_retire(conn, job) -> dict:

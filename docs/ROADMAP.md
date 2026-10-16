@@ -65,11 +65,11 @@ baseline is already in place (only its golden-set part is left), so each source 
 - [x] People and their state; groups and their members; leavers revoked at once
 
 ### S4. Slack
-- [ ] A Slack app's bot token; the channels the bot is in, as containers by name
-- [ ] Messages and threads as documents (a thread is one document), with their authors
-- [ ] Readers: a public channel, the workspace's members; a private one, its members; a shared channel, only this
+- [x] A Slack app's bot token; the channels the bot is in, as containers by name
+- [x] Messages and threads as documents (a thread is one document), with their authors
+- [x] Readers: a public channel, the workspace's members; a private one, its members; a shared channel, only this
       workspace's members
-- [ ] Edits and deletions followed; the workspace's retention respected
+- [x] Edits and deletions followed; the workspace's retention respected
 
 ### S5. Microsoft 365
 - [ ] SharePoint sites granted through `Sites.Selected` (never tenant-wide); document libraries as containers
