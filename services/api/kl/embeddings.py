@@ -5,6 +5,7 @@ the stack: no keys, no cost, and no text leaves the cell. An org or a team can r
 provider in embedding_models; OpenAI-compatible endpoints (OpenAI, Ollama, vLLM, LiteLLM) work today.
 Embedding calls are egress like any model call, so the M4 egress policy will govern them too."""
 import os
+import re
 from functools import lru_cache
 
 import httpx
@@ -44,10 +45,22 @@ def embed_query(provider: str, model: str, text: str, base_url: str | None = Non
     return embed(provider, model, [text], base_url=base_url, api_key=api_key)[0]
 
 
-def passage_text(title: str | None, heading: str | None, body: str) -> str:
-    """Contextual chunk text: the title and section path travel with the body, so a chunk saying
-    'fail over only if lag stays high' is still found as part of the payments incident runbook."""
-    return "\n".join(part for part in (title, heading, body) if part)
+CONTEXT = 2  # how chunks are embedded now (Q2): with the document's opening line; older embeddings are made again
+OPENING = re.compile(r"^(.{20,240}?[.!?])(\s|$)", re.S)
+
+
+def opening_line(text: str | None) -> str:
+    """A document's opening, in a line: its first sentence, or its first 200 characters."""
+    flat = " ".join((text or "").split())
+    m = OPENING.match(flat)
+    return m[1] if m else flat[:200]
+
+
+def passage_text(title: str | None, heading: str | None, body: str, opening: str | None = None) -> str:
+    """Contextual chunk text: the title, the section path, and (past the first chunk) the document's opening line
+    travel with the body, so a chunk saying 'fail over only if lag stays high' is still found as part of the payments
+    incident runbook, and one saying "it" knows what "it" is."""
+    return "\n".join(part for part in (title, heading, opening, body) if part)
 
 
 def vector_literal(vector: list[float]) -> str:

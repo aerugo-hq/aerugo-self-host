@@ -106,42 +106,42 @@ baseline is already in place (only its golden-set part is left), so each source 
 - [x] `make eval-scenario` fails on a regression (a case that finds less, or MRR falling past a tolerance), and says
       what improved, to record next
 - [x] CI runs it after smoke
-- [ ] The golden set (`kl.eval`, slice M2) in the same scorecard
+- [x] The golden set (`kl.eval`, slice M2) in the same scorecard
 
 ### Q2. Context at index time, and entity resolution (K4)
-- [ ] Each chunk carries where it sits: its document's title, its section path, and a one-line summary of the document,
+- [x] Each chunk carries where it sits: its document's title, its section path, and a one-line summary of the document,
       embedded with it
-- [ ] Entities (tables, jobs, tickets, services), with their aliases (`ORDER_HIST`, `edp.orders`, "the EDW orders table")
-- [ ] A query naming one alias finds documents that name the entity any other way
-- [ ] Measured: Q1's scorecard improves on the lookup and cross-team cases
+- [x] Entities (tables, jobs, tickets, services), with their aliases (`ORDER_HIST`, `edp.orders`, "the EDW orders table")
+- [x] A query naming one alias finds documents that name the entity any other way
+- [ ] Measured: Q1's scorecard improves on the lookup and cross-team cases (both were already at their best, 1 of 1 and 2 of 2: nothing to improve on yet)
 
 ### Q3. Claim-level checking (K9)
-- [ ] Each sentence of an answer checked against the passages it cites
-- [ ] A claim its citations don't support is marked in the answer, or removed
-- [ ] Confidence thresholds calibrated against the evaluation set, not guessed
+- [x] Each sentence of an answer checked against the passages it cites
+- [x] A claim its citations don't support is marked in the answer, or removed
+- [x] Confidence thresholds calibrated against the evaluation set, not guessed
 
 ### Q4. Lineage in search and Ask (K8)
-- [ ] "What breaks if..." walks lineage edges, only within what the person may see
-- [ ] Search results gain the assets a result's lineage reaches
-- [ ] The `impact-cross-team` case passes
+- [x] "What breaks if..." walks lineage edges, only within what the person may see
+- [x] Search results gain the assets a result's lineage reaches
+- [x] The `impact-cross-team` case passes
 
 ### Q5. Decisions (K5)
-- [ ] Decisions extracted from Jira and Confluence (decision records, "we decided", resolutions), with their dates and
+- [x] Decisions extracted from Jira and Confluence (decision records, "we decided", resolutions), with their dates and
       who made them
-- [ ] A decision that replaced another ranks first, and says what it replaced
-- [ ] The `decision-latest-first` case passes
+- [x] A decision that replaced another ranks first, and says what it replaced
+- [x] The `decision-latest-first` case passes
 
 ### Q6. Who to ask knows who has left (K6)
-- [ ] Who to ask drops, or marks, the people a directory says have left
-- [ ] It suggests their team instead
+- [x] Who to ask drops, or marks, the people a directory says have left
+- [x] It suggests their team instead
 
 ### Q7. Attachments, and Git authors (K2b)
-- [ ] Attachments (Confluence, Jira, Drive) as their own documents, linked to their page, with its readers
-- [ ] Git authors: who wrote what, into who to ask
+- [x] Attachments (Confluence, Jira, Drive) as their own documents, linked to their page, with its readers
+- [x] Git authors: who wrote what, into who to ask
 
 ### Q8. Diagrams, audio, and video (K11)
-- [ ] Diagrams and images: their text and structure, read by a vision model the team chose (opt-in)
-- [ ] Audio and video: transcripts (a source's own, or a speech model's), with timestamps a citation can point to
+- [x] Diagrams and images: their text and structure, read by a vision model the team chose (opt-in)
+- [x] Audio and video: transcripts (a source's own, or a speech model's), with timestamps a citation can point to
 
 ## 3. Experience: how people use it
 

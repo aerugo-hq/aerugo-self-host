@@ -546,6 +546,8 @@ details.raw pre { margin: 8px 0 0; padding: 12px; overflow-x: auto; border-radiu
 .answer-text blockquote { padding-left: 12px; border-left: 3px solid var(--border-strong); color: var(--fg-2); }
 .confidence-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 14px 0 0; color: var(--muted); font-size: 12.5px; line-height: 18px; }
 .confidence-line b { color: var(--fg-2); font-weight: 600; }
+.claims-unsupported { margin: 10px 0 0; padding: 8px 12px; border-left: 2px solid var(--warning-border); background: var(--warning-tint); color: var(--fg-2); font-size: 12.5px; line-height: 18px; }
+.claims-unsupported ul { margin: 4px 0 0; padding-left: 18px; }
 .cites { display: flex; flex-direction: column; gap: 2px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 .cite { display: flex; align-items: center; gap: 8px; height: 28px; border-radius: 4px; transition: color var(--ease); }
 .cite:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }

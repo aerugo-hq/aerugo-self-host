@@ -207,6 +207,54 @@ def scorecard(rows) -> dict:
     }
 
 
+def baseline_for(name: str) -> dict | None:
+    """One set's recorded scorecard (Q1: "migration", the scenario's; "golden", the golden set's), or None. A file from
+    before the golden set joined is the scenario's alone."""
+    if not BASELINE.exists():
+        return None
+    held = json.loads(BASELINE.read_text())
+    sets = held if "cases" not in held else {"migration": held}
+    return sets.get(name)
+
+
+def with_set(name: str, card: dict) -> dict:
+    """The whole baseline file with one set's scorecard replaced, the other sets as they were."""
+    held = json.loads(BASELINE.read_text()) if BASELINE.exists() else {}
+    sets = held if "cases" not in held else {"migration": held}
+    return {**sets, name: card}
+
+
+def golden_scorecard(report: dict) -> dict:
+    """The golden set's run (kl.eval) as a scorecard of the same shape: each question found or not in the top results,
+    and where its first right answer was."""
+    cases = {f"{c['user']}: {c['query']}": {"found": int(c["rank"] is not None), "of": 1, "first": c["rank"]} for c in report["cases"]}
+    count = max(len(cases), 1)
+    return {"set": "golden", "version": report["version"], "k": K,
+            "recall": round(sum(c["found"] for c in cases.values()) / count, 4),
+            "mrr": round(sum(1 / c["first"] if c["first"] else 0 for c in cases.values()) / count, 4), "cases": cases}
+
+
+def gate(name: str, card: dict, out) -> int:
+    """Hold a scorecard to its set's baseline: say what's better and new, fail on what's worse."""
+    baseline = baseline_for(name)
+    if baseline is None:
+        print(f"  No {name} baseline yet: make eval-baseline records one, and then a regression fails the run.", file=out)
+        return 0
+    worse, better, new = compare(card, baseline)
+    for line in better:
+        print(f"  BETTER: {line}", file=out)
+    for case_id in new:
+        print(f"  NEW: {case_id}, not in the baseline yet", file=out)
+    if better or new:
+        print("  The bar can rise: make eval-baseline records it.", file=out)
+    for line in worse:
+        print(f"  WORSE: {line}", file=out)
+    if worse:
+        return 1
+    print("  No regression against the baseline.", file=out)
+    return 0
+
+
 def compare(card: dict, baseline: dict) -> tuple[list[str], list[str], list[str]]:
     """Against the baseline: what got worse (each fails the run), what got better (record it), and what's new."""
     worse, better = [], []
@@ -261,25 +309,10 @@ def main(argv: list[str]) -> int:
         return 1  # never recorded as a baseline
     print("\n  No permission leaks.", file=out)
     if recording:
-        print(json.dumps(card, indent=2, sort_keys=True), file=baseline_out)
-        print(f"  Recorded as the baseline: commit {BASELINE.name}.", file=out)
+        print(json.dumps(with_set("migration", card), indent=2, sort_keys=True), file=baseline_out)
+        print(f"  Recorded as the scenario's baseline: commit {BASELINE.name}.", file=out)
         return 0
-    if not BASELINE.exists():
-        print(f"  No baseline yet: make eval-baseline records one, and then a regression fails the run.", file=out)
-        return 0
-    worse, better, new = compare(card, json.loads(BASELINE.read_text()))
-    for line in better:
-        print(f"  BETTER: {line}", file=out)
-    for case_id in new:
-        print(f"  NEW: {case_id}, not in the baseline yet", file=out)
-    if better or new:
-        print("  The bar can rise: make eval-baseline records it.", file=out)
-    for line in worse:
-        print(f"  WORSE: {line}", file=out)
-    if worse:
-        return 1
-    print("  No regression against the baseline.", file=out)
-    return 0
+    return gate("migration", card, out)
 
 
 if __name__ == "__main__":

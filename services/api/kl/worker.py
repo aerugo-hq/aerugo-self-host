@@ -16,7 +16,8 @@ from psycopg.types.json import Jsonb
 from . import alerting, catalogs, config, confluence, curator, dataplex, datahub, directory, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
-from .embeddings import embed, passage_text, vector_literal
+from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
+from .media import media_for
 from .github import load_app
 from .sync_github import repo_key, sync_repo
 from .sync_items import retire_unlisted
@@ -105,7 +106,8 @@ def audit(conn, org_id, action: str, details: dict) -> None:
 # Every chunk gets a vector from each workspace's effective model: the workspace override if it has
 # one, otherwise the org default. Embeddings copy the chunk's ACL so vector search pre-filters too.
 MISSING_EMBEDDINGS_SQL = """
-SELECT DISTINCT c.id AS chunk_id, c.org_id, c.body, c.heading_path, c.acl_principals, d.title,
+SELECT DISTINCT c.id AS chunk_id, c.org_id, c.body, c.heading_path, c.acl_principals, d.title, c.ordinal,
+       (SELECT left(o.body, 600) FROM chunks o WHERE o.document_id = d.id ORDER BY o.ordinal LIMIT 1) AS opening,
        m.id AS model_id, m.provider, m.model, m.dims, m.base_url, m.credential_ref
 FROM chunks c
 JOIN documents d ON d.id = c.document_id
@@ -115,7 +117,7 @@ JOIN embedding_models m ON m.status = 'active' AND m.org_id = c.org_id
        OR (m.workspace_id IS NULL AND NOT EXISTS (
              SELECT 1 FROM embedding_models o WHERE o.workspace_id = wd.workspace_id AND o.status = 'active')))
 LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id AND e.model_id = m.id
-WHERE e.chunk_id IS NULL
+WHERE e.chunk_id IS NULL OR e.context < %s  -- not embedded yet, or embedded the older way (Q2)
 LIMIT 512
 """
 EMBED_BATCH = 64
@@ -124,7 +126,7 @@ EMBED_BATCH = 64
 def embed_missing(conn) -> int:
     done = 0
     while True:
-        rows = conn.execute(MISSING_EMBEDDINGS_SQL).fetchall()
+        rows = conn.execute(MISSING_EMBEDDINGS_SQL, (CONTEXT,)).fetchall()
         if not rows:
             return done
         by_model: dict = {}
@@ -136,16 +138,18 @@ def embed_missing(conn) -> int:
             for i in range(0, len(group), EMBED_BATCH):
                 batch = group[i:i + EMBED_BATCH]
                 vectors = embed(m["provider"], m["model"],
-                                [passage_text(r["title"], r["heading_path"], r["body"]) for r in batch],
+                                [passage_text(r["title"], r["heading_path"], r["body"], opening_line(r["opening"]) if r["ordinal"] else None)
+                                 for r in batch],
                                 base_url=m["base_url"], api_key=api_key)
                 if len(vectors) != len(batch) or any(len(v) != m["dims"] for v in vectors):
                     raise RuntimeError(f"{m['model']} returned {len(vectors)} vectors for {len(batch)} chunks, "
                                        f"or the wrong dimension (expected {m['dims']})")
                 with conn.transaction():
                     for r, v in zip(batch, vectors):
-                        conn.execute("INSERT INTO chunk_embeddings (chunk_id, model_id, org_id, acl_principals, embedding) "
-                                     "VALUES (%s, %s, %s, %s, %s::vector) ON CONFLICT (chunk_id, model_id) DO NOTHING",
-                                     (r["chunk_id"], model_id, r["org_id"], r["acl_principals"], vector_literal(v)))
+                        conn.execute("INSERT INTO chunk_embeddings (chunk_id, model_id, org_id, acl_principals, embedding, context) "
+                                     "VALUES (%s, %s, %s, %s, %s::vector, %s) ON CONFLICT (chunk_id, model_id) DO UPDATE SET "
+                                     "embedding = EXCLUDED.embedding, acl_principals = EXCLUDED.acl_principals, context = EXCLUDED.context",
+                                     (r["chunk_id"], model_id, r["org_id"], r["acl_principals"], vector_literal(v), CONTEXT))
                 done += len(batch)
 
 
@@ -288,7 +292,10 @@ def handle_connection_sync(conn, job) -> dict:
         return {"skipped": "connection disabled"}
     containers = conn.execute("SELECT external_id, default_ref FROM connection_containers "
                               "WHERE connection_id = %s AND selected ORDER BY external_id", (cid,)).fetchall()
-    results = sync_containers(conn, c, containers)
+    # Q8: the team's media models, asked for by the classification each connector writes, so a model only ever gets what
+    # its allowed classifications include, decided where the classification is.
+    media = lambda classification, team=c["workspace_id"]: media_for(conn, team, classification)
+    results = sync_containers(conn, {**c, "media": media}, containers)
     retired = retire_unlisted(conn, c, source_kind_of(c), [ct["external_id"] for ct in containers]) \
         if c["kind"] in OWNED_KINDS else 0  # a container it no longer reads keeps nothing (migration 0040)
     embedded = embed_missing(conn)

@@ -25,6 +25,8 @@ from .authz import fga
 from .connectors import Container, Health
 from .jira import SITE, account
 from .sync_github import team_for
+from .attachments import MAX_BYTES as MAX_ATTACHMENT, MAX_PER_PAGE, attachment_item
+from .decisions import confluence_items, heading as decision_heading
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
 
@@ -34,6 +36,9 @@ DEFAULT_GROUP = re.compile(r"^confluence-users(-.+)?$")  # the group every Confl
 SEPARATOR = " › "  # between a path's titles
 MAX_TEXT = 400_000
 EVERYONE = "everyone"  # internal: a space anyone with Confluence access may read
+
+
+ATTACHMENT_ID = re.compile(r"^att[0-9]{1,20}$")
 
 
 def allowed_base(api_base: str) -> bool:
@@ -325,6 +330,19 @@ class ConfluenceClient:
     def attachments(self, content_id: str, kind: str) -> list[dict]:
         return self._all(f"api/v2/{kind}/{content_id}/attachments", limit=500)
 
+    def download(self, link: str) -> bytes:
+        """An attachment's bytes, from its download link on this site only, up to the attachments' cap."""
+        if not link.startswith("/download/"):
+            raise ValueError("an attachment downloads from its own site")
+        with httpx.stream("GET", f"{self.base}/wiki{link}", headers=self.headers, timeout=60, follow_redirects=False) as r:
+            r.raise_for_status()
+            data = b""
+            for chunk in r.iter_bytes():
+                data += chunk
+                if len(data) > MAX_ATTACHMENT:
+                    raise ValueError("the attachment is larger than the cap")
+            return data
+
     def parent_of(self, content_id: str) -> str | None:
         """A folder's parent, for pages that sit under one."""
         f = self._get(f"api/v2/folders/{content_id}")
@@ -444,15 +462,29 @@ def items_for_space(client, cfg: dict, key: str, seen: dict) -> list[Item]:
         webui = (c.get("_links") or {}).get("webui")
         uri = f"{client.base}/wiki{webui}" if webui and webui.startswith("/") else f"{client.base}/wiki/pages/viewpage.action?pageId={cid}"
 
-        def sections(c=c, cid=cid):
-            title, parts = storage_sections(((c.get("body") or {}).get("storage") or {}).get("value") or "", c.get("title") or "")
-            files = [a.get("title") for a in client.attachments(cid, c["_kind"]) if a.get("title")]
+        attached = client.attachments(cid, c["_kind"])[:MAX_PER_PAGE]  # this page's own, bound to its sections below
+
+        def sections(c=c, cid=cid, attached=attached):
+            storage = ((c.get("body") or {}).get("storage") or {}).get("value") or ""
+            title, parts = storage_sections(storage, c.get("title") or "")
+            at = str((c.get("version") or {}).get("createdAt") or "")[:10] or None
+            parts += [(decision_heading(None, at), text) for text in confluence_items(storage)]  # Q5: its decision items
+            files = [a.get("title") for a in attached if a.get("title")]
             if files:
                 parts.append(("Attachments", "\n".join(f"- {name}" for name in files)))
             return title, parts
 
         items.append(Item(key=f"confluence-{cid}", uri=uri, version=str((c.get("version") or {}).get("number") or ""),
                           title=c.get("title") or f"Page {cid}", path=SEPARATOR.join(titles), acl=acl, sections=sections))
+        for a in attached:  # Q7: each attachment its own document, with exactly this page's readers
+            aid, link = str(a.get("id") or ""), str(a.get("downloadLink") or "")
+            if not ATTACHMENT_ID.fullmatch(aid) or not link.startswith("/download/"):
+                continue
+            item = attachment_item(f"confluence-{aid}", f"{client.base}/wiki{link}", str((a.get("version") or {}).get("number") or ""),
+                                   str(a.get("title") or ""), a.get("fileSize"), c.get("title") or f"Page {cid}", uri,
+                                   SEPARATOR.join(titles + [c.get("title") or ""]), acl, lambda link=link: client.download(link))
+            if item:
+                items.append(item)
     return items
 
 

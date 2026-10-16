@@ -479,10 +479,39 @@ connection). Graph and Drive sign nothing, so they get no hook (`docs/plans/deci
 Smoke: `a_revoked_jira_grant_leaves_on_a_signed_webhook_and_on_the_refresh` and
 `slack_hooks_are_signed_fresh_and_taken_once`. `docs/connectors/permission-changes.md`. Not built: Confluence and
 Jira's own event filters (any signed delivery refreshes), and Terraform for webhooks (a secret shown once).
+Q1 to Q8 (quality). Q1: one baseline file for both evaluation sets (`evals_baseline.json`: `migration`, the scenario's,
+and `golden`; `baseline_for`, `with_set`, `golden_scorecard`, `gate` in `kl/evals.py`); `make eval` holds the golden set
+to it as `make eval-scenario` holds the scenario, `make eval-baseline` records both (the golden set first, on the plain
+seed), and CI runs `make eval` after smoke. Q2: each chunk is embedded with its document's opening line past the first
+chunk (`embeddings.opening_line`, `passage_text`; migration 0044's `chunk_embeddings.context`, `CONTEXT`, so older
+embeddings are made again as the worker goes), and search expands a query naming an entity's alias to its other names
+(`other_names`, the `alias` channel, `ALIAS_WEIGHT`), only through concepts the caller may see, an alias two pages
+declare naming neither. Q3: claim-level checking (`kl/claims.py`): each sentence's content words against the passages
+it cites, supported at the org's calibrated threshold (migration 0045's `claim_calibration`, fitted by `make eval` from
+the golden set's key facts against their right documents and others: `claim_samples`, `calibrate_claims`) or the
+default; the answer carries `claims`, kept with its message and hidden with it; confidence is never high with an
+unsupported claim, and low when none is supported; Ask lists them. Q4: lineage hops in search and Ask: after the
+references hop, a walk (`lineage_reach`, three hops either way) from the assets a query names and the results describe,
+through the caller's own teams' lineage (`visible_lineage`), adds the pages describing what it reaches
+(`LINEAGE_PAGES_SQL`), each post-checked; each result says what its assets feed (`reaches`). Q5: decisions as their own
+items (`kl/decisions.py`): a Jira comment that records one and an issue's resolution, and a Confluence page's decision
+items, become sections headed "Decision by <who> on <date>"; `GET /v1/decisions` lists them latest first, each saying
+what it replaced (the one before it in its document, or across a `supersedes` relation), through RLS and the
+post-check. Q6: who to ask drops people a directory says have left (`LEFT_SQL`: every listing inactive, in a directory
+that isn't paused), lists them as `left` with their teams the asker is on, and suggests those teams. Q7: Confluence's
+and Jira's attachments become their own documents (`kl/attachments.py`: the extractors, up to 20 MB, exactly their
+page's readers, downloaded from the site only, opening with their page's address so references link them), and Git
+authors (migration 0046's `document_authors`, `sync_github.authors_of` and `record_authors`, read again only when a
+file changes) are who to ask, "wrote it (N commits)", as far as people linked their GitHub accounts. Q8: diagrams,
+audio, and video (`kl/media.py`): WebVTT and SubRip transcripts become sections by the minute they start ("At
+00:01:30"); a team admin opts in to a vision and a speech model from the team's own registry (`PUT
+/v1/workspaces/{ws}/media`, migration 0047's `team_media`); `media_for` hands the extractors only models whose allowed
+classifications include the content's (egress); `gateway.describe_image` and `gateway.transcribe`; Drive's syncs use
+them. Smoke: a check for each. Not built: a model judging entailment on top of the word check, decisions in Ask's
+ranking beyond K5's, Drive's comments, attachments read by the media models, and media in GitHub and Microsoft 365.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1 and S2 to S8; next Q1 (its golden-set part) to Q8;
-E1 to E3; A1 to A4; G2 and G3.
+done, and so are G1, S2 to S8, and Q1 to Q8; next E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;

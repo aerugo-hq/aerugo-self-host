@@ -32,6 +32,8 @@ from .connections_api import router as connections_router
 from .db import connect, resolve_org_id, scoped
 from .auth import SERVICE_PREFIX
 from .principals import is_valid as valid_principal
+from .claims import DEFAULT_THRESHOLD, check as check_claims
+from .decisions import ordered as order_decisions, parse_heading as parse_decision
 from .confidence import confidence
 from . import identity_match
 from .embeddings import embed_query, vector_literal
@@ -236,6 +238,74 @@ WHERE k.tier IN ('silver', 'gold') AND w.slug = ANY(%(targets)s)
 ORDER BY d.id, c.ordinal
 """
 
+# Q2: the entities a query names. A curated page declares an entity's names among its aliases (ORDER_HIST, edp.orders,
+# "the EDW orders table"); a query naming one also searches the others, through the concepts the caller may see (RLS)
+# in the scope's teams. An alias two pages declare names neither, as on the Map (K4).
+ALIASES_SQL = """
+SELECT k.id, k.title, k.aliases
+FROM concepts k
+JOIN documents d            ON d.id = k.document_id
+JOIN workspace_documents wd ON wd.document_id = d.id
+JOIN workspaces w           ON w.id = wd.workspace_id
+WHERE k.tier IN ('silver', 'gold') AND w.slug = ANY(%(targets)s) AND cardinality(k.aliases) > 0
+"""
+ALIAS_SQL = SEARCH_SQL.replace("plainto_tsquery('english', %(q)s)", "websearch_to_tsquery('english', %(q)s)")
+ALIAS_WEIGHT = 0.8  # another name for what the query names: strong, but below the query's own words
+
+
+def other_names(conn, q: str, targets: list[str]) -> list[str]:
+    """The other names of every entity the query names by one of its aliases, unambiguously, quoted for websearch."""
+    lowered, named, owners = q.lower(), {}, {}
+    for k in conn.execute(ALIASES_SQL, {"targets": targets}).fetchall():
+        names = {a.strip() for a in k["aliases"] if a and a.strip()} | ({k["title"].strip()} if k["title"] else set())
+        named[k["id"]] = names
+        for a in names:
+            owners.setdefault(a.lower(), set()).add(k["id"])
+    out: dict[str, str] = {}
+    for kid, names in named.items():
+        hit = [a for a in names if len(owners[a.lower()]) == 1 and len(a) >= 3
+               and re.search(r"(?<![\w.])" + re.escape(a.lower()) + r"(?![\w])", lowered)]
+        if hit:
+            out.update({n.lower(): n for n in names if n.lower() not in lowered and '"' not in n})
+    return [out[k] for k in sorted(out)][:20]
+
+
+# Q4 (K8): lineage hops inside search and Ask. The pages that declare an asset's name among their aliases describe it;
+# a walk from the assets a question names, and from those the results describe, through the lineage the caller's own
+# teams reported (visible_lineage), reaches other assets, and the pages describing them come along, each post-checked.
+LINEAGE_PAGES_SQL = """
+SELECT DISTINCT ON (d.id)
+       d.external_key, d.title, d.source_uri, d.source_kind, d.source_version, d.classification, d.tier, d.audience,
+       c.heading_path, left(c.body, 280) AS snippet, c.body
+FROM concepts k
+JOIN documents d            ON d.id = k.document_id
+JOIN chunks c               ON c.document_id = d.id
+JOIN workspace_documents wd ON wd.document_id = d.id
+JOIN workspaces w           ON w.id = wd.workspace_id
+CROSS JOIN LATERAL unnest(k.aliases) n
+WHERE k.tier IN ('silver', 'gold') AND w.slug = ANY(%(targets)s) AND lower(n) = ANY(%(names)s)
+ORDER BY d.id, c.ordinal
+"""
+DESCRIBED_SQL = """
+SELECT d.external_key, array_agg(DISTINCT lower(n)) AS names
+FROM concepts k JOIN documents d ON d.id = k.document_id CROSS JOIN LATERAL unnest(k.aliases) n
+WHERE d.external_key = ANY(%(keys)s) GROUP BY d.external_key
+"""
+IDENTIFIER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]{2,}")
+LINEAGE_HOPS = 3
+
+
+def lineage_reach(edges: set, start: set[str], downstream: bool, hops: int = LINEAGE_HOPS) -> set[str]:
+    """The assets within `hops` of `start` along lineage, downstream (what it feeds) or upstream (what feeds it)."""
+    seen, frontier = set(), set(start)
+    for _ in range(hops):
+        frontier = {(t if downstream else s) for s, t in edges if (s if downstream else t) in frontier} - start - seen
+        if not frontier:
+            break
+        seen |= frontier
+    return seen
+
+
 # One hop along the entity graph. Edges are visible only from visible concepts (RLS), targets must be
 # visible themselves, and the hop may leave the query's scope but never the workspaces the caller
 # can reach, so cross-team questions work and private workspaces stay private.
@@ -314,11 +384,16 @@ def _retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
         titled = sorted(conn.execute(TITLE_SQL, {"q": q, "targets": targets}).fetchall(),
                         key=lambda r: r["rank"], reverse=True) if words else []
         telemetry.set_attributes(s, rows=len(titled))
-    weights = {"title": TITLE_WEIGHT}
-    base = fuse([("lexical", lexical), ("vector", vector), ("title", titled)], weights=weights)
+    with telemetry.span("retrieve.alias") as s:  # Q2: what else the entities it names are called
+        names = other_names(conn, q, targets) if words and not focus else []
+        aliased = sorted(conn.execute(ALIAS_SQL, {"q": " or ".join(f'"{n}"' for n in names), "targets": targets}).fetchall(),
+                         key=lambda r: r["rank"], reverse=True) if names else []
+        telemetry.set_attributes(s, names=len(names), rows=len(aliased))
+    weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT}
+    base = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)], weights=weights)
     # Curated knowledge gets its own channel: it wins when it matches as well as the evidence does,
     # not when it barely matches.
-    candidates = fuse([("lexical", lexical), ("vector", vector), ("title", titled),
+    candidates = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased),
                        ("curated", [r for r in base if r.get("tier") in CURATED])], weights=weights)
     canonical = conn.execute(CANONICAL_SQL, {"q": q.strip().lower(), "targets": targets}).fetchall() if words else []
     if canonical:
@@ -406,6 +481,36 @@ def _retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
                     seen.add(row["external_key"])
                     returned.append({**row, "matched": ["references"], "score": 0.0})
             telemetry.set_attributes(s, added=len(returned) - before)
+    # Lineage (Q4): what the assets a question names, or the results describe, feed and are fed by, through the
+    # caller's own teams' lineage only; the pages describing them come along when there's room, each authorized.
+    if returned and not focus:
+        with telemetry.span("retrieve.lineage") as s:
+            nodes, edges = visible_lineage(conn, sorted(member_of))
+            by_name: dict[str, set[str]] = {}
+            for aid, node in nodes.items():
+                by_name.setdefault(node["name"].lower(), set()).add(aid)
+            described = {r["external_key"]: set(r["names"]) for r in conn.execute(
+                DESCRIBED_SQL, {"keys": [r["external_key"] for r in returned]}).fetchall()} if nodes else {}
+            named = {aid for word in IDENTIFIER.findall(q) for aid in by_name.get(word.lower().rstrip(".?!,"), ())}
+            start = named | {aid for names in described.values() for n in names for aid in by_name.get(n, ())}
+            reached = lineage_reach(edges, start, True) | lineage_reach(edges, start, False) if start else set()
+            before, seen = len(returned), {r["external_key"] for r in returned}
+            if reached and len(returned) < limit:
+                names = sorted({nodes[a]["name"].lower() for a in reached})
+                for row in conn.execute(LINEAGE_PAGES_SQL, {"names": names, "targets": resolve_targets(conn, caller, "org")}).fetchall():
+                    if len(returned) >= limit:
+                        break
+                    if row["external_key"] not in seen and allowed(row):
+                        seen.add(row["external_key"])
+                        returned.append({**row, "matched": ["lineage"], "score": 0.0})
+            if nodes:  # each result names what its assets feed, as far as the caller's teams' lineage says
+                described = {r["external_key"]: set(r["names"]) for r in conn.execute(  # the pages the walk added, too
+                    DESCRIBED_SQL, {"keys": [r["external_key"] for r in returned]}).fetchall()}
+                for r in returned:
+                    if r["external_key"] in described:
+                        mine = {aid for n in described[r["external_key"]] for aid in by_name.get(n, ())}
+                        r["reaches"] = sorted({nodes[a]["name"] for a in lineage_reach(edges, mine, True)})[:10]
+            telemetry.set_attributes(s, assets=len(reached), added=len(returned) - before)
     # Current knowledge first (slice K5): a returned page another returned page supersedes moves just after it. Only
     # pages that passed the post-check take part, so the order never hints at anything the caller can't see.
     keys = [r["external_key"] for r in returned]
@@ -628,6 +733,7 @@ def search(
             "matched": r["matched"],
             "score": round(float(r["score"]), 5),
             **({"related_to": r["related_to"], "relation": r["relation"]} if r.get("related_to") else {}),
+            **({"reaches": r["reaches"]} if r.get("reaches") else {}),  # Q4: what the assets it describes feed
         } for r in returned],
         "note": ACCESS_NOTE,
     }
@@ -1868,12 +1974,15 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
                                                          usage.get("prompt_tokens"), usage.get("completion_tokens")))
             budget = budget_after(conn, org_id, caller, model, budget, usage)
         cited = {int(n) for n in re.findall(r"\[(\d{1,2})\]", answer)}
+        fitted = conn.execute("SELECT threshold FROM claim_calibration").fetchone()  # Q3: the evaluation set's, or the default
+        claims = check_claims(answer, {n: r["body"] for n, r in enumerate(sources, 1)},
+                              fitted["threshold"] if fitted else DEFAULT_THRESHOLD) if answer != NOT_FOUND else []
         # Confidence (slice K9), from what the answer cites and whether any of it has been superseded, never from the
         # model's opinion of itself. Supersession is looked up among the visible sources only.
         keys = [r["external_key"] for r in sources]
         pairs = [(row["newer"], row["older"]) for row in conn.execute(SUPERSEDES_SQL, {"keys": keys}).fetchall()] if len(keys) > 1 else []
         sure = confidence(answer != NOT_FOUND, [{"id": r["external_key"], "tier": r.get("tier")}
-                                                for n, r in enumerate(sources, 1) if n in cited], pairs)
+                                                for n, r in enumerate(sources, 1) if n in cited], pairs, claims, bool(fitted))
         audit(conn, org_id, caller.username, "ask", targets, {
             "question": question, "model": model,
             "sources": [r["external_key"] for r in sources], "withheld_by_egress": withheld,
@@ -1890,6 +1999,7 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
                       for n, r in enumerate(sources, 1)],
         "withheld_by_policy": len(withheld),
         "confidence": sure,
+        "claims": claims,
         "manifest": [{"id": r["external_key"], "source_version": r["source_version"]} for r in sources],
         **({"budget": budget} if budget else {}),
         "note": ACCESS_NOTE,
@@ -1954,16 +2064,16 @@ def openable(conn, org_id: str, caller: Caller, keys: set[str]) -> set[str]:
 def conversation_messages(conn, org_id: str, caller: Caller, cid: str) -> list[dict]:
     """A conversation's messages as the caller may see them today: an answer whose sources they can no longer open is
     hidden rather than served from storage, because access is checked at every read, not only when it was written."""
-    rows = conn.execute("SELECT id, role, content, citations, model, confidence, created_at FROM conversation_messages "
+    rows = conn.execute("SELECT id, role, content, citations, model, confidence, claims, created_at FROM conversation_messages "
                         "WHERE conversation_id = %s ORDER BY created_at, id LIMIT 200", (cid,)).fetchall()
     cited = {c["id"] for r in rows if r["role"] == "assistant" for c in r["citations"] or []}
     ok = openable(conn, org_id, caller, cited)
     out = []
     for r in rows:
         m = {"id": str(r["id"]), "role": r["role"], "content": r["content"], "citations": r["citations"] or [],
-             "model": r["model"], "at": r["created_at"].isoformat(), "confidence": r["confidence"]}
+             "model": r["model"], "at": r["created_at"].isoformat(), "confidence": r["confidence"], "claims": r["claims"] or []}
         if r["role"] == "assistant" and not all(c["id"] in ok for c in m["citations"]):
-            m.update(content=HIDDEN_ANSWER, citations=[], hidden=True, confidence=None)  # its reasons count sources
+            m.update(content=HIDDEN_ANSWER, citations=[], hidden=True, confidence=None, claims=[])  # its reasons count sources
         out.append(m)
     return out
 
@@ -1973,9 +2083,9 @@ def store_turn(conn, org_id: str, cid, body: ConversationAsk, result: dict) -> N
                  (org_id, cid, body.question, body.model))
     citations = [{k: c.get(k) for k in ("n", "id", "title", "cited", "classification", "source", "source_kind", "section")}
                  for c in result["citations"]]
-    conn.execute("INSERT INTO conversation_messages (org_id, conversation_id, role, content, citations, model, confidence) "
-                 "VALUES (%s, %s, 'assistant', %s, %s, %s, %s)", (org_id, cid, result["answer"], Jsonb(citations), body.model,
-                                                               Jsonb(result.get("confidence"))))  # slice K9
+    conn.execute("INSERT INTO conversation_messages (org_id, conversation_id, role, content, citations, model, confidence, claims) "
+                 "VALUES (%s, %s, 'assistant', %s, %s, %s, %s, %s)", (org_id, cid, result["answer"], Jsonb(citations), body.model,
+                                                                   Jsonb(result.get("confidence")), Jsonb(result.get("claims") or [])))
     conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (cid,))
 
 
@@ -2690,6 +2800,89 @@ def lineage_impact(namespace: str = Query(min_length=1, max_length=200), name: s
                            for a, h in sorted(downstream.items(), key=lambda item: (item[1], item[0]))]}
 
 
+# ------------------------------------------------------------------ diagrams, audio, and video (Q8)
+class MediaIn(BaseModel):
+    vision_model: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")  # a model in this team's registry
+    speech_model: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+@app.get("/v1/workspaces/{ws}/media")
+def get_media(ws: str, caller: Caller = Depends(authenticate)):
+    """The models this team chose to read diagrams (vision) and audio and video (speech); none means not read."""
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        row = conn.execute("""SELECT v.name AS vision_model, s.name AS speech_model, t.updated_by, t.updated_at FROM team_media t
+                              JOIN workspaces w ON w.id = t.workspace_id LEFT JOIN model_endpoints v ON v.id = t.vision_model_id
+                              LEFT JOIN model_endpoints s ON s.id = t.speech_model_id WHERE w.slug = %s""", (ws,)).fetchone()
+    return {"vision_model": row["vision_model"] if row else None, "speech_model": row["speech_model"] if row else None,
+            "updated_by": row["updated_by"] if row else None, "updated_at": row["updated_at"].isoformat() if row else None}
+
+
+@app.put("/v1/workspaces/{ws}/media")
+def set_media(ws: str, body: MediaIn, caller: Caller = Depends(authenticate)):
+    """Opt this team in (or out) of reading diagrams with a vision model and audio and video with a speech model, each
+    from its own registry. Each reads only what its allowed classifications include; the team's next syncs use them."""
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        team = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
+        if not team:
+            raise HTTPException(404, "workspace not found")
+        ids = {}
+        for field in ("vision_model", "speech_model"):
+            name = getattr(body, field)
+            row = conn.execute("SELECT id FROM model_endpoints WHERE workspace_id = %s AND name = %s", (team["id"], name)).fetchone() if name else None
+            if name and not row:
+                raise HTTPException(422, f"{name} isn't a model in this team's registry")
+            ids[field] = row["id"] if row else None
+        conn.execute("""INSERT INTO team_media (workspace_id, org_id, vision_model_id, speech_model_id, updated_by) VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (workspace_id) DO UPDATE SET vision_model_id = EXCLUDED.vision_model_id,
+                          speech_model_id = EXCLUDED.speech_model_id, updated_by = EXCLUDED.updated_by, updated_at = now()""",
+                     (team["id"], org_id, ids["vision_model"], ids["speech_model"], caller.username))
+        audit(conn, org_id, caller.username, "media.set", [ws], {"vision_model": body.vision_model, "speech_model": body.speech_model})
+    return {"vision_model": body.vision_model, "speech_model": body.speech_model}
+
+
+# ------------------------------------------------------------------ decisions (Q5)
+DECISIONS_SQL = """
+SELECT d.external_key, d.title, d.source_uri, d.source_kind, c.heading_path, c.body, c.ordinal
+FROM chunks c
+JOIN documents d            ON d.id = c.document_id
+JOIN workspace_documents wd ON wd.document_id = d.id
+JOIN workspaces w           ON w.id = wd.workspace_id
+WHERE c.heading_path LIKE 'Decision%%' AND w.slug = ANY(%(targets)s)
+  AND (%(q)s = '' OR c.tsv @@ plainto_tsquery('english', %(q)s) OR d.title_tsv @@ plainto_tsquery('english', %(q)s))
+ORDER BY d.external_key, c.ordinal
+LIMIT 500
+"""
+
+
+@app.get("/v1/decisions")
+def list_decisions(q: str = Query(default="", max_length=200), scope: str = Query(default="org"), limit: int = Query(default=20, ge=1, le=100),
+                   caller: Caller = Depends(authenticate)):
+    """Decisions as their own items (Q5): what was decided, who decided, when, and where it's recorded, latest first,
+    each saying what it replaced. Only from documents the caller may read: RLS first, then each document post-checked."""
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        targets = resolve_targets(conn, caller, scope)
+        rows = conn.execute(DECISIONS_SQL, {"q": q.strip(), "targets": targets}).fetchall()
+        keys = sorted({r["external_key"] for r in rows})
+        viewable = fga.batch_check(caller.fga_user, "viewer", [f"document:{k}" for k in keys]) if keys else set()
+        found = []
+        for r in rows:
+            meta = parse_decision(r["heading_path"])
+            if meta is None or f"document:{r['external_key']}" not in viewable:
+                continue
+            found.append({"text": r["body"][:1000], "by": meta["by"], "at": meta["at"], "ordinal": r["ordinal"],
+                          "document": {"id": r["external_key"], "title": r["title"], "source": r["source_uri"], "source_kind": r["source_kind"]}})
+        readable = sorted({f["document"]["id"] for f in found})
+        pairs = [(p["newer"], p["older"]) for p in conn.execute(SUPERSEDES_SQL, {"keys": readable}).fetchall()] if len(readable) > 1 else []
+        decisions = [{k: v for k, v in d.items() if k != "ordinal"} for d in order_decisions(found, pairs)][:limit]
+        audit(conn, org_id, caller.username, "decisions", targets, {"query": q, "returned": len(decisions)})
+    return {"decisions": decisions, "note": ACCESS_NOTE}
+
+
 # ------------------------------------------------------------------ who to ask (slice K6)
 PERSON_MENTIONS_SQL = """
 SELECT DISTINCT e.key
@@ -2710,6 +2903,23 @@ JOIN asset_owners o ON o.asset_id = a.id
 JOIN people p ON p.email = o.email
 WHERE c.id = %(concept)s
 ORDER BY p.username, a.name"""
+
+
+# Q7: who wrote a page in Git, as the people who linked those GitHub accounts.
+AUTHORS_SQL = """
+SELECT split_part(a.canonical, ':', 2) AS username, sum(d.commits)::int AS commits
+FROM document_authors d JOIN principal_aliases a ON a.source = 'ext:github.' || d.login
+WHERE d.document_id = %(doc)s
+GROUP BY a.canonical"""
+
+# Q6: the people a directory says have left, among those named: every listing of their email, in a directory that
+# isn't paused, says inactive (an email listed twice is active if any listing is).
+LEFT_SQL = """
+SELECT p.username FROM people p
+JOIN directory_people d ON d.email = p.email
+JOIN connections c ON c.id = d.connection_id AND c.kind = 'directory' AND c.status <> 'disabled'
+WHERE p.username = ANY(%(users)s)
+GROUP BY p.username HAVING NOT bool_or(d.active)"""
 
 
 @app.get("/v1/concepts/{key}/people")
@@ -2737,7 +2947,16 @@ def concept_people(key: str, caller: Caller = Depends(authenticate)):
             owners: dict[str, list[str]] = {}  # S7: owners of the assets this page describes, in the asker's own teams
             for r in conn.execute(ASSET_OWNERS_SQL, {"concept": c["id"], "teams": sorted(mine)}).fetchall():
                 owners.setdefault(r["username"], []).append(r["name"])
-            answer = who_to_ask(meta, members, mentioned, owners)
+            authors = {r["username"]: r["commits"] for r in conn.execute(AUTHORS_SQL, {"doc": c["document_id"]}).fetchall()} \
+                if c["document_id"] else {}
+            named = sorted({u for us in members.values() for u in us} | set(mentioned) | set(owners) | set(authors)
+                           | {str(o).partition(":")[2] for o in (meta.get("x-kl") or {}).get("owners") or []}
+                           | {str(v.get("by", "")).partition(":")[2] for v in (meta.get("verified") if isinstance(meta.get("verified"), list) else [meta.get("verified")]) if isinstance(v, dict)})
+            left = {}
+            for r in conn.execute(LEFT_SQL, {"users": named}).fetchall():  # their teams the asker is on, to ask instead
+                left[r["username"]] = sorted(t["object"].split(":", 1)[1] for t in fga.read({"user": f"user:{r['username']}", "relation": "member", "object": "group:"})
+                                             if t["object"].startswith("group:") and t["object"].split(":", 1)[1] in mine)
+            answer = who_to_ask(meta, members, mentioned, owners, left, authors)
             audit(conn, org_id, caller.username, "concept.people", [], {"concept": key, "returned": len(answer["people"])})
     if not c:
         raise HTTPException(404, "concept not found")

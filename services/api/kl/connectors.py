@@ -94,6 +94,11 @@ class GitHubConnector:
     def blob_text(self, full_name: str, sha: str) -> str:
         return self.blob_bytes(full_name, sha).decode("utf-8", errors="replace")
 
+    def file_commits(self, full_name: str, path: str, commit: str) -> list[dict]:
+        """The latest commits that touched a file, up to the one indexed (Q7: who wrote it)."""
+        return self.app.get(self.installation_id, f"/repos/{self._repo(full_name)}/commits",
+                            path=path, sha=self._sha(commit), per_page=30).json()
+
     def collaborators(self, full_name: str) -> list[str]:
         """Everyone GitHub lets read the repo: owners, team members, direct and outside collaborators."""
         logins, page = set(), 1

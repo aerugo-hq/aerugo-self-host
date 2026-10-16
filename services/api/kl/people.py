@@ -3,8 +3,9 @@ of a team that owns it, and the people mentioned in it, each with the reasons. P
 seen and this only weighs it: callers pass members only for owning teams the person asking is on, so a private team's
 membership never leaks, and a team they aren't on is named without its people."""
 
-# The strongest signal first: someone who vouched for the page knows it; a named owner, then its team, then a mention.
-VERIFIED, OWNER, TEAM, MENTIONED = 1.0, 0.9, 0.6, 0.5
+# The strongest signal first: someone who vouched for the page knows it; a named owner, someone who wrote it (Q7), then
+# its team, then a mention.
+VERIFIED, OWNER, AUTHOR, TEAM, MENTIONED = 1.0, 0.9, 0.7, 0.6, 0.5
 
 
 def _verified(meta: dict) -> list[dict]:
@@ -13,11 +14,14 @@ def _verified(meta: dict) -> list[dict]:
 
 
 def who_to_ask(meta: dict, members: dict[str, list[str]], mentioned: list[str],
-               asset_owners: dict[str, list[str]] | None = None) -> dict:
+               asset_owners: dict[str, list[str]] | None = None, left: dict[str, list[str]] | None = None,
+               authors: dict[str, int] | None = None) -> dict:
     """meta: the page's OKF front matter. members: {"group:<team>": [usernames]} for owning teams the asker is on.
     mentioned: usernames named in the page. asset_owners: {username: [asset names]} for assets the page describes that
-    a catalog says they own (S7), already limited to what the asker may see. Returns {"people": [...], "teams": [...]},
-    strongest first."""
+    a catalog says they own (S7), already limited to what the asker may see. left: {username: [their teams the asker
+    is on]} for the people a directory says have left (Q6). authors: {username: commits} for who wrote it in Git (Q7),
+    as far as they linked their accounts. Returns {"people": [...], "teams": [...], "left": [...]},
+    strongest first: someone who has left is never suggested, and their team is, instead."""
     found: dict[str, dict] = {}
 
     def add(user: str, strength: float, reason: str) -> None:
@@ -45,8 +49,18 @@ def who_to_ask(meta: dict, members: dict[str, list[str]], mentioned: list[str],
     for user, names in (asset_owners or {}).items():
         for name in names:
             add(user, OWNER, f"owns {name} in its catalog")
+    for user, n in (authors or {}).items():
+        add(user, AUTHOR, f"wrote it ({n} commit{'' if n == 1 else 's'})")
     for user in mentioned:
         add(user, MENTIONED, "named in it")
+    gone = [{"user": u, "reasons": found.pop(u)["reasons"], "instead": sorted(set(left[u]) | {t["team"] for t in teams})}
+            for u in sorted(left or {}) if u in found]
+    named = {t["team"] for t in teams}
+    for g in gone:
+        for team in g["instead"]:
+            if team not in named:
+                named.add(team)
+                teams.append({"team": team, "reason": f"{g['user']} has left; ask their team", "members_shown": False})
     # Each extra reason adds a little: two signals about the same person beat one.
     people = [{**p, "strength": round(min(1.0, p["strength"] + 0.05 * (len(p["reasons"]) - 1)), 2)} for p in found.values()]
-    return {"people": sorted(people, key=lambda p: (-p["strength"], p["user"])), "teams": teams}
+    return {"people": sorted(people, key=lambda p: (-p["strength"], p["user"])), "teams": teams, "left": gone}

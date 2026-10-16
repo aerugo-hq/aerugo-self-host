@@ -36,6 +36,7 @@ EXPORTS = {  # Google's own formats, exported as files the extractor reads
     "application/vnd.google-apps.spreadsheet": ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     "application/vnd.google-apps.presentation": ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
 }
+CLASSIFICATION = "internal"  # every Drive file is indexed as internal; a media model must allow it (Q8)
 READ_ROLES = {"reader", "commenter", "writer", "fileOrganizer", "organizer", "owner"}
 FILE_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 FOLDER = "application/vnd.google-apps.folder"
@@ -254,21 +255,22 @@ def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str) -> di
         with conn.transaction():
             if not readers_only and (not prev or prev["content_hash"] != version):
                 try:
-                    title, sections = extract(name, client.content(f), f["name"])
+                    media = connection["media"](CLASSIFICATION) if connection.get("media") else None  # Q8, egress-checked
+                    title, sections = extract(name, client.content(f), f["name"], media)
                 except ExtractionError as e:
                     unreadable.append({"file": f["name"][:200], "reason": str(e)})
                     continue
                 doc_id = conn.execute(
                     """INSERT INTO documents (org_id, source_kind, source_uri, source_version, external_key, title,
                                               content_hash, classification, acl_principals, container_ref, source_path)
-                       VALUES (%s, 'gdrive', %s, %s, %s, %s, %s, 'internal', %s, %s, %s)
+                       VALUES (%s, 'gdrive', %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (org_id, external_key) DO UPDATE SET
                          source_uri = EXCLUDED.source_uri, source_version = EXCLUDED.source_version, title = EXCLUDED.title,
                          content_hash = EXCLUDED.content_hash, acl_principals = EXCLUDED.acl_principals, acl_synced_at = now()
                        WHERE documents.container_ref = EXCLUDED.container_ref
                        RETURNING id""",
                     (org_id, f.get("webViewLink") or f"https://drive.google.com/file/d/{f['id']}", version, key,
-                     (title or f["name"])[:300], version, acl, drive_id, f["name"][:500])).fetchone()
+                     (title or f["name"])[:300], version, CLASSIFICATION, acl, drive_id, f["name"][:500])).fetchone()
                 if not doc_id:
                     continue
                 doc_id = doc_id["id"]
