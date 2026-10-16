@@ -107,6 +107,11 @@ GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsew
 # libraries holding folders and files, each file with its permissions and text; set through POST /microsoft/sites. A
 # file's content is a redirect to a download address, which smoke can point at another host (bad_download).
 GRAPH_TOKEN = "fake-graph-token"
+# Graph's delta (H6): each library's changes, kept by comparing each POST /microsoft/sites with the last ({library:
+# {"seq", "changed": {item id: seq}, "gone": {item id: seq}, "last": {item id: item}}}); a delta with ?token=N answers
+# what changed after N, deletions as {"id", "deleted": {}}. GET /microsoft/deltas lists the delta calls made.
+DELTA: dict = {}
+DELTA_CALLS: list = []
 GRAPH_REQUESTS: list = []
 # A fake Slack Web API (S4): a workspace, its people, and channels with members and messages (threads with their
 # replies), which smoke sets through POST /slack/setup. Like Slack it answers 200 with ok: false for a bad token, pages
@@ -319,6 +324,8 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        if self.path == "/microsoft/deltas":  # the delta calls made, and from which token (H6)
+            return self._json(200, DELTA_CALLS)
         if self.path == "/throttle":
             return self._json(200, {"answered": THROTTLE["answered"], "left": THROTTLE["left"]})
         if self._throttled():
@@ -816,12 +823,14 @@ class Handler(BaseHTTPRequestHandler):
         rest = url.path[len("/microsoft/v1.0/"):]
         start = int(q.get("$skiptoken") or 0)
 
-        def page(items):
+        def page(items, delta_link=None):
             body = {"value": items[start:start + ADMIN_PAGE]}
             if start + ADMIN_PAGE < len(items):
                 host = "http://elsewhere.test/v1.0" if GRAPH["next_elsewhere"] else f"{MICROSOFT}/v1.0"
                 from urllib.parse import urlencode  # Graph's next link keeps the request's own query, $count included
                 body["@odata.nextLink"] = f"{host}/{rest}?{urlencode({**q, '$skiptoken': start + ADMIN_PAGE}, safe='$,')}"
+            elif delta_link:  # the last page of a delta says where the next one starts (H6)
+                body["@odata.deltaLink"] = delta_link
             return self._json(200, body)
         parts = rest.split("/")
         if parts[0] == "sites" and len(parts) in (2, 3):  # a site, and its libraries: only to an app it's granted to
@@ -838,10 +847,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(403, {"error": {"code": "accessDenied", "message": "Access denied"}})
             drive = found[1]
             if parts[2:] == ["root", "delta"]:
-                return page([{"id": "root", "name": "root", "root": {}, "folder": {}}] + drive["items"])
+                state = DELTA.get(parts[1], {"seq": 0, "changed": {}, "gone": {}})
+                token = q.get("token")
+                if start == 0:
+                    DELTA_CALLS.append({"drive": parts[1], "token": token})
+                if token is None:  # from the start: everything now
+                    listed = [{"id": "root", "name": "root", "root": {}, "folder": {}}] + drive["items"]
+                else:
+                    listed = ([i for i in drive["items"] if state["changed"].get(i["id"], 0) > int(token)]
+                              + [{"id": iid, "deleted": {}} for iid, at in state["gone"].items() if at > int(token)])
+                return page(listed, f"{MICROSOFT}/v1.0/drives/{parts[1]}/root/delta?token={state['seq']}")
             item = next((i for i in drive["items"] if len(parts) >= 4 and i["id"] == parts[3]), None)
             if item is None:
                 return self._json(404, {"error": {"code": "itemNotFound"}})
+            if len(parts) == 4:  # an item itself, as a delta's changed file asks for the folders above it
+                return self._json(200, {k: v for k, v in item.items() if k not in ("text", "permissions")})
             if parts[4:] == ["permissions"]:
                 return page(item.get("permissions", []))
             if parts[4:] == ["content"]:
@@ -1027,6 +1047,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, new_entra_app(self._body()["tenant_id"]))
         if path == "/microsoft/sites":  # smoke sets SharePoint's sites, which apps each is granted to, and their files
             GRAPH["sites"] = self._body()["sites"]
+            for site in GRAPH["sites"].values():
+                for did, d in site["drives"].items():
+                    state = DELTA.setdefault(did, {"seq": 0, "changed": {}, "gone": {}, "last": {}})
+                    now = {i["id"]: i for i in d["items"]}
+                    for iid, item in now.items():
+                        if state["last"].get(iid) != item:
+                            state["seq"] += 1
+                            state["changed"][iid] = state["seq"]
+                    for iid in set(state["last"]) - set(now):
+                        state["seq"] += 1
+                        state["gone"][iid] = state["seq"]
+                    state["last"] = now
             return self._json(200, {})
         if path == "/microsoft/setup":  # smoke sets the tenant's users, deleted users, and groups
             body = self._body()

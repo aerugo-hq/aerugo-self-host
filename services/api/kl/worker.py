@@ -375,7 +375,7 @@ def sync_containers(conn, c: dict, containers: list) -> list[dict]:
         results = [notion.sync_workspace(conn, c, client, ct["external_id"]) for ct in containers]
     elif c["kind"] == "microsoft":
         client = microsoft365.client_for(c)
-        results = [microsoft365.sync_library(conn, c, client, ct["external_id"]) for ct in containers]
+        results = [microsoft365.sync_library(conn, c, client, ct["external_id"], since=ct.get("since")) for ct in containers]
     elif c["kind"] == "directory":
         results = [directory.sync_directory(conn, c, directory.client_for(c))]
     elif c["kind"] == "catalog":

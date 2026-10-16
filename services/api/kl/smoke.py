@@ -3764,6 +3764,40 @@ def a_throttled_source_slows_a_sync_but_never_fails_it():
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
 
 
+# ------------------------------------------------------------------ incremental syncs (H6)
+def last_synced(name: str):
+    with psycopg.connect(OWNER_DB) as conn:
+        row = conn.execute("SELECT last_synced_at FROM kl.connections WHERE name = %s", (name,)).fetchone()
+    return row[0] if row else None
+
+
+def wait_synced(name: str, after=None, seconds: int = 150) -> None:
+    """Until a connection has synced since `after` (or at all) and nothing of it is queued or running."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        with psycopg.connect(OWNER_DB) as conn:
+            pending = conn.execute("SELECT 1 FROM kl.jobs j JOIN kl.connections c ON j.payload->>'connection_id' = c.id::text "
+                                   "WHERE c.name = %s AND j.status IN ('queued', 'running')", (name,)).fetchone()
+        last = last_synced(name)
+        if last and (after is None or last > after) and not pending:
+            return
+        time.sleep(1)
+    raise AssertionError(f"{name} never finished syncing")
+
+
+def scheduled_sync(name: str, reconcile: bool = False) -> None:
+    """Sync a connection as the scheduler does (a refresh rediscovers, and reads everything), and wait for it; with
+    reconcile, a day after its last full read, when it reads everything again."""
+    before = last_synced(name)
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        if reconcile:
+            conn.execute("UPDATE kl.connection_containers SET reconciled_at = now() - interval '25 hours' WHERE connection_id = "
+                         "(SELECT id FROM kl.connections WHERE name = %s)", (name,))
+        conn.execute("INSERT INTO kl.jobs (org_id, kind, payload) SELECT org_id, 'connection.sync', "
+                     "jsonb_build_object('connection_id', id::text, 'reason', 'schedule') FROM kl.connections WHERE name = %s", (name,))
+    wait_synced(name, before)
+
+
 @check
 def a_jira_sync_reads_only_what_changed_until_its_reconcile():
     """Incremental syncs (H6): after its first full read, a Jira connection asks Jira only for the issues updated since its last sync (a changed issue and a new one come in, one deleted at the source waits), and its reconcile, once a day, reads everything again, so the deleted one leaves"""
@@ -3783,52 +3817,24 @@ def a_jira_sync_reads_only_what_changed_until_its_reconcile():
             return dict(conn.execute("SELECT external_key, title FROM kl.documents WHERE source_kind = 'jira' AND external_key LIKE %s",
                                      (f"jira-{key}-%",)).fetchall())
 
-    def synced(after) -> None:
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline:
-            with psycopg.connect(OWNER_DB) as conn:
-                last = conn.execute("SELECT last_synced_at FROM kl.connections WHERE name = %s", (name,)).fetchone()[0]
-                pending = conn.execute("SELECT 1 FROM kl.jobs j JOIN kl.connections c ON j.payload->>'connection_id' = c.id::text "
-                                       "WHERE c.name = %s AND j.status IN ('queued', 'running')", (name,)).fetchone()
-            if last and (after is None or last > after) and not pending:
-                return
-            time.sleep(1)
-        raise AssertionError("the connection never finished syncing")
-
-    def last_synced():
-        with psycopg.connect(OWNER_DB) as conn:
-            return conn.execute("SELECT last_synced_at FROM kl.connections WHERE name = %s", (name,)).fetchone()[0]
-
-    def scheduled_sync() -> None:  # as the scheduler queues one (a refresh rediscovers, and reads everything)
-        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
-            conn.execute("INSERT INTO kl.jobs (org_id, kind, payload) SELECT org_id, 'connection.sync', "
-                         "jsonb_build_object('connection_id', id::text, 'reason', 'schedule') FROM kl.connections WHERE name = %s", (name,))
-
     try:
         setup((1, "First", old), (2, "Second", old))
         r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
             "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key],
             "every_minutes": 10080})
         assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
-        synced(None)
+        wait_synced(name)
         assert set(indexed()) == {f"jira-{key}-1", f"jira-{key}-2"}, f"the first, full read: {indexed()}"
 
         setup((2, "Second, changed", now()), (3, "Third", now()))  # 1 deleted at the source; 2 changed; 3 new
-        before = last_synced()
-        scheduled_sync()
-        synced(before)
+        scheduled_sync(name)
         asked = httpx.get(f"{FAKE_JIRA}/searches", timeout=10).json()
         got = indexed()
         assert asked and all("updated >=" in jql for jql in asked), f"the second sync asked for everything: {asked}"
         assert set(got) == {f"jira-{key}-1", f"jira-{key}-2", f"jira-{key}-3"} and "changed" in got[f"jira-{key}-2"], \
             f"the changes didn't come in, or the deletion didn't wait for the reconcile: {got}"
 
-        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # a day later: time for the reconcile
-            conn.execute("UPDATE kl.connection_containers SET reconciled_at = now() - interval '25 hours' WHERE connection_id = "
-                         "(SELECT id FROM kl.connections WHERE name = %s)", (name,))
-        before = last_synced()
-        scheduled_sync()
-        synced(before)
+        scheduled_sync(name, reconcile=True)
         asked = httpx.get(f"{FAKE_JIRA}/searches", timeout=10).json()
         assert asked and "updated >=" not in asked[-1], f"the reconcile didn't read everything: {asked}"
         assert set(indexed()) == {f"jira-{key}-2", f"jira-{key}-3"}, f"the reconcile kept the deleted issue: {indexed()}"
@@ -3837,6 +3843,55 @@ def a_jira_sync_reads_only_what_changed_until_its_reconcile():
         api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def a_microsoft_365_sync_follows_graphs_delta():
+    """Incremental syncs (H6): after its first full read, a Microsoft 365 library resumes Graph's delta from where the last sync ended, so a changed file comes in, a new one too, and one deleted at the source leaves at once, since Graph names it; its reconcile, once a day, starts the delta over"""
+    tag = secrets.token_hex(3)
+    tenant, app = str(uuid.uuid4()), None
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    site, library, name = f"acme.sharepoint.com,{uuid.uuid4()},{uuid.uuid4()}", f"b!INC{tag}{secrets.token_hex(6)}", f"m365inc-{tag}"
+    file = lambda i, version: {"id": f"I{i}{tag}", "name": f"Note {i} {tag}.txt", "file": {"mimeType": "text/plain"}, "size": 64,
+                               "cTag": version, "parentReference": {"id": "root"}, "text": f"Note {i} {tag}, {version}.",
+                               "permissions": [{"roles": ["read"], "grantedToV2": {"user": {"id": "u1", "email": "alice@acme.test"}}}]}
+
+    def library_holds(*files) -> None:
+        assert httpx.post(f"{FAKE_MICROSOFT}/sites", json={"sites": {site: {"name": f"Inc {tag}", "granted": [app["client_id"]],
+                          "drives": {library: {"name": "Documents", "items": list(files)}}}}}, timeout=10).status_code == 200
+
+    def indexed() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, source_version FROM kl.documents WHERE source_kind = 'microsoft' "
+                                     "AND external_key LIKE %s", (f"%-I_{tag}",)).fetchall())
+
+    def deltas() -> list:
+        return [c for c in httpx.get(f"{FAKE_MICROSOFT}/deltas", timeout=10).json() if c["drive"] == library]
+
+    ends = lambda keys: {k.rsplit("-", 1)[1] for k in keys}
+    try:
+        library_holds(file(1, "v1"), file(2, "v1"))
+        r = api("POST", "/v1/workspaces/payments/connections/microsoft", "alice", json={
+            "name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "sites": [site], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        assert ends(indexed()) == {f"I1{tag}", f"I2{tag}"}, f"the first, full read: {indexed()}"
+        assert deltas() and deltas()[-1]["token"] is None, f"the first read didn't start the delta from the start: {deltas()}"
+
+        library_holds(file(1, "v2"), file(3, "v1"))  # 1 changed; 2 deleted at the source; 3 new
+        scheduled_sync(name)
+        got = indexed()
+        assert deltas()[-1]["token"] is not None, f"the second sync started the delta over: {deltas()}"
+        assert ends(got) == {f"I1{tag}", f"I3{tag}"}, f"the delta's changes, its deletion included, didn't carry over: {got}"
+        assert any(v == "v2" for k, v in got.items() if k.endswith(f"I1{tag}")), f"the changed file wasn't read again: {got}"
+
+        scheduled_sync(name, reconcile=True)
+        assert deltas()[-1]["token"] is None, f"the reconcile didn't start the delta over: {deltas()}"
+        assert ends(indexed()) == {f"I1{tag}", f"I3{tag}"}, f"the reconcile changed what's there: {indexed()}"
+        print("      the second sync resumed the delta: 1 changed, 3 new, 2 gone at once; the reconcile started it over")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
 
 
 @check

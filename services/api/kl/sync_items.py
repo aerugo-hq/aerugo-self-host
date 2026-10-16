@@ -32,7 +32,8 @@ def viewer_tuples(key: str, acl: list[str]) -> set:
 
 
 def sync_container(conn, connection: dict, container: str, source_kind: str, items: list[Item],
-                   classification: str = "internal", complete: bool = True, cursor: str | None = None) -> dict:
+                   classification: str = "internal", complete: bool = True, cursor: str | None = None,
+                   removed: tuple[str, ...] | list[str] = ()) -> dict:
     """A connection's documents are its own (migration 0040): container refs and keys are unique per site, not per org,
     so another connection's same-named container or same key is never read, updated, or deleted here.
 
@@ -42,8 +43,9 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
 
     `complete` says the items are all the container holds (a full read): only then does what isn't listed leave, and
     the container counts as reconciled. An incremental sync (H6) lists only what changed since the container's cursor,
-    so it adds and updates, and leaves deletions to the next full read. `cursor` is where the next one starts, in the
-    connector's own terms; a readers refresh moves neither."""
+    so it adds and updates, and leaves deletions to the next full read, except the keys a source says are gone
+    (`removed`, as Graph's delta does). `cursor` is where the next one starts, in the connector's own terms; a readers
+    refresh moves neither."""
     org_id, team = connection["org_id"], team_for(connection, container)
     readers_only = bool(connection.get("readers_only"))
     existing = {r["external_key"]: r for r in conn.execute(
@@ -97,7 +99,7 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
         have = {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": f"document:{item.key}"})}
         writes |= want - have
         deletes |= have - want
-    gone = [(k, r["id"]) for k, r in existing.items() if k not in keep] if complete else []  # deleted, or readable by no one
+    gone = [(k, r["id"]) for k, r in existing.items() if (k not in keep if complete else k in set(removed))]  # deleted, or readable by no one
     with conn.transaction():
         if gone:
             conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([doc for _, doc in gone],))

@@ -20,7 +20,7 @@ import re
 import httpx
 
 from .connectors import Container, Health
-from .directory import EMAIL, GUID, GraphClient
+from .directory import EMAIL, GUID, MAX_PAGES, GraphClient, ListingCutShort
 from .extract import extract, supported
 from .principals import is_valid
 from .sync_items import Item, record_identities, sync_container
@@ -70,21 +70,49 @@ class M365Client(GraphClient):
                       for d in drives if DRIVE.fullmatch(d.get("id") or "") and d.get("driveType", "documentLibrary") == "documentLibrary"]
         return found
 
-    def files(self, drive: str) -> list[dict]:
-        """Every file in a library now (a delta listing from the start: the only listing Graph guarantees complete),
-        each with the path of folders it sits in, built from their ids (delta gives no paths)."""
+    def files(self, drive: str, link: str | None = None) -> tuple[list[dict], list[str], str | None]:
+        """A library's files, each with the path of folders it sits in, built from their ids (delta gives no paths),
+        and the link the next delta starts from (H6). With no link, every file now: a delta from the start, the only
+        listing Graph guarantees complete. With one, only what changed since, its sharing included, and the ids of
+        what was deleted. Returns (files, deleted ids, next link)."""
+        url = link if link and link.startswith(f"{self.base}/v1.0/drives/{drive}/") else f"{self.base}/v1.0/drives/{drive}/root/delta"
+        query = None if url == link else {"$select": FIELDS}
+        headers = {"Prefer": "hierarchicalsharing, deltashowsharingchanges"} if url == link else None
+        items, following = [], None
+        for _ in range(MAX_PAGES):
+            page = self._get(url, query, headers)
+            items += page.get("value") or []
+            following, done = page.get("@odata.nextLink"), page.get("@odata.deltaLink")
+            if not following:
+                break
+            if not following.startswith(f"{self.base}/v1.0/"):  # a next page on Graph only
+                raise ListingCutShort("Graph named a next page somewhere else")
+            url, query = following, None
+        else:
+            raise ListingCutShort("the delta didn't end")
+        if done and not done.startswith(f"{self.base}/v1.0/"):
+            done = None  # a delta link off Graph is never followed: the next sync reads everything
         # a facet's presence is what it says, even empty: Graph sends "deleted": {} for a deleted item
-        items = [i for i in self._pages(f"drives/{drive}/root/delta", {"$select": FIELDS}) if "deleted" not in i]
+        deleted = [i["id"] for i in items if "deleted" in i and ITEM.fullmatch(i.get("id") or "")]
+        items = [i for i in items if "deleted" not in i]
         folders = {i["id"]: i for i in items if "folder" in i or "root" in i}
+
+        def folder(fid: str) -> dict | None:  # a folder this delta didn't bring (it didn't change): asked for once
+            if fid not in folders and ITEM.fullmatch(fid or "") and url == link:
+                try:
+                    folders[fid] = self._get(f"{self.base}/v1.0/drives/{drive}/items/{fid}", {"$select": "id,name,parentReference,folder,root"})
+                except httpx.HTTPStatusError:
+                    folders[fid] = {"id": fid, "root": {}}
+            return folders.get(fid)
 
         def path(item: dict) -> list[str]:
             names, parent, seen = [], (item.get("parentReference") or {}).get("id"), set()
-            while parent in folders and parent not in seen and "root" not in folders[parent]:
+            while parent and parent not in seen and (f := folder(parent)) and "root" not in f:
                 seen.add(parent)
-                names.insert(0, folders[parent].get("name") or "")
-                parent = (folders[parent].get("parentReference") or {}).get("id")
+                names.insert(0, f.get("name") or "")
+                parent = (f.get("parentReference") or {}).get("id")
             return names
-        return [{**i, "_path": path(i)} for i in items if "file" in i and ITEM.fullmatch(i.get("id") or "")]
+        return [{**i, "_path": path(i)} for i in items if "file" in i and ITEM.fullmatch(i.get("id") or "")], deleted, done
 
     def permissions(self, drive: str, item: str) -> list[dict]:
         return self._pages(f"drives/{drive}/items/{item}/permissions", {})
@@ -149,9 +177,14 @@ def readers(permissions: list[dict], groups: dict[str, list[str]], seen: dict[st
     return sorted(out)
 
 
-def sync_library(conn, connection: dict, client: M365Client, drive: str) -> dict:
+def sync_library(conn, connection: dict, client: M365Client, drive: str, since: str | None = None) -> dict:
+    """A library: all of it, or (from the delta link the last sync ended with, H6) only what changed since, a deleted
+    file leaving at once, since Graph names it."""
     groups, seen, items = entra_groups(conn), {}, []
-    for f in client.files(drive):
+    files, deleted, link = client.files(drive, since)
+    incremental = bool(since) and since.startswith(f"{client.base}/v1.0/drives/{drive}/")
+    key = lambda item: f"m365-{hashlib.sha256(drive.encode()).hexdigest()[:10]}-{item}"
+    for f in files:
         if not supported(f.get("name") or ""):
             continue
         acl = readers(client.permissions(drive, f["id"]), groups, seen)
@@ -164,9 +197,10 @@ def sync_library(conn, connection: dict, client: M365Client, drive: str) -> dict
             if size > MAX_BYTES:  # listed, not read: its name is all that's indexed
                 return title, [(None, f"{title} ({size // (1024 * 1024)} MB, too large to read)")]
             return extract(title, client.content(drive, f["id"]), title)
-        items.append(Item(key=f"m365-{hashlib.sha256(drive.encode()).hexdigest()[:10]}-{f['id']}", uri=uri or f"m365:{f['id']}",
+        items.append(Item(key=key(f["id"]), uri=uri or f"m365:{f['id']}",
                           version=str(f.get("cTag") or f.get("eTag") or f.get("lastModifiedDateTime") or ""),
                           title=title, path=" › ".join(f["_path"]), acl=acl, sections=sections))
     if seen:
         record_identities(conn, connection["org_id"], "microsoft", seen)
-    return sync_container(conn, connection, drive, "microsoft", items)
+    return sync_container(conn, connection, drive, "microsoft", items, complete=not incremental, cursor=link,
+                          removed=[key(d) for d in deleted])
