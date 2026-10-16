@@ -131,5 +131,32 @@ async def impact(namespace: str, name: str, kind: str = "job") -> dict:
         raw, lambda caller: api.lineage_impact(namespace=namespace, name=name, kind=kind, caller=caller)))
 
 
+@mcp.tool()
+async def neighbors(key: str) -> dict:
+    """A node's neighbors on your map (pages, documents, entities, assets), by its id, each with every link between
+    them and how it was made. Only what you may see: a hidden node is left out, and a hidden key is not found."""
+    raw = _token()
+    return await anyio.to_thread.run_sync(lambda: _as_caller(raw, lambda caller: api.graph_neighbors(key=key, caller=caller)))
+
+
+@mcp.tool()
+async def path(source: str, target: str, max_hops: int = 4) -> dict:
+    """The shortest path between two nodes on your map, each hop with its link, through only what you may see; empty
+    when there's none within max_hops (1 to 6)."""
+    raw = _token()
+    if not 1 <= max_hops <= 6:
+        raise ValueError("max_hops is 1 to 6")
+    return await anyio.to_thread.run_sync(lambda: _as_caller(
+        raw, lambda caller: api.graph_path(source=source, target=target, max_hops=max_hops, caller=caller)))
+
+
+@mcp.tool()
+async def why_linked(a: str, b: str) -> dict:
+    """Why two nodes are linked: each link between them with its provenance (curated, recorded, or inferred, and what
+    made it), and what both link to, as far as you may see."""
+    raw = _token()
+    return await anyio.to_thread.run_sync(lambda: _as_caller(raw, lambda caller: api.graph_why(a=a, b=b, caller=caller)))
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

@@ -1,6 +1,6 @@
 # Recipes start with ">" instead of a tab (.RECIPEPREFIX, GNU make 3.82+), so editors can't break them.
 .RECIPEPREFIX = >
-.PHONY: env up smoke eval eval-mine demo eval-scenario eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-down
+.PHONY: sdk-test env up smoke eval eval-mine demo eval-scenario eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-down
 
 # The local model `make llm` downloads for Ask. About 1 GB; make llm LLM_MODEL=qwen2.5:3b for better answers (about 2 GB).
 LLM_MODEL ?= qwen2.5:1.5b
@@ -83,6 +83,11 @@ eval-baseline: env
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 >docker compose --profile smoke run --rm -T smoke python -m kl.evals --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
+
+# The clients (slice A2): the Python and TypeScript clients' own tests, against stand-ins for the API, in pinned images.
+sdk-test:
+>docker run --rm -v "$(CURDIR)/sdk/python:/sdk" -w /sdk python:3.12.11-slim sh -c "pip install -q 'httpx>=0.27,<1' 'pytest>=8,<9' && python -m pytest -q"
+>docker run --rm -v "$(CURDIR)/sdk/typescript:/sdk" -w /sdk node:24.9.0-alpine node --test test/client.test.ts
 
 # A real model for Ask, running in the stack (Ollama): no API key, and nothing sent to it leaves the machine.
 # Downloads LLM_MODEL once, checks it answers, and registers it in every team as <team>/local. Safe to rerun.

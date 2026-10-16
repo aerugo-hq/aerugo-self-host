@@ -2866,6 +2866,77 @@ def lineage_impact(namespace: str = Query(min_length=1, max_length=200), name: s
                            for a, h in sorted(downstream.items(), key=lambda item: (item[1], item[0]))]}
 
 
+# ------------------------------------------------------------------ the change feed (A3) and OKF export (A4)
+CHANGES_SQL = """
+SELECT id, external_key, change, source_kind, at FROM document_changes
+WHERE id > %(since)s ORDER BY id LIMIT %(limit)s"""
+
+
+@app.get("/v1/changes")
+def changes(since: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500), caller: Caller = Depends(authenticate)):
+    """What changed since a cursor (A3): documents added, changed, or removed, oldest first, with the cursor to ask from
+    next. Only changes to what the caller could read: RLS on each change's readers at that moment, and an addition or
+    change only while the caller may still read the document (the post-check). A removal shows only to those who
+    could read it before, and never says more than its key."""
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(CHANGES_SQL, {"since": since, "limit": limit}).fetchall()
+        live = sorted({r["external_key"] for r in rows if r["change"] != "removed"})
+        viewable = fga.batch_check(caller.fga_user, "viewer", [f"document:{k}" for k in live]) if live else set()
+        out = [{"cursor": r["id"], "key": r["external_key"], "change": r["change"], "source_kind": r["source_kind"], "at": r["at"].isoformat()}
+               for r in rows if r["change"] == "removed" or f"document:{r['external_key']}" in viewable]
+        audit(conn, org_id, caller.username, "changes", [], {"since": since, "returned": len(out)})
+    return {"changes": out, "next": rows[-1]["id"] if rows else since, "more": len(rows) == limit}
+
+
+EXPORT_SQL = """
+SELECT k.concept_key, k.title, d.source_path, v.content, v.key_ref
+FROM concepts k
+JOIN documents d            ON d.id = k.document_id
+JOIN workspace_documents wd ON wd.document_id = d.id
+JOIN workspaces w           ON w.id = wd.workspace_id
+JOIN concept_versions v     ON v.concept_id = k.id AND v.hash = k.latest_hash
+WHERE w.slug = %(ws)s AND k.tier IN ('silver', 'gold')
+ORDER BY k.concept_key"""
+EXPORT_PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,250}\.md$")
+MAX_EXPORT = 50 * 1024 * 1024
+
+
+@app.get("/v1/workspaces/{ws}/export.okf")
+def export_okf(ws: str, caller: Caller = Depends(authenticate)):
+    """A team's curated pages as an OKF repository (A4): a zip of their latest versions as written, each at its own
+    path in its bundle (or <id>.md), so relations between them still resolve. Only the pages the caller may read, of
+    a team they're on; a retired page is left out."""
+    import io
+    import zipfile
+    from fastapi.responses import Response
+    if not fga.check(caller.fga_user, "member", f"workspace:{ws}"):
+        raise HTTPException(404, "workspace not found")
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(EXPORT_SQL, {"ws": ws}).fetchall()
+        retired = {r["concept_key"] for r in conn.execute(RETIRED_SQL).fetchall()}
+        viewable = fga.batch_check(caller.fga_user, "viewer", [f"document:{r['concept_key']}" for r in rows]) if rows else set()
+        buf, size, written = io.BytesIO(), 0, []
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for r in rows:
+                if r["concept_key"] in retired or f"document:{r['concept_key']}" not in viewable:
+                    continue
+                text = originals.open_one(r["content"], r["key_ref"])
+                size += len(text)
+                if size > MAX_EXPORT:
+                    raise HTTPException(413, "the team's pages are larger than one export holds")
+                path = (r["source_path"] or "").lstrip("/")
+                path = path if EXPORT_PATH.fullmatch(path) and ".." not in path else f"{r['concept_key']}.md"
+                if path in written:
+                    path = f"{r['concept_key']}.md"
+                written.append(path)
+                z.writestr(path, text)
+        audit(conn, org_id, caller.username, "export.okf", [ws], {"pages": len(written)})
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{ws}-knowledge.zip"'})
+
+
 # ------------------------------------------------------------------ knowledge health (E2)
 HEALTH_PAGES_SQL = """
 SELECT DISTINCT ON (k.id) k.id, k.concept_key, k.title, k.tier, k.aliases, k.document_id, k.latest_hash, v.content, v.key_ref
@@ -3337,6 +3408,93 @@ JOIN documents b ON b.id = r.target_id
 WHERE a.external_key = ANY(%(keys)s) AND b.external_key = ANY(%(keys)s)
 ORDER BY r.strength DESC, a.external_key, b.external_key
 """
+
+
+# A1: the graph as tools: a node's neighbors, a path between two nodes, and why two nodes are linked. Each is read from
+# the caller's own map (knowledge_map), which holds only nodes they may see and links between two visible ends, so a
+# walk is authorized at every hop (invariant 15) and a hidden node is never passed through or named.
+GRAPH_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,299}$")
+
+
+def link_of(e: dict) -> dict:
+    """A link with its provenance (invariant 14): how it was made, and what made it."""
+    return {k: e[k] for k in ("kind", "relation", "evidence", "strength", "signal") if e.get(k) is not None}
+
+
+def visible_graph(caller: Caller, focus: str | None = None) -> tuple[dict, dict]:
+    g = knowledge_map(scope="org", as_of=None, limit=5000, min_mentions=2, focus=focus, caller=caller)
+    nodes = {n["id"]: n for n in g["nodes"]}
+    adjacent: dict[str, list[tuple[str, dict]]] = {}
+    for e in g["edges"]:
+        if e["source"] in nodes and e["target"] in nodes:
+            adjacent.setdefault(e["source"], []).append((e["target"], e))
+            adjacent.setdefault(e["target"], []).append((e["source"], e))
+    return nodes, adjacent
+
+
+def node_of(n: dict) -> dict:
+    return {"id": n["id"], "title": n.get("title"), "tier": n.get("tier"), "kind": n.get("kind")}
+
+
+@app.get("/v1/graph/neighbors")
+def graph_neighbors(key: str = Query(min_length=1, max_length=300), caller: Caller = Depends(authenticate)):
+    """A node's neighbors on the caller's map, each with every link between them and how it was made."""
+    if not GRAPH_KEY.fullmatch(key):
+        raise HTTPException(404, "not found")
+    nodes, adjacent = visible_graph(caller, focus=key)
+    if key not in nodes:
+        raise HTTPException(404, "not found")
+    around: dict[str, list[dict]] = {}
+    for other, e in adjacent.get(key, []):
+        around.setdefault(other, []).append(link_of(e))
+    return {"node": node_of(nodes[key]), "neighbors": [{**node_of(nodes[o]), "links": links} for o, links in sorted(around.items())]}
+
+
+@app.get("/v1/graph/path")
+def graph_path(source: str = Query(alias="from", min_length=1, max_length=300), target: str = Query(alias="to", min_length=1, max_length=300),
+               max_hops: int = Query(default=4, ge=1, le=6), caller: Caller = Depends(authenticate)):
+    """The shortest path between two nodes on the caller's map, up to max_hops, each hop with its link; an empty path
+    when none is that short. Either end hidden is a 404, like a missing one."""
+    if not GRAPH_KEY.fullmatch(source) or not GRAPH_KEY.fullmatch(target):
+        raise HTTPException(404, "not found")
+    nodes, adjacent = visible_graph(caller)
+    if source not in nodes or target not in nodes:
+        raise HTTPException(404, "not found")
+    came: dict[str, tuple[str, dict] | None] = {source: None}
+    frontier = [source]
+    for _ in range(max_hops):
+        if target in came:
+            break
+        nxt = []
+        for here in frontier:
+            for other, e in sorted(adjacent.get(here, []), key=lambda x: x[0]):
+                if other not in came:
+                    came[other] = (here, e)
+                    nxt.append(other)
+        frontier = nxt
+    if target not in came:
+        return {"path": [], "hops": []}
+    path, hops, at = [target], [], target
+    while came[at] is not None:
+        prev, e = came[at]
+        hops.insert(0, {"from": prev, "to": at, **link_of(e)})
+        path.insert(0, prev)
+        at = prev
+    return {"path": [node_of(nodes[p]) for p in path], "hops": hops}
+
+
+@app.get("/v1/graph/why")
+def graph_why(a: str = Query(min_length=1, max_length=300), b: str = Query(min_length=1, max_length=300), caller: Caller = Depends(authenticate)):
+    """Why two nodes are linked: every link between them with its provenance, and the nodes both link to, as far as
+    the caller may see. Either one hidden is a 404."""
+    if not GRAPH_KEY.fullmatch(a) or not GRAPH_KEY.fullmatch(b):
+        raise HTTPException(404, "not found")
+    nodes, adjacent = visible_graph(caller)
+    if a not in nodes or b not in nodes:
+        raise HTTPException(404, "not found")
+    direct = [link_of(e) for other, e in adjacent.get(a, []) if other == b]
+    shared = sorted({o for o, _ in adjacent.get(a, [])} & {o for o, _ in adjacent.get(b, [])} - {a, b})[:10]
+    return {"a": node_of(nodes[a]), "b": node_of(nodes[b]), "links": direct, "both_link_to": [node_of(nodes[s]) for s in shared]}
 
 
 @app.get("/v1/graph")
