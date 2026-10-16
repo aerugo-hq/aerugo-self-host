@@ -15,7 +15,7 @@ import secrets
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 import jwt
@@ -3425,7 +3425,8 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
     alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
 
     def setup(n: int, delay: float = 0.0) -> None:  # n issues, each with an attachment the fake serves after `delay` seconds
-        issues = [{"key": f"{key}-{i}", "summary": f"Cutover step {i} {tag}", "description": f"Step {i} of the cutover {tag}.",
+        updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000")  # just written, as new issues are (H6)
+        issues = [{"key": f"{key}-{i}", "summary": f"Cutover step {i} {tag}", "description": f"Step {i} of the cutover {tag}.", "updated": updated,
                    "attachments": [{"id": f"{int(tag, 16)}{i:03d}", "filename": "notes.txt", "text": f"Notes for step {i} {tag}."}]}
                   for i in range(1, n + 1)]
         site = {"delay": delay, "projects": {key: {"name": f"Lease {tag}", "company_wide": False, "browsers": [alice], "issues": issues}}}
