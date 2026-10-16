@@ -328,6 +328,8 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        if self.path == "/confluence/listings":  # each page and blog post listing, and its order (H6)
+            return self._json(200, CONFLUENCE.get("listings", []))
         if self.path == "/slack/history-calls":  # each channel history read, and from when (H6)
             return self._json(200, SLACK.get("history_calls", []))
         if self.path == "/google/changes-calls":  # the changes feed's reads, and from which token (H6)
@@ -698,17 +700,26 @@ class Handler(BaseHTTPRequestHandler):
         read = lambda kind, who: {"principal": {"type": kind, "id": who}, "operation": {"key": "read", "targetType": "space"}}
         if rest == "rest/api/user/current":
             return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
+        if len(parts) == 4 and parts[:3] == ["api", "v2", "pages"] and parts[3] in content:  # one page, its body left out
+            c = content[parts[3]]
+            return self._json(200, {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"),
+                                    "version": {"number": c.get("version", 1), "createdAt": c.get("modified", "2026-01-01T00:00:00.000Z")}})
         if rest == "api/v2/spaces":
             keys = set(q["keys"].split(",")) if q.get("keys") else None
             return self._json(200, {"results": [{"id": str(s["id"]), "key": k, "name": s["name"]} for k, s in spaces.items()
                                                 if keys is None or k in keys], "_links": {}})
         if len(parts) == 5 and parts[:3] == ["api", "v2", "spaces"] and parts[3] in by_id:
             key, s = by_id[parts[3]]
-            if parts[4] in ("pages", "blogposts"):
+            if parts[4] in ("pages", "blogposts"):  # newest-modified first when asked (H6), and each listing recorded
+                CONFLUENCE.setdefault("listings", []).append({"space": key, "kind": parts[4], "sort": q.get("sort")})
+                listed = s.get(parts[4], [])
+                if q.get("sort") == "-modified-date":
+                    listed = sorted(listed, key=lambda c: c.get("modified", "2026-01-01T00:00:00.000Z"), reverse=True)
                 return self._json(200, {"results": [
-                    {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"), "version": {"number": c.get("version", 1)},
+                    {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"),
+                     "version": {"number": c.get("version", 1), "createdAt": c.get("modified", "2026-01-01T00:00:00.000Z")},
                      "body": {"storage": {"value": c.get("body", "")}}, "_links": {"webui": f"/spaces/{key}/pages/{c['id']}"}}
-                    for c in s.get(parts[4], [])], "_links": {}})
+                    for c in listed], "_links": {}})
             if parts[4] == "permissions":
                 grants = [read("user", a) for a in s.get("users", [])] + [read("group", g) for g in s.get("groups", [])]
                 return self._json(200, {"results": grants + ([read("anonymous", None)] if s.get("anonymous") else []), "_links": {}})
@@ -1099,8 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
             OKTA["users"] = self._body()["users"]
             return self._json(200, {})
         if path == "/confluence/setup":  # smoke sets the fake Confluence's spaces, pages, groups, and people
+            listings = CONFLUENCE.get("listings", [])
             CONFLUENCE.clear()
-            CONFLUENCE.update({"spaces": {}, "groups": {}, "users": {}, **self._body()})
+            CONFLUENCE.update({"spaces": {}, "groups": {}, "users": {}, **self._body(), "listings": listings})
             return self._json(200, {})
         if path in ("/jira/setup", "/jira-b/setup"):  # smoke sets a fake Jira site's projects, issues, and who may see each
             site = JIRA_SITES[path.split("/")[1]]

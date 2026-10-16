@@ -3990,6 +3990,62 @@ def a_slack_sync_rereads_its_recent_days_until_its_reconcile():
 
 
 @check
+def a_confluence_sync_reads_only_what_changed_until_its_reconcile():
+    """Incremental syncs (H6): after its first full read, a Confluence space is listed newest-modified first and only down to the last sync, so an edited page comes in, and a new one too, under an unchanged parent it still names; one deleted at the source waits; its reconcile, once a day, lists the space in full, and the deleted page leaves"""
+    from datetime import timezone as tz
+    tag = secrets.token_hex(3).upper()
+    key, name, acct = f"INC{tag}", f"cfinc-{tag.lower()}", f"557058:cfinc{tag.lower()}"
+    base = int(tag, 16) * 10
+    ids = {n: str(base + i) for i, n in enumerate(("parent", "child", "new", "leaf"))}
+    old, now = "2026-01-01T10:00:00.000Z", datetime.now(tz.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    page = lambda n, title, version=1, modified=old, **more: {"id": ids[n], "title": f"{title} {tag}", "body": f"<p>{title} {tag}</p>",
+                                                              "version": version, "modified": modified, **more}
+
+    def space_holds(*pages) -> None:
+        setup = {"users": {acct: {"email": "alice@acme.test", "name": "Alice"}}, "groups": {},
+                 "spaces": {key: {"id": str(base + 9), "name": f"Inc {tag}", "users": [acct], "groups": [], "pages": list(pages), "blogposts": []}}}
+        assert httpx.post(f"{FAKE_CONFLUENCE}/setup", json=setup, timeout=10).status_code == 200
+
+    def held() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return {k: (v, p) for k, v, p in conn.execute("SELECT external_key, source_version, source_path FROM kl.documents "
+                                                         "WHERE source_kind = 'confluence' AND container_ref = %s", (key,)).fetchall()}
+
+    def listings() -> list:
+        return [l for l in httpx.get(f"{FAKE_CONFLUENCE}/listings", timeout=10).json() if l["space"] == key and l["kind"] == "pages"]
+
+    doc = lambda n: f"confluence-{ids[n]}"
+    try:
+        space_holds(page("parent", "Parent"), page("child", "Child", parentId=ids["parent"]), page("leaf", "Leaf"))
+        r = api("POST", "/v1/workspaces/payments/connections/confluence", "alice", json={
+            "name": name, "api_base": FAKE_CONFLUENCE, "email": "confluence-bot@acme.test", "api_token": "smoke-confluence-token",
+            "spaces": [key], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        first = held()
+        assert set(first) == {doc("parent"), doc("child"), doc("leaf")}, f"the first, full read: {first}"
+
+        space_holds(page("parent", "Parent"), page("child", "Child, edited", 2, now, parentId=ids["parent"]),  # leaf deleted
+                    page("new", "New", 1, now, parentId=ids["parent"]))
+        scheduled_sync(name)
+        second = held()
+        assert listings()[-1]["sort"] == "-modified-date", f"the second sync listed the whole space: {listings()}"
+        assert second[doc("child")][0] != first[doc("child")][0], "the edited page wasn't read again"
+        assert doc("new") in second and f"Parent {tag}" in (second[doc("new")][1] or ""), \
+            f"the new page didn't come in under its unchanged parent: {second.get(doc('new'))}"
+        assert doc("leaf") in second, "a deletion was acted on before the reconcile, so the sync read everything"
+
+        scheduled_sync(name, reconcile=True)
+        assert listings()[-1]["sort"] is None, f"the reconcile didn't list the space in full: {listings()}"
+        assert set(held()) == {doc("parent"), doc("child"), doc("new")}, f"the reconcile kept the deleted page: {held()}"
+        print("      the second sync listed only what changed (the edit, and a new page under its parent); the reconcile removed the deleted one")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga

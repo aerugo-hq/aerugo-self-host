@@ -16,6 +16,7 @@ code, Jira keys, links, images, and tasks keep their text. A page's ancestors ar
 tree. Labels and page trees narrow what's indexed. Accounts are ext:atlassian.<account id>, as Jira's are."""
 import base64
 import re
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 
 import httpx
@@ -33,6 +34,8 @@ from . import source_http
 
 SPACE_KEY = re.compile(r"^~?[A-Za-z0-9_-]{1,255}$")  # personal spaces start with ~
 CONTENT_ID = re.compile(r"^[0-9]{1,20}$")
+OVERLAP_MINUTES = 10  # an incremental sync reaches this far before its cursor: clocks drift, and edits land mid-listing (H6)
+MAX_LISTING_PAGES = 200
 DEFAULT_GROUP = re.compile(r"^confluence-users(-.+)?$")  # the group every Confluence user is in, on a company's own site
 SEPARATOR = " › "  # between a path's titles
 MAX_TEXT = 400_000
@@ -279,10 +282,29 @@ class ConfluenceClient:
         found = self._get("api/v2/spaces", keys=key, limit=1).get("results") or []
         return found[0] if found and found[0].get("key") == key else None
 
-    def content(self, space_id: str, kind: str) -> list[dict]:
-        """A space's current pages, or blog posts, with their bodies in the storage format."""
-        return [c for c in self._all(f"api/v2/spaces/{space_id}/{kind}", status="current", **{"body-format": "storage"})
-                if CONTENT_ID.fullmatch(str(c.get("id") or ""))]
+    def content(self, space_id: str, kind: str, since: datetime | None = None) -> list[dict]:
+        """A space's current pages, or blog posts, with their bodies in the storage format; or (since a time, H6) only
+        those modified since, newest first, the listing stopping at the first one older."""
+        if since is None:
+            return [c for c in self._all(f"api/v2/spaces/{space_id}/{kind}", status="current", **{"body-format": "storage"})
+                    if CONTENT_ID.fullmatch(str(c.get("id") or ""))]
+        out, page = [], self._get(f"api/v2/spaces/{space_id}/{kind}", limit=250, status="current", sort="-modified-date",
+                                  **{"body-format": "storage"})
+        for _ in range(MAX_LISTING_PAGES):
+            for c in page.get("results") or []:
+                if (modified := when(c)) is not None and modified < since:
+                    return out
+                if CONTENT_ID.fullmatch(str(c.get("id") or "")):
+                    out.append(c)
+            nxt = ((page.get("_links") or {}).get("next") or "")
+            if not nxt or not nxt.startswith("/wiki/api/v2/"):  # never anywhere else
+                return out
+            page = self._get(nxt[len("/wiki/"):])
+        return out
+
+    def page(self, page_id: str) -> dict:
+        """One page, without its body: its title and parent, for a changed page whose ancestors didn't change (H6)."""
+        return self._get(f"api/v2/pages/{page_id}")
 
     def space_grants(self, space_id: str) -> tuple[set, set, bool]:
         """Who the space's permissions let read it: accounts, group ids, and whether anyone at all may (anonymous)."""
@@ -382,6 +404,14 @@ class _Readers:
         return out
 
 
+def when(c: dict) -> datetime | None:
+    """When a page's current version was made, or None when it doesn't say."""
+    try:
+        return datetime.fromisoformat(str((c.get("version") or {}).get("createdAt") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def narrowed(readers, levels: list[set]):
     """Readers after each restricted level: a page is read only by who passes every one (EVERYONE: anyone at all)."""
     for allowed in levels:
@@ -389,7 +419,7 @@ def narrowed(readers, levels: list[set]):
     return readers
 
 
-def items_for_space(client, cfg: dict, key: str, seen: dict) -> list[Item]:
+def items_for_space(client, cfg: dict, key: str, seen: dict, since: datetime | None = None) -> list[Item]:
     space = client.space(key)
     if not space:
         return []
@@ -400,9 +430,10 @@ def items_for_space(client, cfg: dict, key: str, seen: dict) -> list[Item]:
     labels = {l.strip() for l in cfg.get("labels") or [] if l and l.strip()}
     roots = {str(r) for r in cfg.get("page_trees") or []}
 
-    pages = {str(p["id"]): {**p, "_kind": "pages"} for p in client.content(str(space["id"]), "pages")}
-    posts = {str(b["id"]): {**b, "_kind": "blogposts"} for b in client.content(str(space["id"]), "blogposts")}
+    pages = {str(p["id"]): {**p, "_kind": "pages"} for p in client.content(str(space["id"]), "pages", since)}
+    posts = {str(b["id"]): {**b, "_kind": "blogposts"} for b in client.content(str(space["id"]), "blogposts", since)}
     everything = {**pages, **posts}
+    ancestors: dict[str, dict] = {}  # pages above a changed one that didn't change themselves (H6): asked for once each
     restrictions: dict[str, tuple | None] = {}
     unreadable: set[str] = set()
 
@@ -427,6 +458,19 @@ def items_for_space(client, cfg: dict, key: str, seen: dict) -> list[Item]:
             seen_ids.add(parent)
             if parent in pages:
                 parent = str(pages[parent].get("parentId")) if pages[parent].get("parentId") else None
+            elif since is not None and parent not in ancestors and CONTENT_ID.fullmatch(parent):
+                try:  # a page above a changed one, unchanged itself: this listing didn't bring it
+                    ancestors[parent] = client.page(parent)
+                except httpx.HTTPStatusError:
+                    try:
+                        ancestors[parent] = {"parentId": client.parent_of(parent), "folder": True}  # a folder
+                    except Exception:
+                        return None
+                except httpx.HTTPError:
+                    return None
+                parent = str(ancestors[parent].get("parentId")) if ancestors[parent].get("parentId") else None
+            elif parent in ancestors:
+                parent = str(ancestors[parent].get("parentId")) if ancestors[parent].get("parentId") else None
             else:
                 try:
                     parent = client.parent_of(parent)  # a folder
@@ -459,7 +503,8 @@ def items_for_space(client, cfg: dict, key: str, seen: dict) -> list[Item]:
         acl = [f"org:{config.ORG_SLUG}"] if allowed == EVERYONE else sorted(p for p in (account(a) for a in allowed) if p)
         if not acl:  # nobody may read it: it isn't indexed at all
             continue
-        titles = [everything[i]["title"].replace("›", ">") for i in reversed(ids) if i in everything and everything[i].get("title")]
+        known = {**ancestors, **everything}
+        titles = [known[i]["title"].replace("›", ">") for i in reversed(ids) if i in known and known[i].get("title")]
         webui = (c.get("_links") or {}).get("webui")
         uri = f"{client.base}/wiki{webui}" if webui and webui.startswith("/") else f"{client.base}/wiki/pages/viewpage.action?pageId={cid}"
 
@@ -489,9 +534,17 @@ def items_for_space(client, cfg: dict, key: str, seen: dict) -> list[Item]:
     return items
 
 
-def sync_space(conn, connection: dict, client: ConfluenceClient, key: str) -> dict:
-    seen: dict[str, dict] = {}
-    items = items_for_space(client, connection["config"] or {}, key, seen)
+def sync_space(conn, connection: dict, client: ConfluenceClient, key: str, since: str | None = None) -> dict:
+    """A space: every page, or (since a cursor, H6) only those modified since, newest first, with an overlap for
+    clocks; what was deleted, and restrictions changed on a page that didn't, wait for the daily reconcile (and the
+    readers refresh between)."""
+    started, seen = datetime.now(timezone.utc), {}
+    try:
+        then = datetime.fromisoformat(since) if since else None
+    except ValueError:
+        then = None
+    then = then - timedelta(minutes=OVERLAP_MINUTES) if then is not None and then.tzinfo is not None else None
+    items = items_for_space(client, connection["config"] or {}, key, seen, then)
     missing = [a for a, v in seen.items() if not v.get("email")]
     if missing:
         try:
@@ -503,7 +556,7 @@ def sync_space(conn, connection: dict, client: ConfluenceClient, key: str) -> di
     people = {a.replace(":", "."): v for a, v in seen.items() if v.get("email")}
     if people:
         record_identities(conn, connection["org_id"], "atlassian", people)
-    result = sync_container(conn, connection, key, "confluence", items)
+    result = sync_container(conn, connection, key, "confluence", items, complete=then is None, cursor=started.isoformat())
     held = conn.execute(  # the pages it now holds, never one a connection to another site holds under the same id
         "SELECT external_key FROM documents WHERE connection_id = %s AND container_ref = %s AND source_kind = 'confluence'",
         (connection["id"], key)).fetchall()
