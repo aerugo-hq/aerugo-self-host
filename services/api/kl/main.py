@@ -201,17 +201,27 @@ def model_key(ref: str | None) -> str | None:
         raise HTTPException(503, f"the secrets backend is unreachable ({type(e).__name__})") from None
 
 
-def vector_candidates(conn, q: str, targets: list[str]) -> list[dict]:
-    """One query embedding per distinct model in scope; rank fusion makes their scores comparable."""
-    conn.execute("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)")  # keep recall under RLS filters
-    found = []
-    for m in conn.execute(MODELS_SQL, {"targets": targets}).fetchall():
+def query_vectors(org_id: str, caller: Caller, q: str, targets: list[str]) -> list[tuple[dict, list[float]]]:
+    """The query's embedding from each distinct model in scope (H5): which models apply is read in a short transaction
+    of its own, and every embedding call runs after it, with no connection held while a model answers."""
+    with scoped(org_id, caller.principals) as conn:
+        models = conn.execute(MODELS_SQL, {"targets": targets}).fetchall()
+    vectors = []
+    for m in models:
         try:
             api_key = model_key(m["credential_ref"])
         except HTTPException:  # its key is gone: search still answers from the other channels
             log.warning("embedding model %s has no usable key; its vectors are skipped", m["model"])
             continue
-        vector = embed_query(m["provider"], m["model"], q, base_url=m["base_url"], api_key=api_key)
+        vectors.append((m, embed_query(m["provider"], m["model"], q, base_url=m["base_url"], api_key=api_key)))
+    return vectors
+
+
+def vector_candidates(conn, vectors: list[tuple[dict, list[float]]]) -> list[dict]:
+    """The passages nearest each of the query's embeddings; rank fusion makes their scores comparable."""
+    conn.execute("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)")  # keep recall under RLS filters
+    found = []
+    for m, vector in vectors:
         found += conn.execute(VECTOR_SQL.format(dims=int(m["dims"])),
                               {"q": vector_literal(vector), "model": m["id"], "targets": list(m["slugs"]),
                                "max_distance": MAX_DISTANCE}).fetchall()
@@ -365,70 +375,96 @@ def audience_allows(caller: Caller, audience: str | None, member_of) -> bool:
     return False
 
 
-def retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
+def retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: int,
              rerank: bool = True, mode: str = "smart", focus: list[str] | None = None) -> tuple[list, list, list]:
     """Hybrid retrieval inside the caller's RLS context, then the OpenFGA post-check and the audience
     rule on each document, then the org's reranker (if one is set, and rerank is on), then one hop along
     the entity graph from the visible curated hits. mode keeps only some channels (keyword, meaning, or curated
     sources); focus keeps only the named documents, and skips the graph hop (slice R1).
+    No model is called inside a transaction (H5): the query's embeddings are made before the first one opens, and the
+    reranker runs between the channels' transaction and the hops'. The caller audits in a transaction of its own.
     Returns (candidates, documents the caller may see, documents dropped as ACL drift)."""
     with telemetry.span("retrieve", workspaces=len(targets), limit=limit) as whole:
-        result = _retrieve(conn, caller, q, targets, limit, rerank, mode, focus)
+        result = _retrieve(org_id, caller, q, targets, limit, rerank, mode, focus)
         telemetry.set_attributes(whole, candidates=len(result[0]), returned=len(result[1]), dropped=len(result[2]))
     telemetry.drift(len(result[2]), "search")
-    alerting.signal(conn, "drift", "search", len(result[2]))
     return result
 
 
-def _retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
+def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: int,
               rerank: bool = True, mode: str = "smart", focus: list[str] | None = None) -> tuple[list, list, list]:
     words = mode != "meaning"  # the keyword channels: lexical, title, and exact names
-    with telemetry.span("retrieve.lexical") as s:
-        lexical = sorted(conn.execute(SEARCH_SQL, {"q": q, "targets": targets}).fetchall(),
-                         key=lambda r: r["rank"], reverse=True) if words else []
-        telemetry.set_attributes(s, rows=len(lexical))
-    with telemetry.span("retrieve.vector") as s:
-        vector = vector_candidates(conn, q, targets) if mode != "keyword" else []
-        telemetry.set_attributes(s, rows=len(vector))
-    with telemetry.span("retrieve.title") as s:
-        titled = sorted(conn.execute(TITLE_SQL, {"q": q, "targets": targets}).fetchall(),
-                        key=lambda r: r["rank"], reverse=True) if words else []
-        telemetry.set_attributes(s, rows=len(titled))
-    with telemetry.span("retrieve.alias") as s:  # Q2: what else the entities it names are called
-        names = other_names(conn, q, targets) if words and not focus else []
-        aliased = sorted(conn.execute(ALIAS_SQL, {"q": " or ".join(f'"{n}"' for n in names), "targets": targets}).fetchall(),
-                         key=lambda r: r["rank"], reverse=True) if names else []
-        telemetry.set_attributes(s, names=len(names), rows=len(aliased))
-    weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT}
-    base = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)], weights=weights)
-    # Curated knowledge gets its own channel: it wins when it matches as well as the evidence does,
-    # not when it barely matches.
-    candidates = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased),
-                       ("curated", [r for r in base if r.get("tier") in CURATED])], weights=weights)
-    canonical = conn.execute(CANONICAL_SQL, {"q": q.strip().lower(), "targets": targets}).fetchall() if words else []
-    if canonical:
-        exact = {r["external_key"] for r in canonical}
-        candidates = ([{**r, "matched": ["canonical"], "score": 1.0} for r in canonical]
-                      + [r for r in candidates if r["external_key"] not in exact])
-    retired = {r["concept_key"] for r in conn.execute(RETIRED_SQL).fetchall()}  # E2: retired in review, until confirmed
-    if retired:
-        candidates = [r for r in candidates if r["external_key"] not in retired]
-    if mode == "curated":
-        candidates = [r for r in candidates if r.get("tier") in CURATED]
-    if focus:  # only the named documents, each with its best passage even when no channel found it
-        candidates = [r for r in candidates if r["external_key"] in focus]
-        found = {r["external_key"] for r in candidates}
-        missing = [k for k in focus if k not in found]
-        if missing:
-            candidates += [{**r, "matched": ["focus"], "score": 0.0}
-                           for r in conn.execute(FOCUS_SQL, {"keys": missing, "q": q, "targets": targets}).fetchall()
-                           if mode != "curated" or r.get("tier") in CURATED]
+    with telemetry.span("retrieve.embed") as s:  # H5: the query's embeddings first, before any transaction opens
+        vectors = query_vectors(org_id, caller, q, targets) if mode != "keyword" else []
+        telemetry.set_attributes(s, models=len(vectors))
     member_of = memberships(caller)
     returned, dropped = [], []
 
     def drift(row) -> None:
         dropped.append(row["external_key"])
         log.warning("ACL drift: index allowed %s for %s, authz engine denied", row["external_key"], caller.username)
+
+    with scoped(org_id, caller.principals) as conn:  # the channels and the post-check
+        with telemetry.span("retrieve.lexical") as s:
+            lexical = sorted(conn.execute(SEARCH_SQL, {"q": q, "targets": targets}).fetchall(),
+                             key=lambda r: r["rank"], reverse=True) if words else []
+            telemetry.set_attributes(s, rows=len(lexical))
+        with telemetry.span("retrieve.vector") as s:
+            vector = vector_candidates(conn, vectors)
+            telemetry.set_attributes(s, rows=len(vector))
+        with telemetry.span("retrieve.title") as s:
+            titled = sorted(conn.execute(TITLE_SQL, {"q": q, "targets": targets}).fetchall(),
+                            key=lambda r: r["rank"], reverse=True) if words else []
+            telemetry.set_attributes(s, rows=len(titled))
+        with telemetry.span("retrieve.alias") as s:  # Q2: what else the entities it names are called
+            names = other_names(conn, q, targets) if words and not focus else []
+            aliased = sorted(conn.execute(ALIAS_SQL, {"q": " or ".join(f'"{n}"' for n in names), "targets": targets}).fetchall(),
+                             key=lambda r: r["rank"], reverse=True) if names else []
+            telemetry.set_attributes(s, names=len(names), rows=len(aliased))
+        weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT}
+        base = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)], weights=weights)
+        # Curated knowledge gets its own channel: it wins when it matches as well as the evidence does,
+        # not when it barely matches.
+        candidates = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased),
+                           ("curated", [r for r in base if r.get("tier") in CURATED])], weights=weights)
+        canonical = conn.execute(CANONICAL_SQL, {"q": q.strip().lower(), "targets": targets}).fetchall() if words else []
+        if canonical:
+            exact = {r["external_key"] for r in canonical}
+            candidates = ([{**r, "matched": ["canonical"], "score": 1.0} for r in canonical]
+                          + [r for r in candidates if r["external_key"] not in exact])
+        retired = {r["concept_key"] for r in conn.execute(RETIRED_SQL).fetchall()}  # E2: retired in review, until confirmed
+        if retired:
+            candidates = [r for r in candidates if r["external_key"] not in retired]
+        if mode == "curated":
+            candidates = [r for r in candidates if r.get("tier") in CURATED]
+        if focus:  # only the named documents, each with its best passage even when no channel found it
+            candidates = [r for r in candidates if r["external_key"] in focus]
+            found = {r["external_key"] for r in candidates}
+            missing = [k for k in focus if k not in found]
+            if missing:
+                candidates += [{**r, "matched": ["focus"], "score": 0.0}
+                               for r in conn.execute(FOCUS_SQL, {"keys": missing, "q": q, "targets": targets}).fetchall()
+                               if mode != "curated" or r.get("tier") in CURATED]
+        # With a reranker, more candidates pass the post-check than will be returned, so it has a pool to
+        # reorder; it never reads one that hasn't passed. Checked in batches: one OpenFGA request per 50
+        # candidates instead of one each.
+        reranker = conn.execute("SELECT provider, model, base_url, credential_ref, allowed_classifications "
+                                "FROM rerank_models").fetchone() if rerank else None
+        pool = max(limit, RERANK_POOL) if reranker else limit
+        with telemetry.span("retrieve.post_check") as s:
+            start = 0
+            while len(returned) < pool and start < len(candidates):
+                batch = candidates[start:start + 50]
+                start += len(batch)
+                viewable = fga.batch_check(caller.fga_user, "viewer", [f"document:{r['external_key']}" for r in batch])
+                for row in batch:
+                    if len(returned) >= pool:
+                        break
+                    if f"document:{row['external_key']}" not in viewable:
+                        drift(row)
+                    elif audience_allows(caller, row.get("audience"), member_of):
+                        returned.append(row)
+            telemetry.set_attributes(s, returned=len(returned), dropped=len(dropped))
 
     def allowed(row) -> bool:
         if row["external_key"] in retired:
@@ -438,26 +474,7 @@ def _retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
             return False
         return audience_allows(caller, row.get("audience"), member_of)
 
-    # With a reranker, more candidates pass the post-check than will be returned, so it has a pool to
-    # reorder; it never reads one that hasn't passed. Checked in batches: one OpenFGA request per 50
-    # candidates instead of one each.
-    reranker = conn.execute("SELECT provider, model, base_url, credential_ref, allowed_classifications "
-                            "FROM rerank_models").fetchone() if rerank else None
-    pool = max(limit, RERANK_POOL) if reranker else limit
-    with telemetry.span("retrieve.post_check") as s:
-        start = 0
-        while len(returned) < pool and start < len(candidates):
-            batch = candidates[start:start + 50]
-            start += len(batch)
-            viewable = fga.batch_check(caller.fga_user, "viewer", [f"document:{r['external_key']}" for r in batch])
-            for row in batch:
-                if len(returned) >= pool:
-                    break
-                if f"document:{row['external_key']}" not in viewable:
-                    drift(row)
-                elif audience_allows(caller, row.get("audience"), member_of):
-                    returned.append(row)
-        telemetry.set_attributes(s, returned=len(returned), dropped=len(dropped))
+    withheld = 0  # passages the reranker may not read, recorded with the hops
     if reranker and len(returned) > 1:
         with telemetry.span("retrieve.rerank", pool=len(returned)) as s:
             try:
@@ -465,74 +482,76 @@ def _retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
                 returned, read, withheld = rerank_rows(returned, q, reranker, api_key)
                 telemetry.set_attributes(s, read=read, withheld=withheld)
                 telemetry.withheld(withheld, "rerank")
-                alerting.signal(conn, "withheld", "rerank", withheld)
             except (RerankError, httpx.HTTPError, ValueError, KeyError) as e:  # search never fails on the reranker
                 log.warning("reranker failed (%s); keeping fusion's order", type(e).__name__)
                 telemetry.set_attributes(s, failed=type(e).__name__)
     returned = returned[:limit]
-    hubs = [r["external_key"] for r in returned if r.get("tier") in CURATED]
-    if hubs and len(returned) < limit and not focus:
-        with telemetry.span("retrieve.graph", hubs=len(hubs)) as s:
-            seen = {r["external_key"] for r in returned}
-            reachable = resolve_targets(conn, caller, "org")
-            before = len(returned)
-            for row in conn.execute(NEIGHBORS_SQL, {"keys": hubs, "targets": reachable}).fetchall():
-                if len(returned) >= limit:
-                    break
-                if row["external_key"] not in seen and allowed(row):
-                    seen.add(row["external_key"])
-                    returned.append({**row, "matched": ["graph"], "score": 0.0})
-            telemetry.set_attributes(s, added=len(returned) - before)
-    # The walk (slice K8): the pages returned pages wrote down come along next, when there's room, each authorized
-    # on its own, hop by hop (invariant 15), so a reference never carries anyone past what they may read.
-    if returned and len(returned) < limit and not focus:
-        with telemetry.span("retrieve.references") as s:
-            seen = {r["external_key"] for r in returned}
-            before = len(returned)
-            for row in conn.execute(REFERENCE_NEIGHBORS_SQL, {"keys": sorted(seen), "targets": resolve_targets(conn, caller, "org")}).fetchall():
-                if len(returned) >= limit:
-                    break
-                if row["external_key"] not in seen and allowed(row):
-                    seen.add(row["external_key"])
-                    returned.append({**row, "matched": ["references"], "score": 0.0})
-            telemetry.set_attributes(s, added=len(returned) - before)
-    # Lineage (Q4): what the assets a question names, or the results describe, feed and are fed by, through the
-    # caller's own teams' lineage only; the pages describing them come along when there's room, each authorized.
-    if returned and not focus:
-        with telemetry.span("retrieve.lineage") as s:
-            nodes, edges = visible_lineage(conn, sorted(member_of))
-            by_name: dict[str, set[str]] = {}
-            for aid, node in nodes.items():
-                by_name.setdefault(node["name"].lower(), set()).add(aid)
-            described = {r["external_key"]: set(r["names"]) for r in conn.execute(
-                DESCRIBED_SQL, {"keys": [r["external_key"] for r in returned]}).fetchall()} if nodes else {}
-            named = {aid for word in IDENTIFIER.findall(q) for aid in by_name.get(word.lower().rstrip(".?!,"), ())}
-            start = named | {aid for names in described.values() for n in names for aid in by_name.get(n, ())}
-            reached = lineage_reach(edges, start, True) | lineage_reach(edges, start, False) if start else set()
-            before, seen = len(returned), {r["external_key"] for r in returned}
-            if reached and len(returned) < limit:
-                names = sorted({nodes[a]["name"].lower() for a in reached})
-                for row in conn.execute(LINEAGE_PAGES_SQL, {"names": names, "targets": resolve_targets(conn, caller, "org")}).fetchall():
+    with scoped(org_id, caller.principals) as conn:  # the hops from what passed, each page authorized on its own
+        alerting.signal(conn, "withheld", "rerank", withheld)
+        hubs = [r["external_key"] for r in returned if r.get("tier") in CURATED]
+        if hubs and len(returned) < limit and not focus:
+            with telemetry.span("retrieve.graph", hubs=len(hubs)) as s:
+                seen = {r["external_key"] for r in returned}
+                reachable = resolve_targets(conn, caller, "org")
+                before = len(returned)
+                for row in conn.execute(NEIGHBORS_SQL, {"keys": hubs, "targets": reachable}).fetchall():
                     if len(returned) >= limit:
                         break
                     if row["external_key"] not in seen and allowed(row):
                         seen.add(row["external_key"])
-                        returned.append({**row, "matched": ["lineage"], "score": 0.0})
-            if nodes:  # each result names what its assets feed, as far as the caller's teams' lineage says
-                described = {r["external_key"]: set(r["names"]) for r in conn.execute(  # the pages the walk added, too
-                    DESCRIBED_SQL, {"keys": [r["external_key"] for r in returned]}).fetchall()}
-                for r in returned:
-                    if r["external_key"] in described:
-                        mine = {aid for n in described[r["external_key"]] for aid in by_name.get(n, ())}
-                        r["reaches"] = sorted({nodes[a]["name"] for a in lineage_reach(edges, mine, True)})[:10]
-            telemetry.set_attributes(s, assets=len(reached), added=len(returned) - before)
-    # Current knowledge first (slice K5): a returned page another returned page supersedes moves just after it. Only
-    # pages that passed the post-check take part, so the order never hints at anything the caller can't see.
-    keys = [r["external_key"] for r in returned]
-    if len(keys) > 1:
-        pairs = [(row["newer"], row["older"]) for row in conn.execute(SUPERSEDES_SQL, {"keys": keys}).fetchall()]
-        if pairs:
-            returned = current_first(returned, pairs)
+                        returned.append({**row, "matched": ["graph"], "score": 0.0})
+                telemetry.set_attributes(s, added=len(returned) - before)
+        # The walk (slice K8): the pages returned pages wrote down come along next, when there's room, each authorized
+        # on its own, hop by hop (invariant 15), so a reference never carries anyone past what they may read.
+        if returned and len(returned) < limit and not focus:
+            with telemetry.span("retrieve.references") as s:
+                seen = {r["external_key"] for r in returned}
+                before = len(returned)
+                for row in conn.execute(REFERENCE_NEIGHBORS_SQL, {"keys": sorted(seen), "targets": resolve_targets(conn, caller, "org")}).fetchall():
+                    if len(returned) >= limit:
+                        break
+                    if row["external_key"] not in seen and allowed(row):
+                        seen.add(row["external_key"])
+                        returned.append({**row, "matched": ["references"], "score": 0.0})
+                telemetry.set_attributes(s, added=len(returned) - before)
+        # Lineage (Q4): what the assets a question names, or the results describe, feed and are fed by, through the
+        # caller's own teams' lineage only; the pages describing them come along when there's room, each authorized.
+        if returned and not focus:
+            with telemetry.span("retrieve.lineage") as s:
+                nodes, edges = visible_lineage(conn, sorted(member_of))
+                by_name: dict[str, set[str]] = {}
+                for aid, node in nodes.items():
+                    by_name.setdefault(node["name"].lower(), set()).add(aid)
+                described = {r["external_key"]: set(r["names"]) for r in conn.execute(
+                    DESCRIBED_SQL, {"keys": [r["external_key"] for r in returned]}).fetchall()} if nodes else {}
+                named = {aid for word in IDENTIFIER.findall(q) for aid in by_name.get(word.lower().rstrip(".?!,"), ())}
+                start = named | {aid for names in described.values() for n in names for aid in by_name.get(n, ())}
+                reached = lineage_reach(edges, start, True) | lineage_reach(edges, start, False) if start else set()
+                before, seen = len(returned), {r["external_key"] for r in returned}
+                if reached and len(returned) < limit:
+                    names = sorted({nodes[a]["name"].lower() for a in reached})
+                    for row in conn.execute(LINEAGE_PAGES_SQL, {"names": names, "targets": resolve_targets(conn, caller, "org")}).fetchall():
+                        if len(returned) >= limit:
+                            break
+                        if row["external_key"] not in seen and allowed(row):
+                            seen.add(row["external_key"])
+                            returned.append({**row, "matched": ["lineage"], "score": 0.0})
+                if nodes:  # each result names what its assets feed, as far as the caller's teams' lineage says
+                    described = {r["external_key"]: set(r["names"]) for r in conn.execute(  # the pages the walk added, too
+                        DESCRIBED_SQL, {"keys": [r["external_key"] for r in returned]}).fetchall()}
+                    for r in returned:
+                        if r["external_key"] in described:
+                            mine = {aid for n in described[r["external_key"]] for aid in by_name.get(n, ())}
+                            r["reaches"] = sorted({nodes[a]["name"] for a in lineage_reach(edges, mine, True)})[:10]
+                telemetry.set_attributes(s, assets=len(reached), added=len(returned) - before)
+        # Current knowledge first (slice K5): a returned page another returned page supersedes moves just after it. Only
+        # pages that passed the post-check take part, so the order never hints at anything the caller can't see.
+        keys = [r["external_key"] for r in returned]
+        if len(keys) > 1:
+            pairs = [(row["newer"], row["older"]) for row in conn.execute(SUPERSEDES_SQL, {"keys": keys}).fetchall()]
+            if pairs:
+                returned = current_first(returned, pairs)
+        alerting.signal(conn, "drift", "search", len(dropped))
     return candidates, returned, dropped
 
 
@@ -767,7 +786,9 @@ def search(
     rate_limit(org_id, caller, "search", None)
     with scoped(org_id, caller.principals) as conn:
         targets = resolve_targets(conn, caller, scope)
-        candidates, returned, dropped = retrieve(conn, caller, q, targets, max(limit, FACET_POOL) if sources or containers else limit, rerank=rerank)
+    candidates, returned, dropped = retrieve(org_id, caller, q, targets, max(limit, FACET_POOL) if sources or containers else limit,
+                                             rerank=rerank)  # its own transactions: no model call inside one (H5)
+    with scoped(org_id, caller.principals) as conn:
         returned, facets = narrowed(conn, returned, sources, containers)  # E1: only what passed the post-check is counted
         returned = returned[:limit]
         reranked = any("rerank" in r["matched"] for r in returned)
@@ -878,7 +899,8 @@ def register_model(ws: str, body: ModelEndpointIn, caller: Caller = Depends(auth
                    managed: tuple | None = Depends(managed_header)):
     require_workspace_admin(caller, ws)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    path = f"kl/{config.ORG_SLUG}/{ws}/models/{body.name}"
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
@@ -886,7 +908,7 @@ def register_model(ws: str, body: ModelEndpointIn, caller: Caller = Depends(auth
                              (ws_row["id"], body.name)).fetchone()
         if taken:
             raise HTTPException(409, "a model with that name already exists in this workspace")
-        ref = vault.put(f"kl/{config.ORG_SLUG}/{ws}/models/{body.name}", {"api_key": body.api_key})
+        ref = vault.ref(path)
         row = conn.execute(
             """INSERT INTO model_endpoints
                  (org_id, workspace_id, name, provider, model, base_url, credential_ref,
@@ -896,6 +918,7 @@ def register_model(ws: str, body: ModelEndpointIn, caller: Caller = Depends(auth
             (org_id, ws_row["id"], body.name, body.provider, body.model, body.base_url, ref,
              list(body.allowed_classifications), caller.username),
         ).fetchone()
+        put(path, {"api_key": body.api_key})  # H5: once the row holds the name; destroyed if the change fails
         audit(conn, org_id, caller.username, "model.register", [ws],
               {"name": body.name, "provider": body.provider, "model": body.model})
         note_managed(conn, org_id, "model", f"{ws}/{body.name}", managed, caller.username)
@@ -932,11 +955,11 @@ def update_model(ws: str, name: str, body: ModelEndpointPatch, caller: Caller = 
         if changes:  # column names come from the fixed list above, never from the request
             conn.execute(f"UPDATE model_endpoints SET {', '.join(f'{k} = %s' for k in changes)} WHERE id = %s",
                          (*changes.values(), row["id"]))
-        if body.api_key:
-            vault.rotate(row["credential_ref"], {"api_key": body.api_key})
         changed = sorted(changes) + (["api_key"] if body.api_key else [])
         audit(conn, org_id, caller.username, "model.update", [ws], {"name": name, "changed": changed})
         note_managed(conn, org_id, "model", f"{ws}/{name}", managed, caller.username)
+        if body.api_key:  # last, so only the commit can fail after it (H5)
+            vault.rotate(row["credential_ref"], {"api_key": body.api_key})
     return {"name": name, "changed": changed}
 
 
@@ -948,10 +971,10 @@ def remove_model(ws: str, name: str, caller: Caller = Depends(authenticate)):
     with scoped(org_id, caller.principals) as conn:
         row = _team_model(conn, ws, name)
         conn.execute("DELETE FROM model_endpoints WHERE id = %s", (row["id"],))
-        vault.destroy(row["credential_ref"])
         audit(conn, org_id, caller.username, "model.remove", [ws], {"name": name})
         forget_managed(conn, "model", f"{ws}/{name}")
         forget_managed(conn, "model_budget", f"{ws}/{name}")
+    vault.destroy_committed(row["credential_ref"])  # H5: only once the removal has committed
     return {"removed": name}
 
 
@@ -970,8 +993,8 @@ def probe_model(ws: str, name: str, caller: Caller = Depends(authenticate)):
         ).fetchone()
         if not row:
             raise HTTPException(404, "model not found")
-        api_key = model_key(row["credential_ref"])
-        result = probe(row["provider"], row["model"], row["base_url"], api_key)
+    result = probe(row["provider"], row["model"], row["base_url"], model_key(row["credential_ref"]))  # no transaction open (H5)
+    with scoped(org_id, caller.principals) as conn:
         audit(conn, org_id, caller.username, "model.probe", [ws], {"name": name, **result})
     return result
 
@@ -1014,14 +1037,13 @@ def set_reranker(body: RerankerIn, caller: Caller = Depends(authenticate)):
     destroyed); leaving the key out keeps the current one."""
     require_org_admin(caller)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    path = f"kl/{config.ORG_SLUG}/reranker"
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:
         current = conn.execute("SELECT credential_ref FROM rerank_models").fetchone()
         ref = current["credential_ref"] if current else None
-        if body.api_key:
-            if ref:
-                vault.rotate(ref, {"api_key": body.api_key})
-            else:
-                ref = vault.put(f"kl/{config.ORG_SLUG}/reranker", {"api_key": body.api_key})
+        first_key = bool(body.api_key) and not ref
+        if first_key:
+            ref = vault.ref(path)
         row = conn.execute(
             f"""INSERT INTO rerank_models (org_id, provider, model, base_url, credential_ref, allowed_classifications, created_by)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -1032,8 +1054,12 @@ def set_reranker(body: RerankerIn, caller: Caller = Depends(authenticate)):
                 RETURNING {RERANKER_COLUMNS}""",
             (org_id, body.provider, body.model, body.base_url, ref, list(body.allowed_classifications), caller.username),
         ).fetchone()
+        if first_key:  # H5: once the org's row is this change's; destroyed if the change fails
+            put(path, {"api_key": body.api_key})
         audit(conn, org_id, caller.username, "reranker.set", [],
               {"provider": body.provider, "model": body.model, "allowed_classifications": list(body.allowed_classifications)})
+        if body.api_key and not first_key:  # a new key for the one it has: last, so only the commit can follow (H5)
+            vault.rotate(ref, {"api_key": body.api_key})
     return _reranker_out(row)
 
 
@@ -1046,9 +1072,8 @@ def remove_reranker(caller: Caller = Depends(authenticate)):
         row = conn.execute("DELETE FROM rerank_models RETURNING credential_ref").fetchone()
         if not row:
             raise HTTPException(404, "no reranker is set")
-        if row["credential_ref"]:
-            vault.destroy(row["credential_ref"])
         audit(conn, org_id, caller.username, "reranker.remove", [], {})
+    vault.destroy_committed(row["credential_ref"])  # H5: only once the removal has committed
     return {"removed": True}
 
 
@@ -1224,17 +1249,19 @@ def set_alert_webhook(body: AlertWebhookIn, caller: Caller = Depends(authenticat
     """Post page and warn alerts to this webhook (org admins). Slack's incoming webhooks work as they are."""
     require_org_admin(caller)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    path = f"kl/{config.ORG_SLUG}/alerts-webhook"
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:
         row = conn.execute("SELECT webhook_ref FROM alert_settings").fetchone()
-        if row and row["webhook_ref"]:
-            vault.rotate(row["webhook_ref"], {"url": body.url})
-            ref = row["webhook_ref"]
-        else:
-            ref = vault.put(f"kl/{config.ORG_SLUG}/alerts-webhook", {"url": body.url})
+        ref = row["webhook_ref"] if row and row["webhook_ref"] else None
+        first = ref is None
         conn.execute("""INSERT INTO alert_settings (org_id, webhook_ref, updated_by) VALUES (%s, %s, %s)
                         ON CONFLICT (org_id) DO UPDATE SET webhook_ref = EXCLUDED.webhook_ref,
-                          updated_by = EXCLUDED.updated_by, updated_at = now()""", (org_id, ref, caller.username))
+                          updated_by = EXCLUDED.updated_by, updated_at = now()""", (org_id, ref or vault.ref(path), caller.username))
+        if first:  # H5: once the org's row is this change's; destroyed if the change fails
+            put(path, {"url": body.url})
         audit(conn, org_id, caller.username, "alerts.webhook.set", [], {})
+        if not first:  # a new address for the one it has: last, so only the commit can follow (H5)
+            vault.rotate(ref, {"url": body.url})
     return {"set": True}
 
 
@@ -1246,10 +1273,11 @@ def remove_alert_webhook(caller: Caller = Depends(authenticate)):
     with scoped(org_id, caller.principals) as conn:
         row = conn.execute("SELECT webhook_ref FROM alert_settings").fetchone()
         if row and row["webhook_ref"]:
-            vault.destroy(row["webhook_ref"])
             conn.execute("UPDATE alert_settings SET webhook_ref = NULL, updated_by = %s, updated_at = now()",
                          (caller.username,))
             audit(conn, org_id, caller.username, "alerts.webhook.remove", [], {})
+    if row and row["webhook_ref"]:
+        vault.destroy_committed(row["webhook_ref"])  # H5: only once the removal has committed
     return {"set": False}
 
 
@@ -2014,13 +2042,14 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         if not endpoint:
             raise HTTPException(404, "model not found")
         targets = resolve_targets(conn, caller, scope)
-        last_question = next((m["content"] for m in reversed(earlier or []) if m["role"] == "user"), "")
-        narrow = [s for s in sources_only or [] if SOURCE_FILTER.fullmatch(s)], [c for c in containers_only or [] if 0 < len(c) <= 300]
-        _, visible, dropped = retrieve(conn, caller, f"{last_question} {question}".strip(), targets,
-                                       max(max_sources, FACET_POOL) if any(narrow) else max_sources, mode=mode, focus=focus)
+    last_question = next((m["content"] for m in reversed(earlier or []) if m["role"] == "user"), "")
+    narrow = [s for s in sources_only or [] if SOURCE_FILTER.fullmatch(s)], [c for c in containers_only or [] if 0 < len(c) <= 300]
+    _, visible, dropped = retrieve(org_id, caller, f"{last_question} {question}".strip(), targets,  # its own transactions (H5)
+                                   max(max_sources, FACET_POOL) if any(narrow) else max_sources, mode=mode, focus=focus)
+    allowed = set(endpoint["allowed_classifications"])
+    with scoped(org_id, caller.principals) as conn:  # what the model may receive, and whether the budget allows it
         if any(narrow):  # E1: only the chosen sources and containers
             visible = narrowed(conn, visible, *narrow)[0][:max_sources]
-        allowed = set(endpoint["allowed_classifications"])
         history = earlier_turns(conn, earlier or [], model, allowed)
         with telemetry.span("ask.egress") as s:
             sources = [r for r in visible if r["classification"] in allowed]
@@ -2028,25 +2057,28 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
             telemetry.set_attributes(s, sources=len(sources), withheld=len(withheld))
         telemetry.withheld(len(withheld), "ask")
         alerting.signal(conn, "withheld", "ask", len(withheld))
-        answer, usage = NOT_FOUND, {}
         if sources:
             budget, refused = budget_gate(conn, org_id, caller, model, endpoint)
-        if sources and not refused:
-            api_key = model_key(endpoint["credential_ref"])
-            try:
-                with telemetry.span("ask.model", provider=endpoint["provider"], model=endpoint["model"]) as s:
-                    answer, usage = chat(endpoint["provider"], endpoint["model"], endpoint["base_url"], api_key,
-                                         SYSTEM_PROMPT, with_history(history, build_prompt(question, sources) + ANSWER_REMINDER))
-                    telemetry.set_attributes(s, prompt_tokens=usage.get("prompt_tokens") or 0,
-                                             completion_tokens=usage.get("completion_tokens") or 0)
-            except GatewayError as e:
-                raise HTTPException(502, str(e))
-            telemetry.tokens(usage, model.split("/", 1)[0], endpoint["model"])
+    answer, usage = NOT_FOUND, {}
+    answered = bool(sources) and not refused
+    if answered:  # the model answers with no transaction open (H5): a slow one holds no database connection
+        api_key = model_key(endpoint["credential_ref"])
+        try:
+            with telemetry.span("ask.model", provider=endpoint["provider"], model=endpoint["model"]) as s:
+                answer, usage = chat(endpoint["provider"], endpoint["model"], endpoint["base_url"], api_key,
+                                     SYSTEM_PROMPT, with_history(history, build_prompt(question, sources) + ANSWER_REMINDER))
+                telemetry.set_attributes(s, prompt_tokens=usage.get("prompt_tokens") or 0,
+                                         completion_tokens=usage.get("completion_tokens") or 0)
+        except GatewayError as e:
+            raise HTTPException(502, str(e))
+        telemetry.tokens(usage, model.split("/", 1)[0], endpoint["model"])
+    cited = {int(n) for n in re.findall(r"\[(\d{1,2})\]", answer)}
+    with scoped(org_id, caller.principals) as conn:  # what it cost, how sure it is, and the audit
+        if answered:
             conn.execute("INSERT INTO model_usage (org_id, workspace_id, endpoint_id, prompt_tokens, completion_tokens) "
                          "VALUES (%s, %s, %s, %s, %s)", (org_id, endpoint["workspace_id"], endpoint["id"],
                                                          usage.get("prompt_tokens"), usage.get("completion_tokens")))
             budget = budget_after(conn, org_id, caller, model, budget, usage)
-        cited = {int(n) for n in re.findall(r"\[(\d{1,2})\]", answer)}
         fitted = conn.execute("SELECT threshold FROM claim_calibration").fetchone()  # Q3: the evaluation set's, or the default
         claims = check_claims(answer, {n: r["body"] for n, r in enumerate(sources, 1)},
                               fitted["threshold"] if fitted else DEFAULT_THRESHOLD) if answer != NOT_FOUND else []
@@ -3242,57 +3274,63 @@ def compile_concept(ws: str, body: CompileIn, caller: Caller = Depends(authentic
                WHERE w.slug = %s AND m.name = %s""", (ws, ref.group(2))).fetchone()
         if not endpoint:
             raise HTTPException(404, "model not found")
-        # Curated concepts aren't compiler input, so ask for extra candidates and keep the top evidence.
-        _, visible, dropped = retrieve(conn, caller, body.topic, [ws], body.max_sources * 3)
-        evidence = [r for r in visible if (r.get("tier") or "evidence") == "evidence"][:body.max_sources]
+    # Curated concepts aren't compiler input, so ask for extra candidates and keep the top evidence.
+    _, visible, dropped = retrieve(org_id, caller, body.topic, [ws], body.max_sources * 3)  # its own transactions (H5)
+    evidence = [r for r in visible if (r.get("tier") or "evidence") == "evidence"][:body.max_sources]
+    allowed = set(endpoint["allowed_classifications"])
+    withheld = [r["external_key"] for r in evidence if r["classification"] not in allowed]
+    with scoped(org_id, caller.principals) as conn:  # who reads each source, and whether the budget allows a draft
         acls = {r["external_key"]: r["acl_principals"] for r in conn.execute(
             "SELECT external_key, acl_principals FROM documents WHERE external_key = ANY(%s)",
             ([r["external_key"] for r in evidence],)).fetchall()}
-        allowed = set(endpoint["allowed_classifications"])
-        withheld = [r["external_key"] for r in evidence if r["classification"] not in allowed]
         telemetry.withheld(len(withheld), "compile")
         alerting.signal(conn, "withheld", "compile", len(withheld))
         audience, sources, excluded = compiler.choose_audience(
             config.ORG_SLUG, [{**r, "acl_principals": acls.get(r["external_key"], [])}
                               for r in evidence if r["classification"] in allowed])
-        problems, proposal = [], None
         budget, over = budget_gate(conn, org_id, caller, body.model, endpoint) if sources else (None, None)
-        if not sources:
-            refusal = (422, "no sources in this workspace that the model may receive and one audience can read")
-        elif over:
-            refusal = (429, over, {"Retry-After": str(seconds_to_next_month())})
+    problems, usage, draft = [], None, None
+    if not sources:
+        refusal = (422, "no sources in this workspace that the model may receive and one audience can read")
+    elif over:
+        refusal = (429, over, {"Retry-After": str(seconds_to_next_month())})
+    else:  # the model drafts, and the draft is sealed, with no transaction open (H5)
+        api_key = model_key(endpoint["credential_ref"])
+        try:
+            with telemetry.span("compile.model", provider=endpoint["provider"], model=endpoint["model"], sources=len(sources)):
+                answer, usage = chat(endpoint["provider"], endpoint["model"], endpoint["base_url"], api_key,
+                                     compiler.SYSTEM_PROMPT, build_prompt(f"Write the concept: {body.topic}", sources),
+                                     max_tokens=1500)
+        except GatewayError as e:
+            raise HTTPException(502, str(e))
+        telemetry.tokens(usage, ws, endpoint["model"])
+        try:
+            key, text, problems = compiler.build_draft(
+                ws=ws, topic=body.topic, model_ref=body.model, model_name=endpoint["model"], answer=answer,
+                sources=sources, audience=audience)
+        except compiler.DraftError as e:
+            key, text, problems = None, None, [str(e)]
+        if problems:
+            refusal = (422, {"message": "the draft failed knowledge checks, so it wasn't kept", "problems": problems})
         else:
-            api_key = model_key(endpoint["credential_ref"])
-            try:
-                with telemetry.span("compile.model", provider=endpoint["provider"], model=endpoint["model"], sources=len(sources)):
-                    answer, usage = chat(endpoint["provider"], endpoint["model"], endpoint["base_url"], api_key,
-                                         compiler.SYSTEM_PROMPT, build_prompt(f"Write the concept: {body.topic}", sources),
-                                         max_tokens=1500)
-            except GatewayError as e:
-                raise HTTPException(502, str(e))
-            telemetry.tokens(usage, ws, endpoint["model"])
+            draft_key = originals.team_key(endpoint["workspace_id"])  # stored encrypted (slice I3b)
+            draft = (key, text, okf.parse(text, key).meta["title"], originals.seal(text, draft_key), draft_key)
+    with scoped(org_id, caller.principals) as conn:  # what it cost, the proposal, and the audit
+        if usage is not None:
             conn.execute("INSERT INTO model_usage (org_id, workspace_id, endpoint_id, prompt_tokens, completion_tokens) "
                          "VALUES (%s, %s, %s, %s, %s)", (org_id, endpoint["workspace_id"], endpoint["id"],
                                                          usage.get("prompt_tokens"), usage.get("completion_tokens")))
             budget_after(conn, org_id, caller, body.model, budget, usage)
-            try:
-                key, text, problems = compiler.build_draft(
-                    ws=ws, topic=body.topic, model_ref=body.model, model_name=endpoint["model"], answer=answer,
-                    sources=sources, audience=audience)
-            except compiler.DraftError as e:
-                key, text, problems = None, None, [str(e)]
-            if problems:
-                refusal = (422, {"message": "the draft failed knowledge checks, so it wasn't kept", "problems": problems})
-            else:
-                readers = sorted({compiler.audience_principal(config.ORG_SLUG, audience), f"user:{caller.username}"})
-                draft_key = originals.team_key(endpoint["workspace_id"])  # stored encrypted (slice I3b)
-                proposal = conn.execute(
-                    """INSERT INTO proposals (org_id, workspace_id, concept_key, title, content, audience, source_keys,
-                                              model, acl_principals, created_by, key_ref)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                    (org_id, endpoint["workspace_id"], key, okf.parse(text, key).meta["title"], originals.seal(text, draft_key),
-                     audience, [s["external_key"] for s in sources], body.model, readers, caller.username, draft_key)).fetchone()
-                out = {"proposal": str(proposal["id"]), "concept_id": key, "audience": audience, "okf": text}
+        if draft:
+            key, text, title, sealed, draft_key = draft
+            readers = sorted({compiler.audience_principal(config.ORG_SLUG, audience), f"user:{caller.username}"})
+            proposal = conn.execute(
+                """INSERT INTO proposals (org_id, workspace_id, concept_key, title, content, audience, source_keys,
+                                          model, acl_principals, created_by, key_ref)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                (org_id, endpoint["workspace_id"], key, title, sealed,
+                 audience, [s["external_key"] for s in sources], body.model, readers, caller.username, draft_key)).fetchone()
+            out = {"proposal": str(proposal["id"]), "concept_id": key, "audience": audience, "okf": text}
         audit(conn, org_id, caller.username, "compile", [ws], {
             "topic": body.topic, "model": body.model, "sources": [s["external_key"] for s in sources],
             "withheld_by_egress": withheld, "excluded_by_audience": [s["external_key"] for s in excluded],
