@@ -39,7 +39,7 @@ from .gateway import GatewayError, build_prompt, chat
 from .links import identifier_names
 from .managed import forget_managed, managed_header, managed_info, note_managed
 from .people import who_to_ask
-from .policy import SLUG, audit, memberships, require_workspace_admin
+from .policy import SLUG, audit, memberships, require_org_admin, require_workspace_admin
 from .providers import probe
 from .ranking import current_first, fuse
 from .rerank import POOL as RERANK_POOL, RerankError, rerank as rerank_rows
@@ -811,11 +811,6 @@ class RerankerIn(BaseModel):
     base_url: str = Field(min_length=1, max_length=500)
     api_key: str | None = Field(default=None, min_length=1, max_length=8192, repr=False)  # None: keep, or keyless
     allowed_classifications: list[Classification] = Field(default_factory=lambda: ["public", "internal"])
-
-
-def require_org_admin(caller: Caller) -> None:
-    if not fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}"):
-        raise HTTPException(403, "org admin required")
 
 
 RERANKER_COLUMNS = "provider, model, base_url, credential_ref, allowed_classifications, created_by, created_at"

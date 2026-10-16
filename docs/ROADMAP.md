@@ -53,11 +53,11 @@ baseline is already in place (only its golden-set part is left), so each source 
       and the account's setup written down (`docs/connectors/confluence.md`)
 
 ### S2. Google Workspace as a directory
-- [ ] The Admin SDK's Directory API, through the service account with domain-wide delegation, read-only scopes only
-- [ ] People and their state (active, suspended, deleted) into `directory_people`; leavers revoked at once, as Okta's are
-- [ ] Groups and their members, nested groups included, kept current
-- [ ] Drive: a file shared with a group reaches its members (today it reaches no one)
-- [ ] Smoke: a group share reaches a member and not a stranger; a leaver loses it
+- [x] The Admin SDK's Directory API, through the service account with domain-wide delegation, read-only scopes only
+- [x] People and their state (active, suspended, deleted) into `directory_people`; leavers revoked at once, as Okta's are
+- [x] Groups and their members, nested groups included, kept current
+- [x] Drive: a file shared with a group reaches its members (today it reaches no one)
+- [x] Smoke: a group share reaches a member and not a stranger; a leaver loses it
 
 ### S3. Entra as a directory
 - [ ] Microsoft Graph through an app registration (a certificate or a federated credential, never a client secret if

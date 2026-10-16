@@ -3161,52 +3161,186 @@ def drive_reads_as_a_service_account():
 
 @check
 def a_directory_revokes_leavers_at_once():
-    """Directories (ADR 0011): when a directory says someone has left, their matched identities are revoked at once, grants and all, without waiting for a sign-in that won't come; matching refuses them after that; someone still there keeps theirs; an internal address and another team's secret are refused"""
+    """Directories (ADR 0011): only an org admin connects, changes, or removes one (a team admin is refused, and still reads it); when it says someone has left, their matched identities are revoked at once, grants and all, without waiting for a sign-in that won't come; someone it listed before and lists no more has left too; matching refuses them after that; someone still there keeps theirs; an internal address and another team's secret are refused"""
     from .authz import fga
     tag = secrets.token_hex(3)
-    leaver, stays = f"557058.leaver{tag}", f"557058.stays{tag}"
+    leaver, stays, vanishes = f"557058.leaver{tag}", f"557058.stays{tag}", f"557058.vanishes{tag}"
     name = f"okta-{tag}"
     with psycopg.connect(OWNER_DB, autocommit=True) as conn:
         org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
-        conn.execute("INSERT INTO kl.source_identities (org_id, source, external_id, email) "
-                     "VALUES (%s, 'atlassian', %s, 'carol@acme.test'), (%s, 'atlassian', %s, 'alice@acme.test')", (org, leaver, org, stays))
+        conn.execute("INSERT INTO kl.source_identities (org_id, source, external_id, email) VALUES (%s, 'atlassian', %s, 'carol@acme.test'), "
+                     "(%s, 'atlassian', %s, 'alice@acme.test'), (%s, 'atlassian', %s, 'bob@acme.test')", (org, leaver, org, stays, org, vanishes))
 
     def alias(user, external):
         with psycopg.connect(OWNER_DB) as conn:
             return bool(conn.execute("SELECT 1 FROM kl.principal_aliases WHERE source = %s AND canonical = %s AND verified_by = 'sso-email'",
                                      (f"ext:atlassian.{external}", f"user:{user}")).fetchone())
 
-    grant = lambda user, external: fga.read({"user": f"user:{user}", "relation": "owner", "object": f"identity:atlassian.{external}"})
-    users = [{"status": "ACTIVE", "profile": {"email": "alice@acme.test", "firstName": "Alice", "lastName": "Smoke"}},
-             {"status": "DEPROVISIONED", "profile": {"email": "carol@acme.test", "firstName": "Carol", "lastName": "Smoke"}}]
-    body = {"name": name, "provider": "okta", "api_base": FAKE_OKTA, "api_token": "smoke-okta-token", "every_minutes": 60}
-    try:
-        api("GET", "/v1/whoami", "alice")
-        api("GET", "/v1/whoami", "carol")
-        assert alias("alice", stays) and alias("carol", leaver) and grant("carol", leaver), "sign-in didn't match them to begin with"
-        assert httpx.post(f"{FAKE_OKTA}/setup", json={"users": users}, timeout=10).status_code == 200
-        assert api("POST", "/v1/workspaces/payments/connections/directory", "alice", json={**body, "api_base": "http://10.0.0.5"}).status_code == 422, \
-            "an internal address was accepted"
-        other_team = {**body, "api_token": None, "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}
-        assert api("POST", "/v1/workspaces/payments/connections/directory", "alice", json=other_team).status_code == 422, \
-            "a reference to another team's secret was accepted"
-        r = api("POST", "/v1/workspaces/payments/connections/directory", "alice", json=body)
-        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline and alias("carol", leaver):  # carol never signs in: the worker must act alone
+    def until(test, seconds=90):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
             time.sleep(2)
-        assert not alias("carol", leaver) and not grant("carol", leaver), "the leaver's matched identity outlived the directory saying she'd left"
-        assert alias("alice", stays) and grant("alice", stays), "someone still at the company lost her match"
-        api("GET", "/v1/whoami", "carol")
-        assert not alias("carol", leaver), "signing in matched someone the directory says has left"
+        return test()
+
+    grant = lambda user, external: fga.read({"user": f"user:{user}", "relation": "owner", "object": f"identity:atlassian.{external}"})
+    person = lambda email, first, status="ACTIVE": {"status": status, "profile": {"email": email, "firstName": first, "lastName": "Smoke"}}
+    users = [person("alice@acme.test", "Alice"), person("carol@acme.test", "Carol", "DEPROVISIONED"), person("bob@acme.test", "Bob")]
+    body = {"name": name, "provider": "okta", "api_base": FAKE_OKTA, "api_token": "smoke-okta-token", "every_minutes": 60}
+    path = f"/v1/workspaces/payments/connections/{name}"
+    try:
+        for user in ("alice", "carol", "bob"):
+            api("GET", "/v1/whoami", user)
+        assert alias("alice", stays) and alias("carol", leaver) and grant("carol", leaver) and alias("bob", vanishes),             "sign-in didn't match them to begin with"
+        assert httpx.post(f"{FAKE_OKTA}/setup", json={"users": users}, timeout=10).status_code == 200
+        assert api("POST", "/v1/workspaces/payments/connections/directory", "alice", json=body).status_code == 403,             "a team admin connected a directory, which decides who has left company-wide"
+        assert api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json={**body, "api_base": "http://10.0.0.5"}).status_code == 422,             "an internal address was accepted"
+        other_team = {**body, "api_token": None, "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}
+        assert api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json=other_team).status_code == 422,             "a reference to another team's secret was accepted"
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert api("GET", path, "alice").status_code == 200, "the team's admin can't see the directory connected in their team"
+        for method, change in (("PATCH", {"enabled": False}), ("POST", None), ("DELETE", None)):
+            suffix = "/refresh" if method == "POST" else ""
+            assert api(method, path + suffix, "alice", **({"json": change} if change else {})).status_code == 403,                 f"a team admin could {method} a directory"
+        assert until(lambda: not alias("carol", leaver)), "the leaver's matched identity outlived the directory saying she'd left"  # carol never signs in
+        assert not grant("carol", leaver), "the leaver's grant outlived her match"
+        assert alias("alice", stays) and grant("alice", stays) and alias("bob", vanishes), "someone still at the company lost their match"
+        assert httpx.post(f"{FAKE_OKTA}/setup", json={"users": users[:2]}, timeout=10).status_code == 200  # bob is gone from Okta
+        assert api("POST", path + "/refresh", "olivia").status_code == 202
+        assert until(lambda: not alias("bob", vanishes)), "someone the directory no longer lists kept their matched identity"
+        assert alias("alice", stays), "someone still listed lost their match"
+        for user in ("carol", "bob"):
+            api("GET", "/v1/whoami", user)
+        assert not alias("carol", leaver) and not alias("bob", vanishes), "signing in matched someone the directory says has left"
     finally:
-        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        api("DELETE", path, "olivia")
         httpx.post(f"{FAKE_OKTA}/setup", json={"users": []}, timeout=10)
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.directory_people WHERE connection_id IN (SELECT id FROM kl.connections WHERE name = %s)", (name,))
             conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag}",))
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag}",))
-        stale = {(t["user"], t["relation"], t["object"]) for e in (leaver, stays) for t in fga.read({"object": f"identity:atlassian.{e}"})}
+        stale = {(t["user"], t["relation"], t["object"]) for e in (leaver, stays, vanishes) for t in fga.read({"object": f"identity:atlassian.{e}"})}
+        if stale:
+            fga.write(deletes=stale)
+
+
+@check
+def a_google_directory_brings_groups_to_drive():
+    """S2, Google Workspace as a directory: a service account acting as an admin (domain-wide delegation, exactly three read-only scopes, its token asked only of Google's address) lists people and groups; a Drive file shared with a group reaches its members, a nested group's too, and nobody else; a member suspended, then the directory synced, loses it; a member taken out of the group loses it on the Drive sync that follows; someone deleted between syncs loses their matched access; a listing that fails changes nothing; only an org admin connects one, with an admin in the company's domain and a team's own secret"""
+    from .authz import fga
+    tag = secrets.token_hex(3)
+    eng, inner, admin = f"eng-{tag}@acme.test", f"inner-{tag}@acme.test", "directory-admin@acme.test"
+    people = ("alice", "bob", "carol", "dave")
+    google = lambda u: f"ext:google.{u}@acme.test"
+    directory_key = httpx.post(f"{FAKE_GOOGLE}/service-account", json={"email": f"directory-{tag}@acme-dev.iam.gserviceaccount.com"}, timeout=30).json()
+    drive_key = httpx.post(f"{FAKE_GOOGLE}/service-account", json={"email": f"drive-{tag}@acme-dev.iam.gserviceaccount.com"}, timeout=30).json()
+    user = lambda u, **state: {"primaryEmail": f"{u}@acme.test", "name": {"fullName": u.title()}, **state}
+    member = lambda email, kind="USER": {"email": email, "type": kind, "status": "ACTIVE"}
+    workspace = {"subjects": [admin], "users": [user(u) for u in people],
+                 "groups": {eng: [member("carol@acme.test"), member(inner, "GROUP"), {"type": "CUSTOMER", "id": "C0"}],
+                            inner: [member("bob@acme.test"), member("someone@outside.test", "EXTERNAL")]}}
+    fid = f"grouped{tag}"
+    folders = {f"team{tag}": {"name": "Team", "shared": True, "files": [
+        {"id": fid, "name": f"Group plan {tag}.txt", "mimeType": "text/plain", "md5Checksum": f"g{tag}", "text": f"Shared with a group {tag}.",
+         "permissions": [{"type": "group", "role": "reader", "emailAddress": eng.upper()}]}]}}  # Drive's case isn't the directory's
+    dname, gname = f"gws-{tag}", f"gdrive-{tag}"
+    dpath = f"/v1/workspaces/payments/connections/{dname}"
+    body = {"name": dname, "provider": "google", "api_base": FAKE_GOOGLE, "service_account_key": json.dumps(directory_key),
+            "admin_email": admin, "every_minutes": 60}
+
+    def until(test, seconds=120):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(2)
+        return test()
+
+    def finds(u):
+        hits = api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]
+        return f"gd-{fid}" in {h["id"] for h in hits}
+
+    def matched(u):
+        with psycopg.connect(OWNER_DB) as conn:
+            return bool(conn.execute("SELECT 1 FROM kl.principal_aliases WHERE source = %s AND canonical = %s AND verified_by = 'sso-email'",
+                                     (google(u), f"user:{u}")).fetchone())
+
+    def directory_synced(after):
+        with psycopg.connect(OWNER_DB) as conn:
+            return bool(conn.execute("SELECT 1 FROM kl.connection_containers cc JOIN kl.connections c ON c.id = cc.connection_id "
+                                     "WHERE c.name = %s AND cc.cursor IS NOT NULL AND cc.cursor::timestamptz > %s", (dname, after)).fetchone())
+
+    def now():
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT now()").fetchone()[0]
+
+    def resync(state):
+        assert httpx.post(f"{FAKE_GOOGLE}/admin/setup", json=state, timeout=10).status_code == 200
+        moment = now()
+        assert api("POST", dpath + "/refresh", "olivia").status_code == 202
+        assert until(lambda: directory_synced(moment)), "the directory didn't sync again"
+
+    try:
+        assert httpx.post(f"{FAKE_GOOGLE}/admin/setup", json=workspace, timeout=10).status_code == 200
+        assert httpx.post(f"{FAKE_GOOGLE}/folders", json={"folders": folders}, timeout=10).status_code == 200
+        refusals = {"a team admin connected a directory": ("alice", body, 403),
+                    "an internal address was accepted": ("olivia", {**body, "api_base": "http://10.0.0.5"}, 422),
+                    "a malformed admin was accepted": ("olivia", {**body, "admin_email": "not-an-admin"}, 422),
+                    "an admin outside the company's domains was accepted": ("olivia", {**body, "admin_email": "admin@evil.test"}, 422),
+                    "a reference to another team's secret was accepted": ("olivia", {**body, "service_account_key": None,
+                                                                                    "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}, 422)}
+        for problem, (who, attempt, status) in refusals.items():
+            assert api("POST", "/v1/workspaces/payments/connections/directory", who, json=attempt).status_code == status, problem
+        moment = now()
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: directory_synced(moment)), "the directory never synced"
+        asked = [q for q in httpx.get(f"{FAKE_GOOGLE}/admin/requests", timeout=10).json() if q["iss"] == directory_key["client_email"]]
+        scopes = sorted(["https://www.googleapis.com/auth/admin.directory.user.readonly",
+                         "https://www.googleapis.com/auth/admin.directory.group.readonly",
+                         "https://www.googleapis.com/auth/admin.directory.group.member.readonly"])
+        assert asked and all(q["aud"] == f"{FAKE_GOOGLE}/token" and q["sub"] == admin and sorted(q["scope"].split(" ")) == scopes
+                             for q in asked), f"the token was asked for wrongly: {asked}"
+        assert api("GET", dpath, "olivia").json()["settings"]["admin_email"] == admin, "Terraform can't read back the admin it acts as"
+        for u in people:  # sign-in links each person to the Workspace account the directory reported
+            api("GET", "/v1/whoami", u)
+        assert all(matched(u) for u in people), "sign-in didn't match people to their Workspace accounts"
+        r = api("POST", "/v1/workspaces/payments/connections/google", "alice", json={
+            "name": gname, "service_account_key": json.dumps(drive_key), "api_base": FAKE_GOOGLE, "every_minutes": 60, "drives": []})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: finds("carol")), "a member of the group the file is shared with can't find it"
+        assert finds("bob"), "a member of a nested group can't find a file shared with the outer group"
+        assert not finds("alice") and not finds("dave"), "a file shared with a group reached people outside it"
+
+        suspended = {**workspace, "users": [user(u, suspended=(u == "carol")) for u in people]}
+        resync(suspended)
+        assert until(lambda: not matched("carol")), "a suspended member kept her matched identity"
+        assert not finds("carol"), "a suspended member still finds the group's file"
+
+        regrouped = {**suspended, "groups": {**workspace["groups"], inner: [member("someone@outside.test", "EXTERNAL")]}}
+        resync(regrouped)  # bob leaves the nested group: Drive is re-read now, not at its next turn
+        assert until(lambda: not finds("bob")), "someone taken out of the group still finds its file"
+
+        resync({**regrouped, "users": [user(u, suspended=(u == "carol")) for u in people if u != "dave"]})  # dave deleted outright
+        assert until(lambda: not matched("dave")), "someone deleted between syncs kept their matched identity"
+
+        assert httpx.post(f"{FAKE_GOOGLE}/admin/setup", json={**regrouped, "users": [], "broken": True}, timeout=10).status_code == 200
+        assert api("POST", dpath + "/refresh", "olivia").status_code == 202  # a listing that fails is never read as everyone leaving
+        with psycopg.connect(OWNER_DB) as conn:
+            cid = str(conn.execute("SELECT id FROM kl.connections WHERE name = %s", (dname,)).fetchone()[0])
+
+        def failed():
+            with psycopg.connect(OWNER_DB) as conn:
+                return bool(conn.execute("SELECT 1 FROM kl.jobs WHERE payload->>'connection_id' = %s AND last_error IS NOT NULL",
+                                         (cid,)).fetchone())
+        assert until(failed), "a directory that can't be listed didn't fail"
+        assert matched("alice") and matched("bob"), "a failed listing revoked people still at the company"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{gname}", "alice")
+        api("DELETE", dpath, "olivia")
+        httpx.post(f"{FAKE_GOOGLE}/admin/setup", json={}, timeout=10)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s) AND verified_by = 'sso-email'", ([google(u) for u in people],))
+        stale = {(t["user"], t["relation"], t["object"]) for u in people for t in fga.read({"object": f"identity:{google(u)[4:]}"})
+                 if t["user"] == f"user:{u}"}
         if stale:
             fga.write(deletes=stale)
 

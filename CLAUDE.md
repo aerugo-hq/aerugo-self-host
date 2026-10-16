@@ -324,10 +324,43 @@ to the root one, and the dev root token is the operator's alone. On a VM, `deplo
 the root token read from Secret Manager, replacing a token that still holds root. Smoke's
 `the_services_openbao_token_holds_only_their_paths` proves the policy, six refusals, and the lifetime. Provisioning can
 check the KV mount but no longer create it; every OpenBao start creates it.
+S2 (Google Workspace as a directory, and Drive's group shares; the plan is `docs/plans/2026-10-15-s2-google-workspace-directory.md`):
+`provider = "google"` beside `"okta"` in `kl/directory.py` (`GoogleDirectoryClient`, `client_for`). The Directory
+API on its own host (`KL_GOOGLE_ADMIN_API_BASES`, `admin.googleapis.com`; the dev fake added, production overrides
+keep only Google's) through a service account acting as an admin by domain-wide delegation: `gdrive.service_account_token`,
+Drive's token request made a function, with exactly three read-only scopes (`GOOGLE_SCOPES`) and a `sub`, sent only
+to Google's token address, never a key's own `token_uri`. People are users of `my_customer`, then the deleted ones
+asked for on their own; suspended or archived means left. In every directory, Okta's too, someone a previous sync
+listed and this one doesn't has left; a listing cut short raises `ListingCutShort` (Okta's `_pages` no longer
+returns what it had at `MAX_PAGES`), so a failed sync changes nothing rather than revoking everyone. Rate limits
+(429, and a 403 whose reason is a rate or quota: `rate_limited`) back off exponentially with jitter, honoring
+`Retry-After`; pages follow `pageToken`, never a URL. Groups (migration 0039: `directory_groups`, one row per person a
+group reaches, nested groups flattened through Google's derived membership; `kl_ingest` only, no grant to `kl_app`)
+are replaced per directory in one transaction; only active `USER` members count, a whole-domain or outside member
+reaches no one, and a group over `MAX_GROUP_MEMBERS` (2,000) grants nothing and is named in the sync's result. Active
+Workspace users are recorded as `ext:google.<email>` identities, so sign-in matching links them. A membership change
+re-queues every Drive connection's sync (`REQUEUE_DRIVE_SQL`), so someone taken out of a group loses the file on
+the next Drive sync. In `kl/gdrive.py`, `readers` turns a `group` permission into its members' `ext:google.<email>`
+from Google directories only (`directory_groups`, `GROUPS_SQL`; a paused one counts for nothing), compared lower
+case; with no directory a group still grants nothing. A directory decides who has left and who a group reaches,
+company-wide, so only an org admin connects, changes, re-syncs, or removes one (`require_org_admin`, moved to
+`kl/policy.py`); its team's admins still read it. A Google directory takes the key once or a team's
+`credential_ref`, and `admin_email`, which must be in a company domain (`KL_ORG_EMAIL_DOMAINS`, `company_admin`);
+`settings` read it back, and an update can change it or rotate the stored key. The fake Admin SDK in `kl/fake_llm.py`
+(`ADMIN`, `_admin`, small pages on purpose) answers only a token minted for exactly the three scopes and an allowed
+`sub`, and keeps every token request (`/google/admin/requests`). Smoke: `a_google_directory_brings_groups_to_drive`
+(a group and a nested group reach their members and no one else; a suspended member, someone taken out of the group,
+and someone deleted between syncs lose access; a failed listing changes nothing; the token's address, scopes, and
+`sub`; five refusals), and `a_directory_revokes_leavers_at_once` now connects as an org admin, refuses a team admin,
+and proves "listed before, not now". The gallery's Directory card chooses Okta or Google Workspace and is offered
+only to org admins (`orgAdmin`; a team admin is told who can); two browser tests. Terraform: `directory = "google"`
+with `admin_email` (in place) and the write-only `service_account_key`, an acceptance test against the fake, and the
+onboarding module's type. `docs/connectors/google-workspace.md` says what the identity team sets up. Not built:
+keyless delegation (IAM `signJwt`), matching a user's alias addresses, and group members in the app.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done; next S2 (Google Workspace as a directory, and Drive's group shares) to S8; then Q1 (its golden-set part) to Q8;
-E1 to E3; A1 to A4; G1 to G3.
+done, and so are G1 and S2; next S3 (Entra as a directory) to S8; then Q1 (its golden-set part) to Q8;
+E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;

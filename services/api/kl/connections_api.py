@@ -14,7 +14,7 @@ from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
 from .managed import forget_managed, managed_header, managed_info, note_managed
-from .policy import SLUG, audit, require_workspace_admin
+from .policy import SLUG, audit, require_org_admin, require_workspace_admin
 from .vault import vault
 
 router = APIRouter(prefix="/v1/workspaces/{ws}")
@@ -224,11 +224,21 @@ def create_jira_connection(ws: str, body: JiraConnectionIn, caller: Caller = Dep
 
 class DirectoryConnectionIn(BaseModel):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
-    provider: str = Field(pattern=r"^okta$")  # Google Workspace and Entra next (ADR 0011)
-    api_base: str = Field(min_length=8, max_length=300)  # https://<org>.okta.com
-    api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # a read-only admin's
+    provider: str = Field(pattern=r"^(okta|google)$")  # Entra next (S3)
+    api_base: str | None = Field(default=None, min_length=8, max_length=300)  # Okta: https://<org>.okta.com; Google: its own
+    api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # Okta: a read-only admin's
+    service_account_key: str | None = Field(default=None, max_length=20000, repr=False)  # Google: the account's JSON key
+    admin_email: str | None = Field(default=None, min_length=3, max_length=254)  # Google: the admin it acts as (S2)
     credential_ref: str | None = Field(default=None, max_length=300)
     every_minutes: int | None = Field(default=None, ge=5, le=10080)
+
+
+def company_admin(email: str | None) -> str | None:
+    """The admin a Google directory acts as: a well formed address in one of the company's own domains, lower case."""
+    email = (email or "").strip().lower()
+    if not directory.EMAIL.fullmatch(email) or email.rsplit("@", 1)[1] not in config.ORG_EMAIL_DOMAINS:
+        return None
+    return email
 
 
 @router.post("/connections/confluence", status_code=201)
@@ -280,12 +290,31 @@ def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Ca
                                 managed: tuple | None = Depends(managed_header)):
     """Connect the company's directory (ADR 0011): who's at the company, by email, and who has left. It indexes no content;
     identity matching refuses an email it says has left, and a leaver's matched identities are revoked as soon as it
-    says so. A read-only API token, kept in the secrets backend, or referenced in the team's own part of it."""
+    says so. Okta reads with a read-only API token; Google Workspace (S2) with a service account acting as a read-only
+    admin through domain-wide delegation, which also brings each group's members to Drive's group shares. Its credential
+    is kept in the secrets backend, or referenced in the team's own part of it. A directory decides who has left and who
+    a group reaches, company-wide, so only an org admin connects one (S2)."""
     require_workspace_admin(caller, ws)
-    if not directory.allowed_okta(body.api_base):
-        raise HTTPException(422, "that isn't an Okta org (https://<org>.okta.com)")
-    if bool(body.api_token) == bool(body.credential_ref):
-        raise HTTPException(422, "give a read-only API token, or a credential reference: one, not both")
+    require_org_admin(caller)
+    if body.provider == "okta":
+        if not body.api_base or not directory.allowed_okta(body.api_base):
+            raise HTTPException(422, "that isn't an Okta org (https://<org>.okta.com)")
+        if body.service_account_key or body.admin_email or bool(body.api_token) == bool(body.credential_ref):
+            raise HTTPException(422, "give a read-only API token, or a credential reference: one, not both")
+        api_base, admin, secret = body.api_base.rstrip("/"), None, {"api_token": body.api_token}
+    else:
+        api_base = (body.api_base or directory.GOOGLE_ADMIN).rstrip("/")
+        if not directory.allowed_google(api_base):
+            raise HTTPException(422, "that Google Admin API address isn't allowed here")
+        if body.api_token or bool(body.service_account_key) == bool(body.credential_ref):
+            raise HTTPException(422, "give the service account's JSON key, or a credential reference: one, not both")
+        admin = company_admin(body.admin_email)
+        if not admin:
+            raise HTTPException(422, "admin_email must be an admin's address in one of the company's domains (KL_ORG_EMAIL_DOMAINS)")
+        try:
+            secret = {"service_account": gdrive.service_account_key(body.service_account_key)} if body.service_account_key else None
+        except ValueError as e:
+            raise HTTPException(422, str(e))
     if body.credential_ref and not team_secret(ws, body.credential_ref):
         raise HTTPException(422, ref_rule(ws))
     org_id = resolve_org_id(config.ORG_SLUG)
@@ -296,18 +325,19 @@ def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Ca
         if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", {"api_token": body.api_token})
+        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", secret)
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'directory', %s, %s, %s, %s) RETURNING id, name, kind, status""",
-            (cid, org_id, ws_row["id"], body.name, Jsonb({"provider": body.provider, "api_base": body.api_base.rstrip("/"),
-                                                          "every_minutes": body.every_minutes}), ref, caller.username),
+            (cid, org_id, ws_row["id"], body.name,
+             Jsonb({"provider": body.provider, "api_base": api_base, "every_minutes": body.every_minutes,
+                    **({"admin_email": admin} if admin else {})}), ref, caller.username),
         ).fetchone()
         note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
                      (org_id, Jsonb({"connection_id": str(row["id"])})))
         audit(conn, org_id, caller.username, "connection.create", [ws],
-              {"name": body.name, "kind": "directory", "provider": body.provider, "org": body.api_base.rstrip("/"),
+              {"name": body.name, "kind": "directory", "provider": body.provider, "org": api_base, "admin_email": admin,
                "credential": "reference" if body.credential_ref else "stored"})
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
@@ -358,7 +388,7 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
 # What a connection was declared with, as Terraform reads it back. A credential reference is returned only when it's
 # one the team gave (its own secret); a secret Aerugo stored itself is never named.
 SETTINGS = ("api_base", "projects", "company_site", "every_minutes", "domain", "drives", "repositories", "provider",
-            "spaces", "labels", "page_trees")
+            "spaces", "labels", "page_trees", "admin_email")
 
 
 def settings_of(ws: str, cfg: dict, credential_ref: str | None) -> dict:
@@ -435,10 +465,12 @@ def refresh_connection(ws: str, name: str, caller: Caller = Depends(authenticate
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = conn.execute(
-            """SELECT c.id FROM connections c JOIN workspaces w ON w.id = c.workspace_id
+            """SELECT c.id, c.kind FROM connections c JOIN workspaces w ON w.id = c.workspace_id
                WHERE w.slug = %s AND c.name = %s""", (ws, name)).fetchone()
         if not c:
             raise HTTPException(404, "connection not found")
+        if c["kind"] == "directory":  # a directory decides who has left, company-wide (S2)
+            require_org_admin(caller)
         now = conn.execute("SELECT now() AS now").fetchone()["now"]
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
                      (org_id, Jsonb({"connection_id": str(c["id"])})))
@@ -461,6 +493,7 @@ class ConnectionPatch(BaseModel):
     api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # Jira, Okta: a rotation
     email: str | None = Field(default=None, min_length=3, max_length=254)  # Jira: the account, with a new token
     service_account_key: str | None = Field(default=None, max_length=20000, repr=False)  # Google: a rotation
+    admin_email: str | None = Field(default=None, min_length=3, max_length=254)  # a Google directory: the admin it acts as
 
 
 def owned_connection(conn, ws: str, name: str):
@@ -486,6 +519,11 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = owned_connection(conn, ws, name)
+        google_directory = c["kind"] == "directory" and (c["config"] or {}).get("provider") == "google"
+        if c["kind"] == "directory":  # a directory decides who has left, company-wide (S2)
+            require_org_admin(caller)
+        if body.admin_email is not None and not google_directory:
+            raise HTTPException(422, "only a Google Workspace directory acts as an admin")
         if body.repositories is not None and c["kind"] != "github":
             raise HTTPException(422, "only a GitHub connection has repositories")
         if (body.drives is not None or rotating) and c["kind"] != "google":
@@ -516,6 +554,11 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if body.drives is not None:
             cfg["drives"] = body.drives
             changed.append("drives")
+        if body.admin_email is not None:
+            cfg["admin_email"] = company_admin(body.admin_email)
+            if not cfg["admin_email"]:
+                raise HTTPException(422, "admin_email must be an admin's address in one of the company's domains (KL_ORG_EMAIL_DOMAINS)")
+            changed.append("admin_email")
         if rotating:  # a new version of its secret; the connection reads the new one from now on
             ref = vault.put(f"kl/connections/{c['id']}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token})
             changed.append("credentials")
@@ -523,7 +566,7 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             if not stored_secret(c["id"], ref):
                 raise HTTPException(422, "this connection reads a secret the team keeps (or GitHub's app): rotate it there")
             if body.service_account_key:
-                if c["kind"] != "google":
+                if c["kind"] != "google" and not google_directory:
                     raise HTTPException(422, "only a Google connection has a service account key")
                 try:
                     secret = {"service_account": gdrive.service_account_key(body.service_account_key)}
@@ -563,6 +606,8 @@ def remove_connection(ws: str, name: str, caller: Caller = Depends(authenticate)
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = owned_connection(conn, ws, name)
+        if c["kind"] == "directory":  # a directory decides who has left, company-wide (S2)
+            require_org_admin(caller)
         routed = (c["config"] or {}).get("teams") or {}  # repositories it sends to other teams (slice F1)
         containers = [{"external_id": r["external_id"], "workspace_id": routed.get(r["external_id"]) or str(c["workspace_id"])}
                       for r in conn.execute("SELECT external_id FROM connection_containers WHERE connection_id = %s",

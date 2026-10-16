@@ -7,8 +7,10 @@ own permissions decide its readers, and fail closed:
 - a person it's shared with is `ext:google.<email>`, which grants nothing until they link their Google identity, as a
   GitHub login does;
 - the org's own Google domain (the connection's `domain`) is the whole org;
-- a group grants nothing yet (its members need Google's Directory API), and "anyone with the link" grants nothing: a
-  link isn't a grant, and indexing such a file org-wide would show it to people never sent the link.
+- a group reaches its members, as a Google Workspace directory lists them (S2: `directory_groups`, nested groups
+  flattened), each as `ext:google.<email>`; with no such directory, or a group too big to expand, it grants nothing;
+- "anyone with the link" grants nothing: a link isn't a grant, and indexing such a file org-wide would show it to
+  people never sent the link.
 A file left with no reader isn't indexed, and a file gone from the drive is removed with everything derived from it.
 The connector talks only to the Google API addresses on KL_GOOGLE_API_BASES.
 """
@@ -45,6 +47,20 @@ MAX_BYTES = 20 * 1024 * 1024
 FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,version,md5Checksum,size,webViewLink,permissions(type,role,emailAddress,domain))"
 
 
+def service_account_token(account: dict, scopes: tuple[str, ...], token_url: str, subject: str | None = None) -> str:
+    """A service account's access token (ADR 0011): a JWT it signs with its own key, for exactly these scopes, sent to
+    token_url, which the caller fixes to Google's (or the allowed dev fake), never a key file's own token_uri. With a
+    subject, it acts as that person through domain-wide delegation (S2: the Directory API's admin)."""
+    now = int(time.time())
+    claims = {"iss": account["client_email"], "scope": " ".join(scopes), "aud": token_url, "iat": now, "exp": now + 3600}
+    if subject:
+        claims["sub"] = subject
+    r = httpx.post(token_url, data={"grant_type": JWT_GRANT,
+                                    "assertion": jwt.encode(claims, account["private_key"], algorithm="RS256")}, timeout=15)
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+
 class DriveClient:
     """One connection's view of Drive, to the connector contract (test, discover) plus what sync needs."""
 
@@ -67,15 +83,11 @@ class DriveClient:
     def _access_token(self) -> str:
         if not self._token:
             if self._sa:
-                now = int(time.time())
-                assertion = jwt.encode({"iss": self._sa["client_email"], "scope": SA_SCOPE, "aud": self._token_url(),
-                                        "iat": now, "exp": now + 3600}, self._sa["private_key"], algorithm="RS256")
-                data = {"grant_type": JWT_GRANT, "assertion": assertion}
+                self._token = service_account_token(self._sa, (SA_SCOPE,), self._token_url())
             else:
-                data = self._grant
-            r = httpx.post(self._token_url(), data=data, timeout=15)
-            r.raise_for_status()
-            self._token = r.json()["access_token"]
+                r = httpx.post(self._token_url(), data=self._grant, timeout=15)
+                r.raise_for_status()
+                self._token = r.json()["access_token"]
         return self._token
 
     @property
@@ -178,19 +190,36 @@ def file_name(f: dict) -> str | None:
     return f.get("name")
 
 
-def readers(permissions: list | None, org_slug: str, domain: str | None) -> list[str]:
-    """A file's readers as principals, failing closed: people (until they link), the org's own domain, nothing else."""
+def readers(permissions: list | None, org_slug: str, domain: str | None, groups: dict[str, list[str]] | None = None) -> list[str]:
+    """A file's readers as principals, failing closed: people (until they link), a group's members as a Google
+    directory lists them, the org's own domain, nothing else."""
     out = set()
     for p in permissions or []:
         if p.get("role") not in READ_ROLES:
             continue
         if p.get("type") == "user" and p.get("emailAddress"):
-            principal = f"ext:google.{p['emailAddress'].lower()}"
-            if is_valid(principal):
-                out.add(principal)
+            emails = [p["emailAddress"]]
+        elif p.get("type") == "group" and p.get("emailAddress"):
+            emails = (groups or {}).get(p["emailAddress"].lower(), [])  # an unknown group grants nothing
         elif p.get("type") == "domain" and domain and (p.get("domain") or "").lower() == domain.lower():
             out.add(f"org:{org_slug}")
+            continue
+        else:
+            continue
+        out |= {principal for e in emails if is_valid(principal := f"ext:google.{e.lower()}")}
     return sorted(out)
+
+
+GROUPS_SQL = """SELECT g.group_email, array_agg(DISTINCT g.member_email ORDER BY g.member_email) AS members
+FROM directory_groups g JOIN connections c ON c.id = g.connection_id
+WHERE c.kind = 'directory' AND c.config->>'provider' = 'google' AND c.status <> 'disabled'
+GROUP BY g.group_email"""
+
+
+def directory_groups(conn) -> dict[str, list[str]]:
+    """Each Google group's members, from the org's Google Workspace directories (S2): only Google's, since Drive's
+    group shares name Google groups. A paused directory's groups count for nothing."""
+    return {r["group_email"]: r["members"] for r in conn.execute(GROUPS_SQL).fetchall()}
 
 
 def viewer_tuples(key: str, acl: list[str]) -> set:
@@ -201,13 +230,14 @@ def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str) -> di
     """Index one shared drive: new and changed files, everyone's current access, and nothing left of removed files."""
     org_id, team = connection["org_id"], team_for(connection, drive_id)
     domain = (connection["config"] or {}).get("domain")
+    groups = directory_groups(conn)  # read every sync: a member taken out of a group loses the file on the next one
     files = client.files(drive_id)
     existing = {r["external_key"]: r for r in conn.execute(
         "SELECT id, external_key, content_hash FROM documents WHERE source_kind = 'gdrive' AND container_ref = %s", (drive_id,))}
     keep, changed, unreadable, writes, deletes = set(), 0, [], set(), set()
     seen: dict[str, dict] = {}  # the accounts Drive names on files, for identity matching (ADR 0011)
     for f in files:
-        name, acl = file_name(f), readers(f.get("permissions"), config.ORG_SLUG, domain)
+        name, acl = file_name(f), readers(f.get("permissions"), config.ORG_SLUG, domain, groups)
         for p in f.get("permissions") or []:
             if p.get("type") == "user" and p.get("role") in READ_ROLES and p.get("emailAddress"):
                 seen[p["emailAddress"].lower()] = {"email": p["emailAddress"], "name": p.get("displayName")}

@@ -22,6 +22,9 @@ PIPELINE_ISSUERS = [i.strip().rstrip("/") for i in _env("KL_PIPELINE_ISSUERS", "
 PIPELINE_AUDIENCE = "kl-ingest"
 # Google API addresses a Drive connection may use (slice F2, ADR 0008); a connection can name no other server.
 GOOGLE_API_BASES = [b.strip().rstrip("/") for b in _env("KL_GOOGLE_API_BASES", "https://www.googleapis.com").split(",") if b.strip()]
+# Google Admin API addresses a Workspace directory may use (S2): the Directory API is on its own host, not Drive's.
+GOOGLE_ADMIN_API_BASES = [b.strip().rstrip("/") for b in _env("KL_GOOGLE_ADMIN_API_BASES", "https://admin.googleapis.com").split(",")
+                          if b.strip()]
 # Jira addresses a connection may use besides Jira Cloud sites (https://<site>.atlassian.net, always allowed): in dev,
 # the fake one smoke runs. Anything else is refused, so a team admin can't point the worker at an internal host.
 JIRA_API_BASES = [b.strip().rstrip("/") for b in _env("KL_JIRA_API_BASES", "").split(",") if b.strip()]

@@ -4,6 +4,7 @@ import re
 from fastapi import HTTPException
 from psycopg.types.json import Jsonb
 
+from . import config
 from .auth import Caller
 from .authz import fga
 
@@ -26,3 +27,8 @@ def require_workspace_admin(caller: Caller, ws: str) -> None:
         raise HTTPException(404, "workspace not found")
     if not fga.check(caller.fga_user, "admin", f"workspace:{ws}"):
         raise HTTPException(403, "workspace admin required")
+
+
+def require_org_admin(caller: Caller) -> None:
+    if not fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}"):
+        raise HTTPException(403, "org admin required")

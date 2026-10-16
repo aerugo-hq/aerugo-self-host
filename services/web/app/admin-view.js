@@ -165,7 +165,7 @@ export default function AdminView({ me, section, team: fixed = "" }) {
                       : { title: "Admin", lede: "What your teams know, who's in them, and what they can ask." },
       !fixed && teams.length > 1 && current !== "review" ? h(TeamPicker, { teams, value: ws, onChange: setWs }) : null),
     h(SectionNav, { base: fixed ? `#/t/${enc(fixed)}/settings` : "#/admin", sections: SECTIONS, current, label: fixed ? "Team settings sections" : "Admin sections" }),
-    current === "sources" ? [team(h(Imports, { ws, key: `i-${ws}` })), ws ? h(Connections, { ws, teams, key: `c-${ws}` }) : null] : null,
+    current === "sources" ? [team(h(Imports, { ws, key: `i-${ws}` })), ws ? h(Connections, { ws, teams, orgAdmin: me.org_admin, key: `c-${ws}` }) : null] : null,
     current === "pipeline" ? team(h(Runs, { ws, key: `r-${ws}` })) : null,
     current === "people" ? [team(h(Team, { ws, key: `t-${ws}` })), me.org_admin && !fixed ? h(NewTeam, { key: "new-team" }) : null] : null,
     current === "models" ? team(h(Models, { ws, orgAdmin: me.org_admin, key: `m-${ws}` })) : null,
@@ -361,7 +361,7 @@ export const CONNECTORS = [
   { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members.", ready: false },
   { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, with each file's sharing.", ready: false },
   { id: "notion", name: "Notion", what: "Pages shared with an internal integration.", ready: false },
-  { id: "directory", name: "Directory (Okta)", what: "Who's at the company, and who has left: a leaver's matched access goes at once. Google Workspace and Entra next.", ready: true, action: "Connect" },
+  { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta or Google Workspace): a leaver's matched access goes at once. A Google directory also brings each group's members to Drive's group shares.", ready: true, action: "Connect" },
 ];
 const EVERY = [[15, "Every 15 minutes"], [60, "Every hour"], [360, "Every 6 hours"], [1440, "Every day"]];
 const blankJira = { name: "jira", api_base: "", email: "", api_token: "", projects: "", company_site: false, every_minutes: 60, credential_ref: "" };
@@ -369,14 +369,14 @@ const blankConfluence = { name: "confluence", api_base: "", email: "", api_token
                           company_site: false, every_minutes: 60, credential_ref: "" };
 const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
 const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
-const blankOkta = { name: "okta", api_base: "", api_token: "", every_minutes: 60, credential_ref: "" };
+const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", every_minutes: 60, credential_ref: "" };
 // The scope list each kind has, to edit in place: its field, its label, and an example.
 const SCOPES = { jira: ["projects", "Projects", "EDP, PAY"], confluence: ["spaces", "Spaces", "PAY, ENG"], google: ["drives", "Shared drives", "Drive ids"],
                  github: ["repositories", "Repositories", "acme/payments-api"] };
 const managedTitle = (m) => `Managed by ${toolName(m.by)}${m.workspace ? `, ${m.workspace}` : ""}: change it there. A change made here would be undone on its next apply.`;
 const every = (m) => (m ? (m % 1440 === 0 ? `Every ${m / 1440 === 1 ? "day" : `${m / 1440} days`}` : m % 60 === 0 ? `Every ${m / 60 === 1 ? "hour" : `${m / 60} hours`}` : `Every ${m} min`) : "Default");
 
-function Connections({ ws, teams }) {
+function Connections({ ws, teams, orgAdmin }) {
   const [items, setItems] = useState(null);
   const [note, setNote] = useState({});
   const [repos, setRepos] = useState({}); // connection name -> its repos, once shown
@@ -388,7 +388,7 @@ function Connections({ ws, teams }) {
   const [installs, setInstalls] = useState(null); // GitHub App installations, once looked up
   const [confirming, setConfirming] = useState(null); // the connection about to be removed
   const [drive, setDrive] = useState(blankDrive);
-  const [okta, setOkta] = useState(blankOkta);
+  const [dir, setDir] = useState(blankDirectory); // the directory form: Okta or Google Workspace (S2)
   const [editing, setEditing] = useState(null); // the connection being edited, in its own row
   const [edit, setEdit] = useState(null); // its form, from what it was declared with: cadence and scope
   const [cf, setCf] = useState(blankConfluence); // the Confluence form (index 14)
@@ -511,18 +511,21 @@ function Connections({ ws, teams }) {
       setBusy(false);
     }
   }
-  async function connectOkta(event) {
+  async function connectDirectory(event) {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    const byRef = okta.credential_ref.trim();
+    const byRef = dir.credential_ref.trim();
+    const google = dir.provider === "google";
     try {
       await kl(`workspaces/${enc(ws)}/connections/directory`, { method: "POST", body: {
-        name: okta.name.trim(), provider: "okta", api_base: okta.api_base.trim().replace(/\/+$/, ""),
-        api_token: byRef ? null : okta.api_token, credential_ref: byRef || null, every_minutes: Number(okta.every_minutes) } });
+        name: dir.name.trim(), provider: dir.provider, api_base: google ? null : dir.api_base.trim().replace(/\/+$/, ""),
+        api_token: byRef || google ? null : dir.api_token, service_account_key: byRef || !google ? null : dir.key.trim(),
+        admin_email: google ? dir.admin_email.trim().toLowerCase() : null, credential_ref: byRef || null,
+        every_minutes: Number(dir.every_minutes) } });
       setChosen(null);
       setGallery(false);
-      setOkta(blankOkta);
+      setDir(blankDirectory);
       load();
     } catch (e) {
       setError(e.message);
@@ -587,7 +590,7 @@ function Connections({ ws, teams }) {
   }
   const set = (key) => (e) => setForm({ ...form, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const setD = (key) => (e) => setDrive({ ...drive, [key]: e.target.value });
-  const setO = (key) => (e) => setOkta({ ...okta, [key]: e.target.value });
+  const setO = (key) => (e) => setDir({ ...dir, [key]: e.target.value });
   const setC = (key) => (e) => setCf({ ...cf, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
   const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
@@ -644,19 +647,35 @@ function Connections({ ws, teams }) {
       h("div", { className: "actions connector-wide" },
         h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Drive"),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
-    directory: () => h("form", { className: "panel-body connector-form", onSubmit: connectOkta },
-      h("p", { className: "connector-lede" }, "A directory adds no documents. It tells Aerugo who's at the company and who has left: when someone leaves, the access their email matched is revoked at once, without waiting for a sign-in that won't come. In Okta, create a read-only admin's API token."),
-      field("Name", h("input", { className: "input", value: okta.name, onChange: setO("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
-      field("Okta org", h("input", { className: "input mono", value: okta.api_base, onChange: setO("api_base"), placeholder: "https://your-org.okta.com", required: true })),
-      okta.credential_ref ? null : field("API token", h("input", { className: "input mono", type: "password", value: okta.api_token, onChange: setO("api_token"), required: true, autoComplete: "off" }),
-        "A read-only admin's token. Stored in OpenBao and never shown again."),
-      field("Sync", h("select", { className: "select", value: okta.every_minutes, onChange: setO("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label))),
+    directory: () => !orgAdmin
+      ? h("div", { className: "panel-body connector-form" },
+          h("p", { className: "connector-lede" }, "Only an org admin connects a directory: it decides who has left, and who a group reaches, across the whole company. Ask an org admin to connect Okta or Google Workspace."))
+      : h("form", { className: "panel-body connector-form", onSubmit: connectDirectory, "aria-label": "Connect a directory" },
+      h("p", { className: "connector-lede" }, dir.provider === "google"
+        ? "A directory adds no documents. Google Workspace tells Aerugo who's at the company, who has left, and who is in each group, so a Drive file shared with a group reaches its members. In Google Cloud, create a service account and a JSON key; then a super admin authorizes its client ID for domain-wide delegation with exactly the three read-only directory scopes."
+        : "A directory adds no documents. It tells Aerugo who's at the company and who has left: when someone leaves, the access their email matched is revoked at once, without waiting for a sign-in that won't come. In Okta, create a read-only admin's API token."),
+      field("Directory", h("select", { className: "select", value: dir.provider, onChange: setO("provider") },
+        h("option", { value: "okta" }, "Okta"), h("option", { value: "google" }, "Google Workspace"))),
+      field("Name", h("input", { className: "input", value: dir.name, onChange: setO("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      dir.provider === "okta"
+        ? field("Okta org", h("input", { className: "input mono", value: dir.api_base, onChange: setO("api_base"), placeholder: "https://your-org.okta.com", required: true }))
+        : field("Admin to act as", h("input", { className: "input", type: "email", value: dir.admin_email, onChange: setO("admin_email"), placeholder: "directory-reader@acme.com", required: true, autoComplete: "off" }),
+            "A dedicated admin with a read-only role for users and groups, in one of the company's domains."),
+      dir.credential_ref ? null : dir.provider === "okta"
+        ? field("API token", h("input", { className: "input mono", type: "password", value: dir.api_token, onChange: setO("api_token"), required: true, autoComplete: "off" }),
+            "A read-only admin's token. Stored in OpenBao and never shown again.")
+        : h("label", { className: "field connector-wide" }, h("span", null, "Service account key"),
+            h("textarea", { className: "input mono", rows: 4, value: dir.key, onChange: setO("key"), required: true, spellCheck: false, autoComplete: "off",
+                            placeholder: '{"type": "service_account", "client_email": "...", "private_key": "..."}' }),
+            h("span", { className: "hint" }, "Paste the JSON key. Only its email and private key are kept, in OpenBao; nothing else in it is used.")),
+      field("Sync", h("select", { className: "select", value: dir.every_minutes, onChange: setO("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label))),
         "How quickly a leaver's access goes. Every 15 minutes is a good start."),
-      h("details", { className: "connector-wide" }, h("summary", null, "Use a token the team keeps in OpenBao instead"),
-        field("Credential reference", h("input", { className: "input mono", value: okta.credential_ref, onChange: setO("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/okta` }),
-          "A secret with api_token, under this team's own connections path.")),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a credential the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: dir.credential_ref, onChange: setO("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/${dir.provider}` }),
+          dir.provider === "okta" ? "A secret with api_token, under this team's own connections path."
+            : "A secret with service_account (its client_email and private_key), under this team's own connections path.")),
       h("div", { className: "actions connector-wide" },
-        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Okta"),
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : dir.provider === "google" ? "Connect Google Workspace" : "Connect Okta"),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
     github: () => h("div", { className: "connector-steps" },
       h("ol", null,
