@@ -404,9 +404,27 @@ window); updates change channels and the window and rotate the token; `settings`
 `kind = "slack"` (the bot token as the write-only `api_token`, `channels`, `history_days`, `company_workspace`), an
 acceptance test, the onboarding module's fields. `docs/connectors/slack.md`. Not built: incremental reads from each
 channel's cursor (a full window is simpler and follows deletions exactly; it costs more calls on busy channels).
+S5 (Microsoft 365): `kl/microsoft365.py`, `M365Client` on `directory.GraphClient` (Entra's token and paging, now
+shared). An app registration holding only `Sites.Selected`, granted read site by site, never tenant-wide; the
+connection names those sites by Graph's site id (`SITE`), and each one's document libraries are its containers
+(`<site> / <library>`); a site the app wasn't granted answers 403 and is skipped. Files are a delta listing from the
+start (the only complete one), facets read by presence (Graph sends `"deleted": {}`), paths rebuilt from parent ids
+(delta gives none), content through the extractors, over `MAX_BYTES` indexed by name only; Graph's content redirect is
+followed only to the tenant's own SharePoint host (`SHAREPOINT`) or the dev fake, without the Graph token. Readers
+(`readers`, failing closed): the people a file is shared with (`ext:microsoft.<email>`, from the user, the site user,
+or its login name), an Entra group's members by the group's id (`entra_groups`: Entra directories' `directory_groups`
+with `group_id`), and a sharing link's named people; a SharePoint site group, an organization or anonymous link, and
+an identity without an email grant nothing. An Entra membership change re-queues these connections (`feeds`). Keys
+are `m365-<library hash>-<item id>`; the version is the item's `cTag`. The route `POST .../connections/microsoft`
+(tenant, app, sites, a certificate or a team's reference); updates change the sites and rotate the certificate. The
+fake SharePoint in `kl/fake_llm.py` (sites with the apps each is granted to, per-app tokens, delta, permissions, a
+download redirect smoke can divert). Smoke: `microsoft_365_files_carry_their_own_sharing`. The gallery's Microsoft
+365 form; a browser test. Terraform: `kind = "microsoft"` with `tenant_id`, `client_id`, `sites`, and the write-only
+`certificate`; an acceptance test. `docs/connectors/microsoft-365.md`. Not built: OneDrive (people's own drives),
+expanding SharePoint site groups, and incremental delta tokens.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1 and S2 to S4; next S5 (Microsoft 365) to S8; then Q1 (its golden-set part) to Q8;
+done, and so are G1 and S2 to S5; next S6 (Notion, live) to S8; then Q1 (its golden-set part) to Q8;
 E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI

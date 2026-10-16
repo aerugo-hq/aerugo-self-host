@@ -96,7 +96,10 @@ ADMIN_PAGE = 2
 # client assertion this fake verifies as Entra does: PS256, the certificate's SHA-256 thumbprint, this token address
 # as its audience, the app as issuer and subject. Pages are small and come with @odata.nextLink, as Graph's do.
 MICROSOFT = os.environ.get("KL_FAKE_MICROSOFT", "http://fake-llm:8080/microsoft")
-GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False}
+GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False, "sites": {}}
+# SharePoint, for Microsoft 365 (S5): sites, each granted to the apps an admin chose (Sites.Selected), with document
+# libraries holding folders and files, each file with its permissions and text; set through POST /microsoft/sites. A
+# file's content is a redirect to a download address, which smoke can point at another host (bad_download).
 GRAPH_TOKEN = "fake-graph-token"
 GRAPH_REQUESTS: list = []
 # A fake Slack Web API (S4): a workspace, its people, and channels with members and messages (threads with their
@@ -184,7 +187,7 @@ def entra_token(tenant: str, form: dict) -> tuple[int, dict]:
         return 401, {"error": "invalid_client", "error_description": str(e)[:200]}
     GRAPH_REQUESTS.append({"tenant": tenant, "client_id": field("client_id"), "aud": claims["aud"], "alg": header["alg"],
                            "x5t#S256": header["x5t#S256"], "scope": field("scope")})
-    return 200, {"access_token": GRAPH_TOKEN, "token_type": "Bearer", "expires_in": 3599}
+    return 200, {"access_token": f"{GRAPH_TOKEN}.{field('client_id')}", "token_type": "Bearer", "expires_in": 3599}  # the app's own
 
 
 def graph_transitive(group: str, seen: frozenset = frozenset()) -> list[dict]:
@@ -281,6 +284,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, GRAPH_REQUESTS)
         if self.path.startswith("/microsoft/v1.0/"):
             return self._graph(urlparse(self.path))
+        if self.path.startswith("/microsoft/download/"):  # a pre-authenticated download address: no Graph token
+            _, _, _, drive, item = self.path.split("/", 4)
+            spec = next((i for s in GRAPH["sites"].values() for d, lib in s["drives"].items() if d == drive
+                         for i in lib["items"] if i["id"] == item), None)
+            if spec is None:
+                return self._json(404, {})
+            data = spec.get("text", "").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path.startswith("/slack/api/"):
             return self._slack(urlparse(self.path))
         if self.path.startswith("/google/admin/directory/v1/"):
@@ -443,9 +459,12 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": False, "error": "unknown_method"})
 
     def _graph(self, url):
-        """Graph's users, deleted users, groups, and transitive members: small pages, each with an absolute
-        @odata.nextLink (or, when smoke asks, one on another host, which a client must never follow)."""
-        if self.headers.get("Authorization") != f"Bearer {GRAPH_TOKEN}":
+        """Graph's users, deleted users, groups, and transitive members, and SharePoint's sites, libraries, files, and
+        permissions: small pages, each with an absolute @odata.nextLink (or, when smoke asks, one on another host,
+        which a client must never follow)."""
+        auth = self.headers.get("Authorization") or ""
+        app = auth[len(f"Bearer {GRAPH_TOKEN}."):] if auth.startswith(f"Bearer {GRAPH_TOKEN}.") else None
+        if app not in GRAPH["apps"]:
             return self._json(401, {"error": {"code": "InvalidAuthenticationToken", "message": "Access token is empty."}})
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
         rest = url.path[len("/microsoft/v1.0/"):]
@@ -458,6 +477,34 @@ class Handler(BaseHTTPRequestHandler):
                 from urllib.parse import urlencode  # Graph's next link keeps the request's own query, $count included
                 body["@odata.nextLink"] = f"{host}/{rest}?{urlencode({**q, '$skiptoken': start + ADMIN_PAGE}, safe='$,')}"
             return self._json(200, body)
+        parts = rest.split("/")
+        if parts[0] == "sites" and len(parts) in (2, 3):  # a site, and its libraries: only to an app it's granted to
+            site = GRAPH["sites"].get(parts[1])
+            if site is None or app not in site.get("granted", []):
+                return self._json(403 if site else 404, {"error": {"code": "accessDenied", "message": "Access denied"}})
+            if len(parts) == 2:
+                return self._json(200, {"id": parts[1], "displayName": site["name"]})
+            if parts[2] == "drives":
+                return page([{"id": did, "name": d["name"], "driveType": "documentLibrary"} for did, d in site["drives"].items()])
+        if parts[0] == "drives" and len(parts) >= 3:
+            found = next(((s, s["drives"][parts[1]]) for s in GRAPH["sites"].values() if parts[1] in s["drives"]), None)
+            if found is None or app not in found[0].get("granted", []):
+                return self._json(403, {"error": {"code": "accessDenied", "message": "Access denied"}})
+            drive = found[1]
+            if parts[2:] == ["root", "delta"]:
+                return page([{"id": "root", "name": "root", "root": {}, "folder": {}}] + drive["items"])
+            item = next((i for i in drive["items"] if len(parts) >= 4 and i["id"] == parts[3]), None)
+            if item is None:
+                return self._json(404, {"error": {"code": "itemNotFound"}})
+            if parts[4:] == ["permissions"]:
+                return page(item.get("permissions", []))
+            if parts[4:] == ["content"]:
+                where = "http://elsewhere.test/download" if item.get("bad_download") else f"{MICROSOFT}/download/{parts[1]}/{parts[3]}"
+                self.send_response(302)
+                self.send_header("Location", where)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
         if rest == "users":
             return page(GRAPH["users"])
         if rest == "directory/deletedItems/microsoft.graph.user":
@@ -581,6 +628,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))
+        if path == "/microsoft/sites":  # smoke sets SharePoint's sites, which apps each is granted to, and their files
+            GRAPH["sites"] = self._body()["sites"]
+            return self._json(200, {})
         if path == "/microsoft/setup":  # smoke sets the tenant's users, deleted users, and groups
             body = self._body()
             GRAPH.update({"users": body.get("users", []), "deleted": body.get("deleted", []), "groups": body.get("groups", {}),

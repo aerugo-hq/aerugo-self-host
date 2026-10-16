@@ -232,12 +232,10 @@ class GoogleDirectoryClient:
         return out, {}, too_big
 
 
-class EntraClient:
-    """Microsoft Graph, read only (S3): an app registration with the application permissions User.Read.All and
-    GroupMember.Read.All, signing in with a certificate (a client assertion, never a client secret). Pages follow
-    @odata.nextLink only on Graph itself; one anywhere else ends the sync, as a listing cut short."""
-    identities = "microsoft"
-    feeds = "microsoft"  # Microsoft 365's group shares (S5)
+class GraphClient:
+    """Microsoft Graph, read only, as an app registration signing in with a certificate (a client assertion, never a
+    client secret). Pages follow @odata.nextLink only on Graph itself; one anywhere else ends the sync, as a listing
+    cut short. Entra's directory (S3) and Microsoft 365 (S5) each build on it."""
 
     def __init__(self, api_base: str, tenant_id: str, client_id: str, certificate: dict):
         if not allowed_graph(api_base):
@@ -289,6 +287,13 @@ class EntraClient:
                 raise ListingCutShort("Graph named a next page somewhere else")
             url, query = following, None
         raise ListingCutShort(f"Graph's listing ran past {MAX_PAGES} pages")
+
+
+class EntraClient(GraphClient):
+    """Entra's directory (S3): an app registration with the application permissions User.Read.All and
+    GroupMember.Read.All."""
+    identities = "microsoft"
+    feeds = "microsoft"  # Microsoft 365's group shares (S5)
 
     def test(self) -> Health:
         try:

@@ -3201,6 +3201,105 @@ def slack_messages_carry_each_channels_own_readers():
 
 
 @check
+def microsoft_365_files_carry_their_own_sharing():
+    """S5, Microsoft 365: an app granted site by site (Sites.Selected) reads those sites' libraries and nothing else; each file reaches the people it's shared with, an Entra group's members through the Entra directory, and a sharing link's named people, while an organization link and a SharePoint site group reach no one; a download redirected anywhere but SharePoint is refused; a deleted file, and a member taken out of the group, carry over on the next sync; an internal address, a malformed site, a junk certificate, and another team's secret are refused"""
+    from .authz import fga
+    tag = secrets.token_hex(3)
+    tenant = str(uuid.uuid4())
+    directory_app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    someone_else = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    people = ("alice", "bob", "carol", "dave")
+    ids = {u: str(uuid.uuid4()) for u in people}
+    principal = lambda u: f"ext:microsoft.{u}@acme.test"
+    user = lambda u: {"id": ids[u], "mail": f"{u}@acme.test", "userPrincipalName": f"{u}@acme.test", "displayName": u.title(), "accountEnabled": True}
+    team = str(uuid.uuid4())
+    group_of = lambda *members: {team: {"mail": f"team-{tag}@acme.test", "name": "Team", "members": [{"user": ids[m]} for m in members]}}
+    site, hidden = (f"acme.sharepoint.com,{uuid.uuid4()},{uuid.uuid4()}" for _ in range(2))
+    library = f"b!LIB{tag}{secrets.token_hex(6)}"
+    shared_with = lambda u: {"roles": ["read"], "grantedToV2": {"user": {"id": ids[u], "displayName": u.title(), "email": f"{u}@acme.test"}}}
+    item = lambda i, name, perms, **more: {"id": f"I{i}{tag}", "name": f"{name} {tag}.txt", "file": {"mimeType": "text/plain"}, "size": 64,
+                                         "cTag": f"c{i}", "parentReference": {"id": "root"}, "text": f"{name} {tag}: text.",
+                                         "permissions": perms, **more}
+    files = [{"id": f"F{tag}", "name": "Sub", "folder": {"childCount": 1}, "parentReference": {"id": "root"}},
+             item(1, "Plan", [shared_with("carol")], parentReference={"id": f"F{tag}"}, webUrl="https://acme.sharepoint.com/sites/pay/plan.txt"),
+             item(2, "Group", [{"roles": ["read"], "grantedToV2": {"group": {"id": team, "displayName": "Team"}}}]),
+             item(3, "Linked", [{"roles": ["read"], "link": {"scope": "organization", "type": "view"}}]),
+             item(4, "Members", [{"roles": ["read"], "grantedToV2": {"siteGroup": {"id": "3", "displayName": "Payments Members"}}}]),
+             item(5, "Diverted", [shared_with("dave")], bad_download=True),
+             item(6, "Named", [{"roles": ["read"], "link": {"scope": "users", "type": "view"},
+                               "grantedToIdentitiesV2": [{"siteUser": {"loginName": "i:0#.f|membership|bob@acme.test"}}]}])]
+    sites = lambda listed: {site: {"name": "Payments", "granted": [app["client_id"]], "drives": {library: {"name": "Documents", "items": listed}}},
+                            hidden: {"name": "Secret", "granted": [someone_else["client_id"]],
+                                     "drives": {f"b!HID{tag}{secrets.token_hex(6)}": {"name": "Docs", "items": [item(9, "Hidden", [shared_with("alice")])]}}}}
+    key = lambda i: f"m365-{hashlib.sha256(library.encode()).hexdigest()[:10]}-I{i}{tag}"
+    dname, name = f"entra-{tag}", f"m365-{tag}"
+    dpath, path = f"/v1/workspaces/payments/connections/{dname}", f"/v1/workspaces/payments/connections/{name}"
+    body = {"name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "sites": [site, hidden], "every_minutes": 60}
+    links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in people}
+
+    def hits(u):
+        return {h["id"] for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def until(test, seconds=150):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(3)
+        return test()
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u in people:  # each has linked their Microsoft account
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
+    fga.write(writes=links)
+    try:
+        assert httpx.post(f"{FAKE_MICROSOFT}/setup", json={"users": [user(u) for u in people], "groups": group_of("bob", "carol")},
+                          timeout=10).status_code == 200
+        assert httpx.post(f"{FAKE_MICROSOFT}/sites", json={"sites": sites(files)}, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json={
+            "name": dname, "provider": "entra", "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": directory_app["client_id"],
+            "certificate": directory_app["certificate"], "every_minutes": 60})
+        assert r.status_code == 201, f"the Entra directory: {r.status_code} {r.text[:200]}"
+        refusals = {"an internal address was accepted": {**body, "api_base": "http://10.0.0.5"},
+                    "a malformed site was accepted": {**body, "sites": ["https://acme.sharepoint.com/sites/pay"]},
+                    "a junk certificate was accepted": {**body, "certificate": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----"},
+                    "a reference to another team's secret was accepted": {**body, "certificate": None,
+                                                                         "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}}
+        for problem, attempt in refusals.items():
+            assert api("POST", "/v1/workspaces/payments/connections/microsoft", "alice", json=attempt).status_code == 422, problem
+        r = api("POST", "/v1/workspaces/payments/connections/microsoft", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: key(2) in hits("bob") and key(1) in hits("carol")), "Microsoft 365's files never arrived"
+        alice, bob, carol, dave = (hits(u) for u in people)
+        assert key(1) in carol and key(1) not in bob and key(1) not in dave, "a file shared with one person reached others"
+        assert key(2) in bob and key(2) in carol and key(2) not in alice and key(2) not in dave, \
+            "a file shared with an Entra group didn't reach exactly its members"
+        assert all(key(3) not in h and key(4) not in h for h in (alice, bob, carol, dave)), \
+            "an organization link or a SharePoint site group granted a file"
+        assert key(5) not in dave, "a download redirected away from SharePoint was followed"
+        assert key(6) in bob and key(6) not in alice, "a sharing link's named person didn't get the file, or someone else did"
+        assert not any("I9" in k for h in (alice, bob, carol, dave) for k in h), "a site the app wasn't granted was read"
+        doc = api("GET", "/v1/documents", "carol", params={"scope": "org", "key": key(1)}).json()["documents"]
+        assert doc and doc[0]["path"] == "Sub" and doc[0]["container"]["name"] == "Payments / Documents", f"the file isn't placed in its library: {doc}"
+
+        assert httpx.post(f"{FAKE_MICROSOFT}/sites", json={"sites": sites([f for f in files if f["id"] != f"I1{tag}"])}, timeout=10).status_code == 200
+        assert httpx.post(f"{FAKE_MICROSOFT}/setup", json={"users": [user(u) for u in people], "groups": group_of("carol")},
+                          timeout=10).status_code == 200
+        assert api("POST", dpath + "/refresh", "olivia").status_code == 202  # the directory sees bob leave: Microsoft 365 is re-read
+        assert until(lambda: key(2) not in hits("bob")), "someone taken out of the group still finds its file"
+        assert until(lambda: key(1) not in hits("carol")), "a deleted file stayed indexed"
+        assert key(2) in hits("carol"), "a member still in the group lost its file"
+    finally:
+        api("DELETE", path, "alice")
+        api("DELETE", dpath, "olivia")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
+
+
+@check
 def drive_reads_as_a_service_account():
     """Google Drive on a service account (ADR 0011): its key signs its own token request, sent only to the allowed Google address whatever the key names; folders shared with it are found and walked, subfolders too; each file keeps its own readers, the domain's or a person's; the people Drive names are recorded, so signing in matches them; a junk key and another team's secret are refused"""
     from .authz import fga

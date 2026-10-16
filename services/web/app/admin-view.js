@@ -359,7 +359,7 @@ export const CONNECTORS = [
   { id: "google", name: "Google Drive", what: "Shared drives a service account is a member of, and folders shared with it.", ready: true, action: "Connect" },
   { id: "confluence", name: "Confluence Cloud", what: "Spaces, their pages and blog posts, with Confluence's own permissions: each space's readers, narrowed by every restriction down the tree.", ready: true, action: "Connect" },
   { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members; a thread is one document.", ready: true, action: "Connect" },
-  { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, with each file's sharing.", ready: false },
+  { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, one by one, with each file's own sharing.", ready: true, action: "Connect" },
   { id: "notion", name: "Notion", what: "Pages shared with an internal integration.", ready: false },
   { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta, Google Workspace, or Microsoft Entra): a leaver's matched access goes at once. Google's and Entra's groups also reach the files shared with them.", ready: true, action: "Connect" },
 ];
@@ -369,12 +369,13 @@ const blankConfluence = { name: "confluence", api_base: "", email: "", api_token
                           company_site: false, every_minutes: 60, credential_ref: "" };
 const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
 const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
+const blankM365 = { name: "microsoft", tenant_id: "", client_id: "", certificate: "", sites: "", every_minutes: 60, credential_ref: "" };
 const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "" };
 const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", tenant_id: "", client_id: "",
                          certificate: "", every_minutes: 60, credential_ref: "" };
 // The scope list each kind has, to edit in place: its field, its label, and an example.
 const SCOPES = { jira: ["projects", "Projects", "EDP, PAY"], confluence: ["spaces", "Spaces", "PAY, ENG"], google: ["drives", "Shared drives", "Drive ids"],
-                 slack: ["channels", "Channels", "C0123ABCD"],
+                 slack: ["channels", "Channels", "C0123ABCD"], microsoft: ["sites", "Sites", "acme.sharepoint.com,<site id>,<web id>"],
                  github: ["repositories", "Repositories", "acme/payments-api"] };
 const managedTitle = (m) => `Managed by ${toolName(m.by)}${m.workspace ? `, ${m.workspace}` : ""}: change it there. A change made here would be undone on its next apply.`;
 const every = (m) => (m ? (m % 1440 === 0 ? `Every ${m / 1440 === 1 ? "day" : `${m / 1440} days`}` : m % 60 === 0 ? `Every ${m / 60 === 1 ? "hour" : `${m / 60} hours`}` : `Every ${m} min`) : "Default");
@@ -396,6 +397,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [edit, setEdit] = useState(null); // its form, from what it was declared with: cadence and scope
   const [cf, setCf] = useState(blankConfluence); // the Confluence form (index 14)
   const [sl, setSl] = useState(blankSlack); // the Slack form (S4)
+  const [ms, setMs] = useState(blankM365); // the Microsoft 365 form (S5)
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [ws]);
   const say = (name, tone, text) => setNote((n) => ({ ...n, [name]: [tone, text] }));
@@ -467,6 +469,26 @@ function Connections({ ws, teams, orgAdmin }) {
       setChosen(null);
       setGallery(false);
       setForm(blankJira);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function connectMicrosoft(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = ms.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/microsoft`, { method: "POST", body: {
+        name: ms.name.trim(), tenant_id: ms.tenant_id.trim(), client_id: ms.client_id.trim(),
+        certificate: byRef ? null : ms.certificate.trim(), credential_ref: byRef || null,
+        sites: ms.sites.split(/\s+/).filter(Boolean), every_minutes: Number(ms.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setMs(blankM365);
       load();
     } catch (e) {
       setError(e.message);
@@ -619,6 +641,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const setO = (key) => (e) => setDir({ ...dir, [key]: e.target.value });
   const setC = (key) => (e) => setCf({ ...cf, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const setS = (key) => (e) => setSl({ ...sl, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
+  const setM = (key) => (e) => setMs({ ...ms, [key]: e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
   const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
   const steps = {
@@ -655,6 +678,26 @@ function Connections({ ws, teams, orgAdmin }) {
           "A secret with email and api_token, under this team's own connections path, or a GCP Secret Manager secret named for this team. Aerugo reads it; it never stores the token itself.")),
       h("div", { className: "actions connector-wide" },
         h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Confluence"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    microsoft: () => h("form", { className: "panel-body connector-form", onSubmit: connectMicrosoft, "aria-label": "Connect Microsoft 365" },
+      h("p", { className: "connector-lede" }, "Register an app in Entra with the application permission Sites.Selected, upload its certificate, and have an admin grant it read on each site to index: never tenant-wide. Each file keeps its own sharing; a file shared with an Entra group reaches its members once an org admin connects Entra as a directory."),
+      field("Name", h("input", { className: "input", value: ms.name, onChange: setM("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      field("Tenant ID", h("input", { className: "input mono", value: ms.tenant_id, onChange: setM("tenant_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" })),
+      field("Application (client) ID", h("input", { className: "input mono", value: ms.client_id, onChange: setM("client_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" })),
+      h("label", { className: "field connector-wide" }, h("span", null, "Sites"),
+        h("textarea", { className: "input mono", rows: 3, value: ms.sites, onChange: setM("sites"), required: true, spellCheck: false,
+                        placeholder: "acme.sharepoint.com,<site collection id>,<web id>" }),
+        h("span", { className: "hint" }, "The sites the app was granted, one per line, by Graph's site id. Their document libraries are indexed.")),
+      ms.credential_ref ? null : h("label", { className: "field connector-wide" }, h("span", null, "Certificate"),
+        h("textarea", { className: "input mono", rows: 4, value: ms.certificate, onChange: setM("certificate"), required: true, spellCheck: false, autoComplete: "off",
+                        placeholder: "-----BEGIN PRIVATE KEY-----\n...\n-----BEGIN CERTIFICATE-----\n..." }),
+        h("span", { className: "hint" }, "The app's private key and its certificate (PEM). Kept in OpenBao and never shown again.")),
+      field("Sync", h("select", { className: "select", value: ms.every_minutes, onChange: setM("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a certificate the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: ms.credential_ref, onChange: setM("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/microsoft` }),
+          "A secret with certificate (its private_key, certificate, and thumbprint), under this team's own connections path.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Microsoft 365"),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
     slack: () => h("form", { className: "panel-body connector-form", onSubmit: connectSlack, "aria-label": "Connect Slack" },
       h("p", { className: "connector-lede" }, "In Slack, create an app in your own workspace (don't distribute it), give its bot the read-only scopes channels:read, groups:read, channels:history, groups:history, users:read, and users:read.email, install it, and invite the bot to the channels to index. Each message keeps its channel's own readers."),
