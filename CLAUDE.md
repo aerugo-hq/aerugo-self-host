@@ -313,6 +313,17 @@ The migration gives existing documents the one connection of their kind that lis
 rest a connection wrote, which their own connection's next sync indexes again (the M0 seed's Confluence page has no
 container, and stays). Smoke's `a_connection_never_touches_another_connections_documents`
 proves it against a second fake Jira site (`/jira-b`, `FAKE_JIRA_B`).
+G1 (a least-privilege OpenBao token): the API, the worker, the MCP server, provisioning, and smoke hold the services'
+token (`OPENBAO_SERVICES_TOKEN`; `openbao-services-token` in kind), never root. Its policy is
+`deploy/openbao/services.hcl`: secrets under `secret/kl/` (written, read, and the delete and destroy that purges and
+rotations need), the transit keys named `kl-...`, and reading the mount list; nothing else. A token that isn't root
+expires with the token mount's default (32 days) and nothing renews it, so the mount's ceiling rises and the token is
+minted for ten years. `deploy/openbao/start.sh` writes the policy and mints the token in dev and kind, before Transit
+is mounted, so the healthcheck (the services' token listing Transit) means it works; it refuses a services' token equal
+to the root one, and the dev root token is the operator's alone. On a VM, `deploy.sh` checks it on every deploy with
+the root token read from Secret Manager, replacing a token that still holds root. Smoke's
+`the_services_openbao_token_holds_only_their_paths` proves the policy, six refusals, and the lifetime. Provisioning can
+check the KV mount but no longer create it; every OpenBao start creates it.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done; next S2 (Google Workspace as a directory, and Drive's group shares) to S8; then Q1 (its golden-set part) to Q8;

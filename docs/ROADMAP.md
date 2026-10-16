@@ -174,7 +174,7 @@ baseline is already in place (only its golden-set part is left), so each source 
 ## 5. Governance and security
 
 ### G1. A least-privilege OpenBao token
-- [ ] The services' token gets a policy for exactly their paths, instead of root; provisioning creates it
+- [x] The services' token gets a policy for exactly their paths, instead of root; provisioning creates it
 
 ### G2. The rest of the Terraform provider
 - [ ] Resources for routes, pipelines, imports, secret stores, and compliance rules
