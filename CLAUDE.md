@@ -572,6 +572,11 @@ loop, the recipe every source follows, and each item's design), and `docs/ROADMA
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1 is done; next, H1 and H5 together (connections), then H2 and
 H6, H3 with M2, and H4; then the mediums, M4 first; then deployment (E in the build plan), then Q.
+The direction after that: `docs/ORG_INTELLIGENCE_PLAN.md` grows Aerugo into an org-intelligence platform (the
+Atlas: one graph of systems, code, jobs, tables, usage, and people, with evidence and permissions on every node and
+edge; an architect agent with playbooks; migration assessments; a change agent that opens pull requests for people
+to review). Its Phase 0 is the production review's prerequisites above; then its items O1 to O26, in order, proven
+on its synthetic enterprise first.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;
