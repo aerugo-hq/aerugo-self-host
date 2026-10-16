@@ -357,9 +357,34 @@ only to org admins (`orgAdmin`; a team admin is told who can); two browser tests
 with `admin_email` (in place) and the write-only `service_account_key`, an acceptance test against the fake, and the
 onboarding module's type. `docs/connectors/google-workspace.md` says what the identity team sets up. Not built:
 keyless delegation (IAM `signJwt`), matching a user's alias addresses, and group members in the app.
+S3 (Entra as a directory): `provider = "entra"` in `kl/directory.py` (`EntraClient`). Microsoft Graph
+(`KL_MICROSOFT_GRAPH_BASES`, `graph.microsoft.com`) with an app registration's application permissions
+`User.Read.All` and `GroupMember.Read.All`, signing in with a certificate, never a client secret: the client
+credentials grant with a client assertion signed PS256, naming the certificate by its SHA-256 thumbprint
+(`x5t#S256`), its audience the tenant's own token address on `login.microsoftonline.com` (the dev fake's otherwise),
+`iss` and `sub` the app, a fresh `jti`, five minutes long. `entra_certificate` turns a PEM bundle into the key, the
+certificate, and its thumbprint, refusing a key that isn't the certificate's (RSA only; an encrypted key isn't
+supported). Tenants and apps are named by id (`GUID`). People are users, then Graph's deleted items; a disabled or
+deleted account has left; Graph not saying whether an account is enabled fails the sync, and in every directory
+a listing of nobody does too, so an empty answer is never read as everyone leaving. Groups are each group's
+transitive members (a cast to users, which Graph only serves with `ConsistencyLevel: eventual` and `$count`), only
+enabled users, keyed by the group's email or, for a security group without one, its id; migration 0041 adds
+`directory_groups.group_id`, set for Entra (Microsoft 365 shares by id, S5). Pages follow `@odata.nextLink` only on
+Graph itself (one anywhere else raises `ListingCutShort`); 429, 503, and 504 back off, honoring `Retry-After`. The
+directory clients now say what they feed: `identities` (the source recorded for matching, `ext:microsoft.<email>` for
+Entra) and `feeds` (the connection kind re-queued on a membership change, `microsoft` for Entra), so the sync loop
+treats Google and Entra alike. The route takes `tenant_id`, `client_id`, and `certificate` (`repr=False`) or a team's
+`credential_ref`; `settings` read back the two ids; an update rotates the stored certificate. The fake Graph in
+`kl/fake_llm.py` (`GRAPH`, `_graph`, `entra_token`, `new_entra_app`) mints an app with its own certificate and checks
+every assertion as Entra does; its next links keep the request's query, as Graph's do (the client, run against the
+fake over HTTP before smoke, caught the fake dropping it). Smoke: `an_entra_directory_revokes_leavers_and_lists_groups`.
+The gallery's Directory card offers Microsoft Entra (tenant, app, certificate; no secret field); a browser test.
+Terraform: `directory = "entra"` with `tenant_id`, `client_id`, and a write-only `certificate`, an acceptance test with
+a throwaway certificate, and the onboarding module's ids. `docs/connectors/entra.md`. Not built: a federated
+credential (the runner's own workload identity).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1 and S2; next S3 (Entra as a directory) to S8; then Q1 (its golden-set part) to Q8;
+done, and so are G1, S2, and S3; next S4 (Slack) to S8; then Q1 (its golden-set part) to Q8;
 E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI

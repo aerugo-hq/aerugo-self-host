@@ -25,6 +25,9 @@ GOOGLE_API_BASES = [b.strip().rstrip("/") for b in _env("KL_GOOGLE_API_BASES", "
 # Google Admin API addresses a Workspace directory may use (S2): the Directory API is on its own host, not Drive's.
 GOOGLE_ADMIN_API_BASES = [b.strip().rstrip("/") for b in _env("KL_GOOGLE_ADMIN_API_BASES", "https://admin.googleapis.com").split(",")
                           if b.strip()]
+# Microsoft Graph addresses an Entra directory may use (S3); its tokens come from login.microsoftonline.com.
+MICROSOFT_GRAPH_BASES = [b.strip().rstrip("/") for b in _env("KL_MICROSOFT_GRAPH_BASES", "https://graph.microsoft.com").split(",")
+                         if b.strip()]
 # Jira addresses a connection may use besides Jira Cloud sites (https://<site>.atlassian.net, always allowed): in dev,
 # the fake one smoke runs. Anything else is refused, so a team admin can't point the worker at an internal host.
 JIRA_API_BASES = [b.strip().rstrip("/") for b in _env("KL_JIRA_API_BASES", "").split(",") if b.strip()]

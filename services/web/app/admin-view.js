@@ -361,7 +361,7 @@ export const CONNECTORS = [
   { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members.", ready: false },
   { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, with each file's sharing.", ready: false },
   { id: "notion", name: "Notion", what: "Pages shared with an internal integration.", ready: false },
-  { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta or Google Workspace): a leaver's matched access goes at once. A Google directory also brings each group's members to Drive's group shares.", ready: true, action: "Connect" },
+  { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta, Google Workspace, or Microsoft Entra): a leaver's matched access goes at once. Google's and Entra's groups also reach the files shared with them.", ready: true, action: "Connect" },
 ];
 const EVERY = [[15, "Every 15 minutes"], [60, "Every hour"], [360, "Every 6 hours"], [1440, "Every day"]];
 const blankJira = { name: "jira", api_base: "", email: "", api_token: "", projects: "", company_site: false, every_minutes: 60, credential_ref: "" };
@@ -369,7 +369,8 @@ const blankConfluence = { name: "confluence", api_base: "", email: "", api_token
                           company_site: false, every_minutes: 60, credential_ref: "" };
 const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
 const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
-const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", every_minutes: 60, credential_ref: "" };
+const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", tenant_id: "", client_id: "",
+                         certificate: "", every_minutes: 60, credential_ref: "" };
 // The scope list each kind has, to edit in place: its field, its label, and an example.
 const SCOPES = { jira: ["projects", "Projects", "EDP, PAY"], confluence: ["spaces", "Spaces", "PAY, ENG"], google: ["drives", "Shared drives", "Drive ids"],
                  github: ["repositories", "Repositories", "acme/payments-api"] };
@@ -516,12 +517,14 @@ function Connections({ ws, teams, orgAdmin }) {
     setBusy(true);
     setError(null);
     const byRef = dir.credential_ref.trim();
-    const google = dir.provider === "google";
+    const [okta, google, entra] = ["okta", "google", "entra"].map((p) => dir.provider === p);
     try {
       await kl(`workspaces/${enc(ws)}/connections/directory`, { method: "POST", body: {
-        name: dir.name.trim(), provider: dir.provider, api_base: google ? null : dir.api_base.trim().replace(/\/+$/, ""),
-        api_token: byRef || google ? null : dir.api_token, service_account_key: byRef || !google ? null : dir.key.trim(),
-        admin_email: google ? dir.admin_email.trim().toLowerCase() : null, credential_ref: byRef || null,
+        name: dir.name.trim(), provider: dir.provider, api_base: okta ? dir.api_base.trim().replace(/\/+$/, "") : null,
+        api_token: byRef || !okta ? null : dir.api_token, service_account_key: byRef || !google ? null : dir.key.trim(),
+        admin_email: google ? dir.admin_email.trim().toLowerCase() : null,
+        tenant_id: entra ? dir.tenant_id.trim() : null, client_id: entra ? dir.client_id.trim() : null,
+        certificate: byRef || !entra ? null : dir.certificate.trim(), credential_ref: byRef || null,
         every_minutes: Number(dir.every_minutes) } });
       setChosen(null);
       setGallery(false);
@@ -651,17 +654,25 @@ function Connections({ ws, teams, orgAdmin }) {
       ? h("div", { className: "panel-body connector-form" },
           h("p", { className: "connector-lede" }, "Only an org admin connects a directory: it decides who has left, and who a group reaches, across the whole company. Ask an org admin to connect Okta or Google Workspace."))
       : h("form", { className: "panel-body connector-form", onSubmit: connectDirectory, "aria-label": "Connect a directory" },
-      h("p", { className: "connector-lede" }, dir.provider === "google"
-        ? "A directory adds no documents. Google Workspace tells Aerugo who's at the company, who has left, and who is in each group, so a Drive file shared with a group reaches its members. In Google Cloud, create a service account and a JSON key; then a super admin authorizes its client ID for domain-wide delegation with exactly the three read-only directory scopes."
-        : "A directory adds no documents. It tells Aerugo who's at the company and who has left: when someone leaves, the access their email matched is revoked at once, without waiting for a sign-in that won't come. In Okta, create a read-only admin's API token."),
+      h("p", { className: "connector-lede" }, {
+        google: "A directory adds no documents. Google Workspace tells Aerugo who's at the company, who has left, and who is in each group, so a Drive file shared with a group reaches its members. In Google Cloud, create a service account and a JSON key; then a super admin authorizes its client ID for domain-wide delegation with exactly the three read-only directory scopes.",
+        entra: "A directory adds no documents. Microsoft Entra tells Aerugo who's at the company, who has left, and who is in each group, for the Microsoft 365 files shared with them. Register an app with the application permissions User.Read.All and GroupMember.Read.All (an admin consents), and upload its certificate: it signs in with that, never a client secret.",
+      }[dir.provider] || "A directory adds no documents. It tells Aerugo who's at the company and who has left: when someone leaves, the access their email matched is revoked at once, without waiting for a sign-in that won't come. In Okta, create a read-only admin's API token."),
       field("Directory", h("select", { className: "select", value: dir.provider, onChange: setO("provider") },
-        h("option", { value: "okta" }, "Okta"), h("option", { value: "google" }, "Google Workspace"))),
+        h("option", { value: "okta" }, "Okta"), h("option", { value: "google" }, "Google Workspace"), h("option", { value: "entra" }, "Microsoft Entra"))),
       field("Name", h("input", { className: "input", value: dir.name, onChange: setO("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
-      dir.provider === "okta"
+      dir.provider === "entra" ? field("Tenant ID", h("input", { className: "input mono", value: dir.tenant_id, onChange: setO("tenant_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" })) : null,
+      dir.provider === "entra" ? field("Application (client) ID", h("input", { className: "input mono", value: dir.client_id, onChange: setO("client_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" })) : null,
+      dir.provider === "entra" ? null : dir.provider === "okta"
         ? field("Okta org", h("input", { className: "input mono", value: dir.api_base, onChange: setO("api_base"), placeholder: "https://your-org.okta.com", required: true }))
         : field("Admin to act as", h("input", { className: "input", type: "email", value: dir.admin_email, onChange: setO("admin_email"), placeholder: "directory-reader@acme.com", required: true, autoComplete: "off" }),
             "A dedicated admin with a read-only role for users and groups, in one of the company's domains."),
-      dir.credential_ref ? null : dir.provider === "okta"
+      dir.credential_ref ? null : dir.provider === "entra"
+        ? h("label", { className: "field connector-wide" }, h("span", null, "Certificate"),
+            h("textarea", { className: "input mono", rows: 4, value: dir.certificate, onChange: setO("certificate"), required: true, spellCheck: false, autoComplete: "off",
+                            placeholder: "-----BEGIN PRIVATE KEY-----\n...\n-----BEGIN CERTIFICATE-----\n..." }),
+            h("span", { className: "hint" }, "Paste the app's private key and its certificate (PEM). Kept in OpenBao and never shown again; only the certificate's public half is uploaded to Entra."))
+        : dir.provider === "okta"
         ? field("API token", h("input", { className: "input mono", type: "password", value: dir.api_token, onChange: setO("api_token"), required: true, autoComplete: "off" }),
             "A read-only admin's token. Stored in OpenBao and never shown again.")
         : h("label", { className: "field connector-wide" }, h("span", null, "Service account key"),
@@ -672,10 +683,11 @@ function Connections({ ws, teams, orgAdmin }) {
         "How quickly a leaver's access goes. Every 15 minutes is a good start."),
       h("details", { className: "connector-wide" }, h("summary", null, "Use a credential the team keeps in OpenBao instead"),
         field("Credential reference", h("input", { className: "input mono", value: dir.credential_ref, onChange: setO("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/${dir.provider}` }),
-          dir.provider === "okta" ? "A secret with api_token, under this team's own connections path."
-            : "A secret with service_account (its client_email and private_key), under this team's own connections path.")),
+          { okta: "A secret with api_token, under this team's own connections path.",
+            google: "A secret with service_account (its client_email and private_key), under this team's own connections path.",
+            entra: "A secret with certificate (its private_key, certificate, and thumbprint), under this team's own connections path." }[dir.provider])),
       h("div", { className: "actions connector-wide" },
-        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : dir.provider === "google" ? "Connect Google Workspace" : "Connect Okta"),
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : { okta: "Connect Okta", google: "Connect Google Workspace", entra: "Connect Microsoft Entra" }[dir.provider]),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
     github: () => h("div", { className: "connector-steps" },
       h("ol", null,

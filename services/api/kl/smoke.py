@@ -2859,6 +2859,7 @@ FAKE_JIRA_B = "http://fake-llm:8080/jira-b"  # a second fake Jira site, whose ke
 FAKE_OKTA = "http://fake-llm:8080/okta"  # a fake Okta, inside the fake model (smoke only)
 FAKE_GCP = "http://fake-llm:8080/gcp"  # a fake GCP Secret Manager, inside the fake model (smoke only)
 FAKE_CONFLUENCE = "http://fake-llm:8080/confluence"  # a fake Confluence Cloud, inside the fake model (smoke only)
+FAKE_MICROSOFT = "http://fake-llm:8080/microsoft"  # a fake Microsoft Graph and Entra token endpoint (smoke only)
 
 
 @check
@@ -3340,6 +3341,116 @@ def a_google_directory_brings_groups_to_drive():
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s) AND verified_by = 'sso-email'", ([google(u) for u in people],))
         stale = {(t["user"], t["relation"], t["object"]) for u in people for t in fga.read({"object": f"identity:{google(u)[4:]}"})
+                 if t["user"] == f"user:{u}"}
+        if stale:
+            fga.write(deletes=stale)
+
+
+@check
+def an_entra_directory_revokes_leavers_and_lists_groups():
+    """S3, Entra as a directory: an app registration signs in with its certificate (a PS256 client assertion naming the certificate by its thumbprint, for Entra's own token address, never a client secret) and lists people and groups; a disabled or deleted account has left, and a leaver's matched access goes at once; each group's people are kept, nested groups flattened, a group without an email by its id; a next page Graph names on another host fails the sync, and nothing changes; only an org admin connects one, with a tenant and app named by id and a certificate that's the key's own"""
+    from .authz import fga
+    tag = secrets.token_hex(3)
+    tenant = str(uuid.uuid4())
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    stranger = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()  # another app's certificate
+    people = ("alice", "bob", "carol", "dave")
+    ids = {u: str(uuid.uuid4()) for u in people}
+    microsoft = lambda u: f"ext:microsoft.{u}@acme.test"
+    user = lambda u, enabled=True: {"id": ids[u], "mail": f"{u}@acme.test", "userPrincipalName": f"{u}@acme.test",
+                                    "displayName": u.title(), "accountEnabled": enabled}
+    team, security = str(uuid.uuid4()), str(uuid.uuid4())
+    groups = {team: {"mail": f"Team-{tag}@acme.test", "name": "Team", "members": [{"user": ids["carol"]}, {"group": security}]},
+              security: {"name": "Security, no email", "members": [{"user": ids["bob"]}, {"user": ids["dave"]}]}}
+    tenant_state = {"users": [user(u) for u in people], "groups": groups}
+    name = f"entra-{tag}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    body = {"name": name, "provider": "entra", "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"],
+            "certificate": app["certificate"], "every_minutes": 60}
+
+    def until(test, seconds=120):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(2)
+        return test()
+
+    def matched(u):
+        with psycopg.connect(OWNER_DB) as conn:
+            return bool(conn.execute("SELECT 1 FROM kl.principal_aliases WHERE source = %s AND canonical = %s AND verified_by = 'sso-email'",
+                                     (microsoft(u), f"user:{u}")).fetchone())
+
+    def held_groups():
+        with psycopg.connect(OWNER_DB) as conn:
+            rows = conn.execute("SELECT g.group_email, g.group_id, g.member_email FROM kl.directory_groups g JOIN kl.connections c "
+                                "ON c.id = g.connection_id WHERE c.name = %s ORDER BY 1, 3", (name,)).fetchall()
+        return {(g, gid, m) for g, gid, m in rows}
+
+    def synced_after(moment):
+        with psycopg.connect(OWNER_DB) as conn:
+            return bool(conn.execute("SELECT 1 FROM kl.connection_containers cc JOIN kl.connections c ON c.id = cc.connection_id "
+                                     "WHERE c.name = %s AND cc.cursor IS NOT NULL AND cc.cursor::timestamptz > %s", (name, moment)).fetchone())
+
+    def now():
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT now()").fetchone()[0]
+
+    try:
+        assert httpx.post(f"{FAKE_MICROSOFT}/setup", json=tenant_state, timeout=10).status_code == 200
+        refusals = {"a team admin connected a directory": ("alice", body, 403),
+                    "an internal address was accepted": ("olivia", {**body, "api_base": "http://10.0.0.5"}, 422),
+                    "a tenant not named by its id was accepted": ("olivia", {**body, "tenant_id": "contoso.onmicrosoft.com"}, 422),
+                    "a certificate that isn't one was accepted": ("olivia", {**body, "certificate": "not a certificate"}, 422),
+                    "a key that isn't the certificate's was accepted": ("olivia", {**body, "certificate": app["certificate"].split(
+                        "-----BEGIN CERTIFICATE-----")[0] + "-----BEGIN CERTIFICATE-----" + stranger["certificate"].split("-----BEGIN CERTIFICATE-----")[1]}, 422),
+                    "a reference to another team's secret was accepted": ("olivia", {**body, "certificate": None,
+                                                                                    "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}, 422)}
+        for problem, (who, attempt, status) in refusals.items():
+            assert api("POST", "/v1/workspaces/payments/connections/directory", who, json=attempt).status_code == status, problem
+        moment = now()
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: synced_after(moment)), "the Entra directory never synced"
+        asked = httpx.get(f"{FAKE_MICROSOFT}/requests", timeout=10).json()
+        assert asked and all(q["alg"] == "PS256" and q["aud"] == f"{FAKE_MICROSOFT}/{tenant}/oauth2/v2.0/token" and q["client_id"] == app["client_id"]
+                             and q["scope"] == "https://graph.microsoft.com/.default" for q in asked), f"the token was asked for wrongly: {asked}"
+        settings = api("GET", path, "olivia").json()["settings"]
+        assert settings["tenant_id"] == tenant and settings["client_id"] == app["client_id"], f"Terraform can't read back the tenant and app: {settings}"
+        team_key = f"team-{tag}@acme.test"
+        assert held_groups() == {(team_key, team, "bob@acme.test"), (team_key, team, "carol@acme.test"), (team_key, team, "dave@acme.test"),
+                                 (security, security, "bob@acme.test"), (security, security, "dave@acme.test")}, \
+            f"the groups weren't kept as Entra lists them: {held_groups()}"
+        for u in people:
+            api("GET", "/v1/whoami", u)
+        assert all(matched(u) for u in people), "sign-in didn't match people to their Entra accounts"
+
+        moment = now()
+        httpx.post(f"{FAKE_MICROSOFT}/setup", json={**tenant_state, "users": [user(u, enabled=(u != "carol")) for u in people if u != "dave"],
+                                                   "deleted": [user("dave", enabled=False)]}, timeout=10).raise_for_status()
+        assert api("POST", path + "/refresh", "olivia").status_code == 202
+        assert until(lambda: synced_after(moment)), "the Entra directory didn't sync again"
+        assert until(lambda: not matched("carol")), "a disabled account kept its matched identity"
+        assert until(lambda: not matched("dave")), "a deleted account kept its matched identity"
+        assert matched("alice") and matched("bob"), "people still enabled lost their match"
+        assert {m for _, _, m in held_groups()} == {"bob@acme.test"}, f"a leaver still counts in a group: {held_groups()}"
+
+        still = [user(u, enabled=(u != "carol")) for u in people if u != "dave"]  # more than a page, so Graph names a next one
+        httpx.post(f"{FAKE_MICROSOFT}/setup", json={"users": still, "groups": groups, "next_elsewhere": True}, timeout=10).raise_for_status()
+        with psycopg.connect(OWNER_DB) as conn:
+            cid = str(conn.execute("SELECT id FROM kl.connections WHERE name = %s", (name,)).fetchone()[0])
+            conn.execute("UPDATE kl.jobs SET last_error = NULL WHERE payload->>'connection_id' = %s", (cid,))
+        assert api("POST", path + "/refresh", "olivia").status_code == 202
+
+        def failed():
+            with psycopg.connect(OWNER_DB) as conn:
+                return bool(conn.execute("SELECT 1 FROM kl.jobs WHERE payload->>'connection_id' = %s AND last_error IS NOT NULL",
+                                         (cid,)).fetchone())
+        assert until(failed), "a listing whose next page is on another host didn't fail"
+        assert matched("alice") and matched("bob"), "a failed listing revoked people still at the company"
+    finally:
+        api("DELETE", path, "olivia")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s) AND verified_by = 'sso-email'", ([microsoft(u) for u in people],))
+        stale = {(t["user"], t["relation"], t["object"]) for u in people for t in fga.read({"object": f"identity:{microsoft(u)[4:]}"})
                  if t["user"] == f"user:{u}"}
         if stale:
             fga.write(deletes=stale)

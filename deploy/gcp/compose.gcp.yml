@@ -12,6 +12,7 @@ x-prod-env: &prod-env
   KL_PIPELINE_ISSUERS: https://token.actions.githubusercontent.com
   KL_GOOGLE_API_BASES: https://www.googleapis.com
   KL_GOOGLE_ADMIN_API_BASES: https://admin.googleapis.com
+  KL_MICROSOFT_GRAPH_BASES: https://graph.microsoft.com
   KL_JIRA_API_BASES: ""
   KL_OKTA_API_BASES: ""
   KL_CONFLUENCE_API_BASES: ""

@@ -91,6 +91,14 @@ ADMIN_SCOPES = ["https://www.googleapis.com/auth/admin.directory.user.readonly",
                 "https://www.googleapis.com/auth/admin.directory.group.member.readonly"]
 TOKEN_REQUESTS: list = []
 ADMIN_PAGE = 2
+# A fake Microsoft Graph and Entra token endpoint (S3): smoke mints an app registration with its own certificate
+# (POST /microsoft/app), sets users, deleted users, and groups (POST /microsoft/setup), and the client signs in with a
+# client assertion this fake verifies as Entra does: PS256, the certificate's SHA-256 thumbprint, this token address
+# as its audience, the app as issuer and subject. Pages are small and come with @odata.nextLink, as Graph's do.
+MICROSOFT = os.environ.get("KL_FAKE_MICROSOFT", "http://fake-llm:8080/microsoft")
+GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False}
+GRAPH_TOKEN = "fake-graph-token"
+GRAPH_REQUESTS: list = []
 # A fake GCP (ADR 0011): the metadata server's token, for the runner's own workload identity, and Secret Manager's
 # access endpoint, holding the secrets smoke sets through POST /gcp/secrets as JSON objects.
 GCP_SECRETS: dict = {}
@@ -123,6 +131,64 @@ def service_account_token(assertion: str) -> tuple[int, dict]:
             return 401, {"error": "unauthorized_client", "error_description": "Client is unauthorized to retrieve access tokens"}
         return 200, {"access_token": ADMIN_TOKEN, "token_type": "Bearer", "expires_in": 3600}
     return 400, {"error": "invalid_scope"}
+
+
+def new_entra_app(tenant: str) -> dict:
+    """An app registration and its certificate: the PEM bundle the client takes, and the public half Entra keeps."""
+    import base64, datetime, hashlib, uuid as uuidlib
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "aerugo-directory")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=5))
+            .not_valid_after(now + datetime.timedelta(days=1)).sign(key, hashes.SHA256()))
+    client = str(uuidlib.uuid4())
+    der = cert.public_bytes(serialization.Encoding.DER)
+    GRAPH["apps"][client] = {"tenant": tenant.lower(), "key": key.public_key(),
+                             "thumbprint": base64.urlsafe_b64encode(hashlib.sha256(der).digest()).rstrip(b"=").decode()}
+    bundle = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode() \
+        + cert.public_bytes(serialization.Encoding.PEM).decode()
+    return {"tenant_id": tenant.lower(), "client_id": client, "certificate": bundle}
+
+
+def entra_token(tenant: str, form: dict) -> tuple[int, dict]:
+    """Entra's token endpoint, the client credentials grant with a certificate, checked as Entra checks it."""
+    import jwt as pyjwt
+    field = lambda k: form.get(k, [""])[0]
+    if field("grant_type") != "client_credentials" or field("client_assertion_type") != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer":
+        return 400, {"error": "unsupported_grant_type"}
+    if field("scope") != "https://graph.microsoft.com/.default":
+        return 400, {"error": "invalid_scope"}
+    app = GRAPH["apps"].get(field("client_id"))
+    assertion = field("client_assertion")
+    try:
+        header = pyjwt.get_unverified_header(assertion)
+        if not app or app["tenant"] != tenant or header.get("alg") != "PS256" or header.get("x5t#S256") != app["thumbprint"]:
+            raise ValueError("unknown app, tenant, algorithm, or certificate")
+        claims = pyjwt.decode(assertion, app["key"], algorithms=["PS256"], audience=f"{MICROSOFT}/{tenant}/oauth2/v2.0/token",
+                              options={"require": ["exp", "nbf", "iat", "jti", "iss", "sub"]})
+        if claims["iss"] != field("client_id") or claims["sub"] != field("client_id") or claims["exp"] - claims["nbf"] > 600:
+            raise ValueError("the assertion isn't the app's own, or lives too long")
+    except Exception as e:  # noqa: BLE001 - any bad assertion is a refused client
+        return 401, {"error": "invalid_client", "error_description": str(e)[:200]}
+    GRAPH_REQUESTS.append({"tenant": tenant, "client_id": field("client_id"), "aud": claims["aud"], "alg": header["alg"],
+                           "x5t#S256": header["x5t#S256"], "scope": field("scope")})
+    return 200, {"access_token": GRAPH_TOKEN, "token_type": "Bearer", "expires_in": 3599}
+
+
+def graph_transitive(group: str, seen: frozenset = frozenset()) -> list[dict]:
+    """A group's users, nested groups flattened, as Graph's transitiveMembers lists them."""
+    users = []
+    for m in (GRAPH["groups"].get(group) or {}).get("members", []):
+        if m.get("group") and m["group"] not in seen:
+            users += graph_transitive(m["group"], seen | {group})
+        elif m.get("user"):
+            users += [u for u in GRAPH["users"] if u["id"] == m["user"]]
+    return users
 
 
 def admin_members(group: str, derived: bool, seen: frozenset = frozenset()) -> list[dict]:
@@ -204,6 +270,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._drive(urlparse(self.path))
         if self.path == "/google/admin/requests":
             return self._json(200, TOKEN_REQUESTS)
+        if self.path == "/microsoft/requests":
+            return self._json(200, GRAPH_REQUESTS)
+        if self.path.startswith("/microsoft/v1.0/"):
+            return self._graph(urlparse(self.path))
         if self.path.startswith("/google/admin/directory/v1/"):
             return self._admin(urlparse(self.path))
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
@@ -314,6 +384,37 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"results": [{"title": t} for t in c.get("attachments", [])], "_links": {}})
         return self._json(404, {"message": "Not found"})
 
+    def _graph(self, url):
+        """Graph's users, deleted users, groups, and transitive members: small pages, each with an absolute
+        @odata.nextLink (or, when smoke asks, one on another host, which a client must never follow)."""
+        if self.headers.get("Authorization") != f"Bearer {GRAPH_TOKEN}":
+            return self._json(401, {"error": {"code": "InvalidAuthenticationToken", "message": "Access token is empty."}})
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        rest = url.path[len("/microsoft/v1.0/"):]
+        start = int(q.get("$skiptoken") or 0)
+
+        def page(items):
+            body = {"value": items[start:start + ADMIN_PAGE]}
+            if start + ADMIN_PAGE < len(items):
+                host = "http://elsewhere.test/v1.0" if GRAPH["next_elsewhere"] else f"{MICROSOFT}/v1.0"
+                from urllib.parse import urlencode  # Graph's next link keeps the request's own query, $count included
+                body["@odata.nextLink"] = f"{host}/{rest}?{urlencode({**q, '$skiptoken': start + ADMIN_PAGE}, safe='$,')}"
+            return self._json(200, body)
+        if rest == "users":
+            return page(GRAPH["users"])
+        if rest == "directory/deletedItems/microsoft.graph.user":
+            return page(GRAPH["deleted"])
+        if rest == "groups":
+            return page([{"id": gid, "mail": g.get("mail"), "displayName": g.get("name")} for gid, g in GRAPH["groups"].items()])
+        parts = rest.split("/")
+        if len(parts) == 4 and parts[0] == "groups" and parts[2] == "transitiveMembers" and parts[3] == "microsoft.graph.user":
+            if self.headers.get("ConsistencyLevel") != "eventual" or q.get("$count") != "true":  # as Graph insists for a cast
+                return self._json(400, {"error": {"code": "Request_UnsupportedQuery", "message": "requires ConsistencyLevel and $count"}})
+            if parts[1] not in GRAPH["groups"]:
+                return self._json(404, {"error": {"code": "Request_ResourceNotFound"}})
+            return page([{k: u.get(k) for k in ("id", "mail", "userPrincipalName")} for u in graph_transitive(parts[1])])
+        self._json(404, {"error": {"code": "BadRequest", "message": "not found"}})
+
     def _admin(self, url):
         """The Directory API's users, groups, and members, as Google pages them (pageToken, never a URL)."""
         if self.headers.get("Authorization") != f"Bearer {ADMIN_TOKEN}":
@@ -416,6 +517,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/gcp/secrets":  # smoke sets the fake Secret Manager's secrets, each a JSON object
             GCP_SECRETS.update(self._body()["secrets"])
             return self._json(200, {})
+        if path == "/microsoft/app":  # smoke mints an app registration and its certificate
+            return self._json(200, new_entra_app(self._body()["tenant_id"]))
+        if path == "/microsoft/setup":  # smoke sets the tenant's users, deleted users, and groups
+            body = self._body()
+            GRAPH.update({"users": body.get("users", []), "deleted": body.get("deleted", []), "groups": body.get("groups", {}),
+                          "next_elsewhere": bool(body.get("next_elsewhere"))})
+            GRAPH_REQUESTS.clear()
+            return self._json(200, {})
+        if path.startswith("/microsoft/") and path.endswith("/oauth2/v2.0/token"):  # Entra's token endpoint
+            form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+            return self._json(*entra_token(path.split("/")[2].lower(), form))
         if path == "/google/admin/setup":  # smoke sets the fake Workspace directory, and which admins delegation allows
             ADMIN.clear()
             ADMIN.update({"users": [], "deleted": [], "groups": {}, "subjects": [], "broken": False, **self._body()})
