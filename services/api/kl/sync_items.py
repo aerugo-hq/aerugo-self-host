@@ -24,8 +24,10 @@ class Item:
 
 
 def viewer_tuples(key: str, acl: list[str]) -> set:
-    """A source identity reaches a person only through the identity they've linked; everything else is membership."""
-    return {(f"identity:{p[4:]}#owner" if p.startswith("ext:") else f"{p}#member", "viewer", f"document:{key}") for p in acl}
+    """A source identity reaches a person only through the identity they've linked; a person is themselves (Notion's
+    team readers, S6); everything else is membership."""
+    return {(f"identity:{p[4:]}#owner" if p.startswith("ext:") else p if p.startswith("user:") else f"{p}#member", "viewer",
+             f"document:{key}") for p in acl}
 
 
 def sync_container(conn, connection: dict, container: str, source_kind: str, items: list[Item],

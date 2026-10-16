@@ -360,7 +360,7 @@ export const CONNECTORS = [
   { id: "confluence", name: "Confluence Cloud", what: "Spaces, their pages and blog posts, with Confluence's own permissions: each space's readers, narrowed by every restriction down the tree.", ready: true, action: "Connect" },
   { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members; a thread is one document.", ready: true, action: "Connect" },
   { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, one by one, with each file's own sharing.", ready: true, action: "Connect" },
-  { id: "notion", name: "Notion", what: "Pages shared with an internal integration.", ready: false },
+  { id: "notion", name: "Notion", what: "Pages and databases shared with an internal integration, readable by this team's members.", ready: true, action: "Connect" },
   { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta, Google Workspace, or Microsoft Entra): a leaver's matched access goes at once. Google's and Entra's groups also reach the files shared with them.", ready: true, action: "Connect" },
 ];
 const EVERY = [[15, "Every 15 minutes"], [60, "Every hour"], [360, "Every 6 hours"], [1440, "Every day"]];
@@ -369,6 +369,7 @@ const blankConfluence = { name: "confluence", api_base: "", email: "", api_token
                           company_site: false, every_minutes: 60, credential_ref: "" };
 const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
 const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
+const blankNotion = { name: "notion", token: "", every_minutes: 60, credential_ref: "" };
 const blankM365 = { name: "microsoft", tenant_id: "", client_id: "", certificate: "", sites: "", every_minutes: 60, credential_ref: "" };
 const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "" };
 const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", tenant_id: "", client_id: "",
@@ -398,6 +399,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [cf, setCf] = useState(blankConfluence); // the Confluence form (index 14)
   const [sl, setSl] = useState(blankSlack); // the Slack form (S4)
   const [ms, setMs] = useState(blankM365); // the Microsoft 365 form (S5)
+  const [nt, setNt] = useState(blankNotion); // the Notion form (S6)
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [ws]);
   const say = (name, tone, text) => setNote((n) => ({ ...n, [name]: [tone, text] }));
@@ -469,6 +471,24 @@ function Connections({ ws, teams, orgAdmin }) {
       setChosen(null);
       setGallery(false);
       setForm(blankJira);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function connectNotion(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = nt.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/notion`, { method: "POST", body: {
+        name: nt.name.trim(), token: byRef ? null : nt.token.trim(), credential_ref: byRef || null, every_minutes: Number(nt.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setNt(blankNotion);
       load();
     } catch (e) {
       setError(e.message);
@@ -642,6 +662,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const setC = (key) => (e) => setCf({ ...cf, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const setS = (key) => (e) => setSl({ ...sl, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const setM = (key) => (e) => setMs({ ...ms, [key]: e.target.value });
+  const setN = (key) => (e) => setNt({ ...nt, [key]: e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
   const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
   const steps = {
@@ -678,6 +699,19 @@ function Connections({ ws, teams, orgAdmin }) {
           "A secret with email and api_token, under this team's own connections path, or a GCP Secret Manager secret named for this team. Aerugo reads it; it never stores the token itself.")),
       h("div", { className: "actions connector-wide" },
         h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Confluence"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    notion: () => h("form", { className: "panel-body connector-form", onSubmit: connectNotion, "aria-label": "Connect Notion" },
+      h("p", { className: "connector-lede" }, "In Notion, create an internal integration with read content only, and share with it the pages and databases to index."),
+      h("p", { className: "connector-lede connector-wide" }, h("b", null, "Who reads it: "), "Notion doesn't say who can read a page, so what you share with the integration becomes readable by this team's members, and no one else. Not the whole org, even for a team anyone may join. Share only what the whole team may read."),
+      field("Name", h("input", { className: "input", value: nt.name, onChange: setN("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      nt.credential_ref ? null : field("Integration token", h("input", { className: "input mono", type: "password", value: nt.token, onChange: setN("token"), required: true, autoComplete: "off", placeholder: "ntn_..." }),
+        "Its internal integration secret. Stored in OpenBao and never shown again."),
+      field("Sync", h("select", { className: "select", value: nt.every_minutes, onChange: setN("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a token the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: nt.credential_ref, onChange: setN("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/notion` }),
+          "A secret with token, under this team's own connections path.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Notion"),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
     microsoft: () => h("form", { className: "panel-body connector-form", onSubmit: connectMicrosoft, "aria-label": "Connect Microsoft 365" },
       h("p", { className: "connector-lede" }, "Register an app in Entra with the application permission Sites.Selected, upload its certificate, and have an admin grant it read on each site to index: never tenant-wide. Each file keeps its own sharing; a file shared with an Entra group reaches its members once an org admin connects Entra as a directory."),

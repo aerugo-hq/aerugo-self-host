@@ -109,6 +109,12 @@ SLACK: dict = {"team": {"id": "T0SMOKE", "name": "Acme", "url": "https://acme-sm
                "throttle": False}
 SLACK_TOKEN = "xoxb-smoke-slack-token"
 SLACK_PAGE = 2
+# A fake Notion (S6): the pages and data sources shared with an integration (and some that aren't), with their blocks,
+# which smoke sets through POST /notion/setup. It insists on the token and the Notion-Version header, as Notion does,
+# and pages search, queries, and block children with cursors.
+NOTION: dict = {"workspace": "Acme Notion", "pages": {}, "sources": {}}
+NOTION_TOKEN = "ntn_smoke_notion_integration_token"
+NOTION_VERSION = "2026-03-11"
 # A fake GCP (ADR 0011): the metadata server's token, for the runner's own workload identity, and Secret Manager's
 # access endpoint, holding the secrets smoke sets through POST /gcp/secrets as JSON objects.
 GCP_SECRETS: dict = {}
@@ -299,6 +305,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/slack/api/"):
             return self._slack(urlparse(self.path))
+        if self.path.startswith("/notion/v1/"):
+            return self._notion("GET", urlparse(self.path), {})
         if self.path.startswith("/google/admin/directory/v1/"):
             return self._admin(urlparse(self.path))
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
@@ -408,6 +416,48 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"results": [{"name": label} for label in c.get("labels", [])], "_links": {}})
             return self._json(200, {"results": [{"title": t} for t in c.get("attachments", [])], "_links": {}})
         return self._json(404, {"message": "Not found"})
+
+    def _notion(self, method, url, body):
+        """Notion's API, as the connector calls it: users/me, search, a data source's query, and block children."""
+        if self.headers.get("Authorization") != f"Bearer {NOTION_TOKEN}":
+            return self._json(401, {"object": "error", "code": "unauthorized", "message": "API token is invalid."})
+        if self.headers.get("Notion-Version") != NOTION_VERSION:
+            return self._json(400, {"object": "error", "code": "missing_version", "message": "Notion-Version header failed validation"})
+        rest = url.path[len("/notion/v1/"):]
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        cursor = int((body.get("start_cursor") or q.get("start_cursor") or "0"))
+
+        def page_of(items):
+            more = cursor + SLACK_PAGE < len(items)
+            return self._json(200, {"object": "list", "results": items[cursor:cursor + SLACK_PAGE], "has_more": more,
+                                    "next_cursor": str(cursor + SLACK_PAGE) if more else None})
+
+        def page_json(pid, spec):
+            return {"object": "page", "id": pid, "url": f"https://www.notion.so/{pid.replace('-', '')}", "in_trash": spec.get("in_trash", False),
+                    "last_edited_time": spec.get("edited", "2026-10-01T10:00:00.000Z"), "parent": spec.get("parent", {"type": "workspace", "workspace": True}),
+                    "properties": {"title": {"type": "title", "title": [{"plain_text": spec["title"]}]}}}
+        if method == "GET" and rest == "users/me":
+            return self._json(200, {"object": "user", "type": "bot", "bot": {"workspace_name": NOTION["workspace"]}})
+        if method == "POST" and rest == "search":
+            kind = ((body.get("filter") or {}).get("value"))
+            if kind == "data_source":
+                return page_of([{"object": "data_source", "id": sid, "title": [{"plain_text": s["title"]}]}
+                                for sid, s in NOTION["sources"].items() if s.get("shared")])
+            rows = {r for s in NOTION["sources"].values() for r in s.get("rows", [])}
+            return page_of([page_json(pid, spec) for pid, spec in NOTION["pages"].items() if spec.get("shared") and pid not in rows])
+        parts = rest.split("/")
+        if method == "POST" and len(parts) == 3 and parts[0] == "data_sources" and parts[2] == "query":
+            source = next((s for sid, s in NOTION["sources"].items() if sid.replace("-", "") == parts[1].replace("-", "")), None)
+            if not source or not source.get("shared"):
+                return self._json(404, {"object": "error", "code": "object_not_found"})
+            return page_of([page_json(pid, NOTION["pages"][pid]) for pid in source.get("rows", [])])
+        if method == "GET" and len(parts) == 3 and parts[0] == "blocks" and parts[2] == "children":
+            want = parts[1].replace("-", "")  # Notion takes an id with or without its dashes
+            spec = next((s for pid, s in NOTION["pages"].items() if pid.replace("-", "") == want), None)                 or next((b for p in NOTION["pages"].values() for b in p.get("blocks", []) if str(b.get("id")).replace("-", "") == want), None)
+            if spec is None:
+                return self._json(404, {"object": "error", "code": "object_not_found"})
+            return page_of(spec.get("blocks") or spec.get("children") or [])
+        self._json(404, {"object": "error", "code": "invalid_request_url"})
 
     def _slack(self, url):
         """The Web API methods the connector calls, at Slack's own paths, each answering as Slack does."""
@@ -622,6 +672,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/gcp/secrets":  # smoke sets the fake Secret Manager's secrets, each a JSON object
             GCP_SECRETS.update(self._body()["secrets"])
             return self._json(200, {})
+        if path == "/notion/setup":  # smoke sets the fake Notion's pages and data sources, and which are shared
+            body = self._body()
+            NOTION.update({"pages": body.get("pages", {}), "sources": body.get("sources", {})})
+            return self._json(200, {})
+        if path.startswith("/notion/v1/"):
+            return self._notion("POST", urlparse(self.path), self._body())
         if path == "/slack/setup":  # smoke sets the fake Slack workspace's people and channels
             body = self._body()
             SLACK.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle"))})

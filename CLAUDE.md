@@ -422,9 +422,25 @@ download redirect smoke can divert). Smoke: `microsoft_365_files_carry_their_own
 365 form; a browser test. Terraform: `kind = "microsoft"` with `tenant_id`, `client_id`, `sites`, and the write-only
 `certificate`; an acceptance test. `docs/connectors/microsoft-365.md`. Not built: OneDrive (people's own drives),
 expanding SharePoint site groups, and incremental delta tokens.
+S6 (Notion, live): `kl/notion.py`. An internal integration's token (`ntn_` or `secret_`; `KL_NOTION_API_BASES`), at
+`Notion-Version` 2026-03-11 (`archived` is `in_trash`; databases' rows come from data sources: search for
+`data_source`, then `data_sources/{id}/query`). One container, the workspace (by its name, from `users/me`); every
+page shared with the integration, each data source's rows as pages, trash and unshared pages left out; blocks as text
+(`sections_of`: a section per heading, lists, to-dos with their state, quotes, fenced code, table rows), up to
+`MAX_BLOCKS`; a page's path its shared parents' titles, a row's its data source's. Notion's API doesn't say who can
+read a page, so readers are the connecting team's members as the team holds them (`team_readers`: its `group:` and
+`user:` principals with a role on it, recomputed every sync), never `org:`, even for a team the whole org may join;
+the form and `docs/connectors/notion.md` say so plainly. This is the one connector whose readers aren't the source's
+own (invariant 12): the roadmap's decision, as exports do, flagged in `docs/plans/decisions.md`. `viewer_tuples` now
+hands OpenFGA a `user:` principal as itself. The pages it holds retire the same team's export copies
+(`retire_exported`, by `https://www.notion.so/<id>`). The route `POST .../connections/notion`; updates rotate the
+token. The fake Notion (`NOTION`, `_notion`) insists on the token and the version header, as Notion does. Smoke:
+`notion_pages_reach_only_the_connecting_team`. The gallery's Notion form, saying who reads it; a browser test; every
+gallery source is now built. Terraform: `kind = "notion"` (the token as the write-only `api_token`); an acceptance
+test. Not built: reading people's own Notion permissions (the API has none), and comments.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1 and S2 to S5; next S6 (Notion, live) to S8; then Q1 (its golden-set part) to Q8;
+done, and so are G1 and S2 to S6; next S7 (data catalogs) and S8; then Q1 (its golden-set part) to Q8;
 E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI

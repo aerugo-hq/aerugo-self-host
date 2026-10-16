@@ -78,7 +78,7 @@ def test_the_gallery_offers_every_source_and_opens_its_form(page):
     page.goto(f"{WEB}/#/admin/sources")
     panel(page, "Connections").get_by_role("button", name="Connect a source").click()
     gallery = page.get_by_role("list", name="Sources you can connect")
-    expect(gallery.get_by_role("listitem").filter(has_text="Notion")).to_contain_text(re.compile(r"Coming next|Planned"))
+    expect(gallery.get_by_role("listitem").filter(has_text="Confluence Cloud")).to_contain_text("Connect")  # every source is built
     gallery.get_by_role("listitem").filter(has_text="Confluence Cloud").get_by_role("button", name="Connect").click()
     form = page.get_by_role("form", name="Connect Confluence")
     expect(form.get_by_role("textbox", name="Confluence site", exact=True)).to_be_visible()
@@ -137,6 +137,14 @@ def test_a_team_admin_opens_the_microsoft_365_form(page):
     expect(form.get_by_label(re.compile(r"^Sites"))).to_be_visible()
     expect(form.get_by_label(re.compile(r"^Certificate"))).to_be_visible()
     expect(form.get_by_text("never tenant-wide")).to_be_visible()
+
+
+def test_the_notion_form_says_who_will_read_it(page):
+    sign_in(page, "alice")
+    open_connector(page, "Notion")
+    form = page.get_by_role("form", name="Connect Notion")
+    expect(form.get_by_label("Integration token")).to_have_attribute("type", "password")
+    expect(form).to_contain_text("readable by this team's members, and no one else")
 
 
 def test_olivia_sets_up_and_removes_google_sign_in(page):
