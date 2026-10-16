@@ -20,10 +20,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import httpx
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
+from psycopg_pool import PoolTimeout
 
 from . import alerting, compiler, config, google_identity, imports, manifests, okf, originals, pipelines, telemetry
 from .auth import Caller, authenticate
@@ -56,6 +58,14 @@ app = FastAPI(title="knowledge-layer API", version="0.1.0")
 app.include_router(connections_router)
 app.include_router(webhooks_router)
 app.include_router(hooks_router)
+
+
+@app.exception_handler(PoolTimeout)
+def database_busy(request: Request, exc: PoolTimeout) -> JSONResponse:
+    """Every pooled connection stayed busy for the pool's whole wait (H1): say so, and when to try again."""
+    return JSONResponse(status_code=503, content={"detail": "the database is busy; try again shortly"}, headers={"Retry-After": "2"})
+
+
 telemetry.setup("kl-api")
 
 
@@ -537,7 +547,7 @@ def readyz():
     """Dev readiness report. Production readiness must not expose internals."""
     checks: dict[str, dict] = {}
     try:
-        with connect() as conn:
+        with connect(timeout=2) as conn:  # a pool that can't hand out a connection now makes the API not ready (H1)
             row = conn.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'").fetchone()
         checks["postgres"] = {"ok": row is not None, "pgvector": row["extversion"] if row else None}
     except Exception as e:  # noqa: BLE001 - readiness reports, it never raises
@@ -572,7 +582,7 @@ def status(caller: Caller = Depends(authenticate)):
             return False
 
     def database():
-        with connect() as conn:
+        with connect(timeout=2) as conn:
             return conn.execute("SELECT 1 AS ok").fetchone() is not None
 
     def secrets():

@@ -3517,6 +3517,120 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
 
 
 @check
+def the_api_pools_its_connections_and_every_role_has_time_limits():
+    """Connections (H1): the API keeps a pool of database connections instead of opening one per call; a connection back in the pool carries nothing of the request that used it, not even a session-wide setting; and each role has its time limits (short for the API, longer for the worker), so a runaway query or a stuck transaction can't hold a connection forever"""
+    import concurrent.futures
+    from . import db
+    users = ["alice", "bob"] * 8
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        codes = list(pool.map(lambda u: api("GET", "/v1/search", u, params={"q": "incident", "limit": 3}).status_code, users))
+    assert codes == [200] * len(users), f"a burst of searches failed: {codes}"
+    with psycopg.connect(OWNER_DB) as conn:
+        kept = conn.execute("SELECT count(*) FROM pg_stat_activity WHERE usename = 'kl_app' AND application_name = 'kl-api' "
+                            "AND state = 'idle'").fetchone()[0]
+    assert 1 <= kept <= 20, f"the API should keep between 1 and its pool's 20 connections after a burst, not {kept}"
+
+    pool = db.new_pool(max_size=1)  # the API's own pool, made to hand the same connection back
+    try:
+        with pool.connection() as conn:
+            pid = conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+            conn.execute("SELECT set_config('kl.principals', 'user:alice', false)")  # session-wide, as no request should
+        with pool.connection() as conn:
+            again = conn.execute("SELECT pg_backend_pid() AS pid, current_setting('kl.principals', true) AS principals").fetchone()
+        assert again["pid"] == pid, "the pool of one handed out another connection"
+        assert not again["principals"], f"a pooled connection kept a session's setting for the next caller: {again['principals']!r}"
+    finally:
+        pool.close()
+
+    for url, role, statement, idle in ((APP_DB, "kl_app", "30s", "1min"), (INGEST_DB, "kl_ingest", "10min", "10min")):
+        with psycopg.connect(url) as conn:
+            got = (conn.execute("SHOW statement_timeout").fetchone()[0], conn.execute("SHOW idle_in_transaction_session_timeout").fetchone()[0])
+        assert got == (statement, idle), f"{role}'s time limits are {got}, not {(statement, idle)}"
+    print(f"      {kept} connection(s) kept by the API after {len(users)} searches; a returned connection came back clean; "
+          "kl_app 30s and 1min, kl_ingest 10min and 10min")
+
+
+@check
+def no_model_call_holds_a_database_transaction():
+    """Connections (H5): Ask and a reranked search call their models with no database transaction open, so a slow model holds no connection: the search's retrieval and the answer's record are each their own short transaction"""
+    import concurrent.futures
+    ensure_fake_models()
+
+    def held_open() -> int:  # the API's sessions waiting inside a transaction
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM pg_stat_activity WHERE usename = 'kl_app' AND state = 'idle in transaction'").fetchone()[0]
+
+    calls = (("Ask", lambda: api("POST", "/v1/ask", "alice", json={"question": PAGE_QUESTION, "model": "payments/smoke-fake"})),
+             ("a reranked search", lambda: api("GET", "/v1/search", "alice", params={"q": "incident", "scope": "org", "limit": 10})))
+    try:
+        fake_reranker()
+        assert httpx.post(f"{FAKE_LLM}/mode", json={"delay": 3}, timeout=10).status_code == 200
+        for what, call in calls:
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                pending = pool.submit(call)
+                time.sleep(1.5)  # the model is answering now: retrieval takes well under a second
+                held = held_open()
+                r = pending.result(timeout=60)
+            assert r.status_code == 200, f"{what}: {r.status_code} {r.text[:200]}"
+            assert held == 0, f"{what} held {held} transaction(s) open while its model answered"
+        assert fake_reranks(), "the search was never reranked, so it proves nothing"
+        print("      no transaction was open while the model answered Ask, or reranked a search")
+    finally:
+        reset_fake()
+        no_reranker()
+
+
+@check
+def a_failed_change_never_strands_or_loses_a_secret():
+    """Secrets (H5): a model registered in a change that then fails leaves no secret behind in OpenBao, and a model whose removal fails keeps its key; once the removal commits, the key is destroyed"""
+    from .vault import vault
+    tag = secrets.token_hex(3)
+    doomed_new, kept = f"h5-new-{tag}", f"h5-kept-{tag}"
+    ref = lambda name: f"openbao://secret/kl/acme/payments/models/{name}"
+    model = lambda name: {"name": name, "provider": "openai_compatible", "model": "x", "base_url": f"{FAKE_LLM}/v1", "api_key": f"key-{tag}"}
+
+    def exists(r: str) -> bool:
+        try:
+            return vault.get(r).get("api_key") == f"key-{tag}"
+        except httpx.HTTPStatusError as e:
+            assert e.response.status_code == 404, e
+            return False
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # fail chosen changes on purpose, at their audit event
+        conn.execute("CREATE TABLE kl.smoke_doomed (action text, name text)")
+        conn.execute("""CREATE FUNCTION kl.smoke_doom() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = kl AS $$
+                        BEGIN
+                          IF EXISTS (SELECT 1 FROM smoke_doomed WHERE action = NEW.action AND name = NEW.details->>'name') THEN
+                            RAISE EXCEPTION 'smoke: this change fails on purpose';
+                          END IF;
+                          RETURN NEW;
+                        END $$""")
+        conn.execute("CREATE TRIGGER smoke_doom BEFORE INSERT ON kl.audit_events FOR EACH ROW EXECUTE FUNCTION kl.smoke_doom()")
+        conn.execute("INSERT INTO kl.smoke_doomed VALUES ('model.register', %s), ('model.remove', %s)", (doomed_new, kept))
+    try:
+        r = api("POST", "/v1/workspaces/payments/models", "alice", json=model(doomed_new))
+        assert r.status_code >= 500, f"the doomed registration didn't fail: {r.status_code}"
+        assert not exists(ref(doomed_new)), "a registration that failed left its key behind in OpenBao"
+
+        assert api("POST", "/v1/workspaces/payments/models", "alice", json=model(kept)).status_code == 201
+        assert api("DELETE", f"/v1/workspaces/payments/models/{kept}", "alice").status_code >= 500, "the doomed removal didn't fail"
+        assert exists(ref(kept)), "a removal that failed destroyed the key of the model it left in place"
+
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.smoke_doomed")
+        assert api("DELETE", f"/v1/workspaces/payments/models/{kept}", "alice").status_code == 200
+        assert not exists(ref(kept)), "a removal that committed left its key behind"
+        print("      the failed registration left no key; the failed removal kept its key; the committed one destroyed it")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DROP TRIGGER IF EXISTS smoke_doom ON kl.audit_events")
+            conn.execute("DROP FUNCTION IF EXISTS kl.smoke_doom()")
+            conn.execute("DROP TABLE IF EXISTS kl.smoke_doomed")
+        for name in (doomed_new, kept):
+            api("DELETE", f"/v1/workspaces/payments/models/{name}", "alice")
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga

@@ -23,7 +23,7 @@ RERANKS: list[dict] = []
 ALERTS: list[dict] = []  # what the app's alert webhook posted (slice P); never reset, alerts arrive late
 ANSWER = "According to the sources, page the on-call first [1]."
 UNFAITHFUL = "The CFO approves every refund personally [1]."  # nothing in any source says this
-MODE = {"answer": ANSWER}
+MODE = {"answer": ANSWER, "delay": 0.0}  # delay: seconds each answer and rerank takes, when smoke asks (H5)
 STOP = {"according", "sources", "source", "first", "that", "this", "with", "from", "they", "their", "there",
         "what", "when", "which", "about", "should", "would"}
 ISSUER = os.environ.get("KL_FAKE_OIDC_ISSUER", "http://fake-llm:8080/oidc")
@@ -910,7 +910,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/requests":  # a clean slate: both logs, and honest answers again
             REQUESTS.clear()
             RERANKS.clear()
-            MODE["answer"] = ANSWER
+            MODE["answer"], MODE["delay"] = ANSWER, 0.0
             return self._json(200, {})
         self._json(404, {})
 
@@ -1017,9 +1017,12 @@ class Handler(BaseHTTPRequestHandler):
             DRIVES[request["drive"]] = {"name": request.get("name", request["drive"]), "files": {f["id"]: f for f in request["files"]}}
             return self._json(200, {})
         if path == "/mode":
-            MODE["answer"] = UNFAITHFUL if self._body().get("answer") == "unfaithful" else ANSWER
+            body = self._body()
+            MODE["answer"] = UNFAITHFUL if body.get("answer") == "unfaithful" else ANSWER
+            MODE["delay"] = min(float(body.get("delay") or 0), 10)
             return self._json(200, {})
         if path == "/v1/rerank":
+            time.sleep(MODE["delay"])
             request = self._body()
             RERANKS.append(request)
             asked = words(request.get("query", ""))
@@ -1034,6 +1037,7 @@ class Handler(BaseHTTPRequestHandler):
                                                                     {"start": 75.0, "text": "Next, we fail over at noon on Friday."}]})
         if path != "/v1/chat/completions":
             return self._json(404, {})
+        time.sleep(MODE["delay"])
         request = self._body()
         last = (request.get("messages") or [{}])[-1].get("content")
         if isinstance(last, list) and any(p.get("type") == "image_url" for p in last):  # a vision model (Q8)

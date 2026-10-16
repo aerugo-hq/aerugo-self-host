@@ -7,6 +7,12 @@ def _env(name: str, default: str = "") -> str:
 
 
 DATABASE_URL = _env("KL_DATABASE_URL", "postgresql://kl_app:app-dev-only@postgres:5432/kl")
+# The process's pool of database connections (H1). Size it so every process's maximum, added up, stays under Postgres's
+# max_connections (100 by default): the API's and the MCP server's pools, the worker's two connections, and OpenFGA's.
+DB_POOL_MIN = int(_env("KL_DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(_env("KL_DB_POOL_MAX", "20"))
+DB_POOL_TIMEOUT = float(_env("KL_DB_POOL_TIMEOUT", "10"))  # seconds a request waits for a connection before a 503
+SERVICE_NAME = _env("OTEL_SERVICE_NAME", "kl-api")  # what its connections are called in pg_stat_activity
 ORG_SLUG = _env("KL_ORG_SLUG", "acme")
 OPENFGA_URL = _env("KL_OPENFGA_URL", "http://openfga:8080").rstrip("/")
 OPENFGA_STORE = _env("KL_OPENFGA_STORE", "kl-dev")
