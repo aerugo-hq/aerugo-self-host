@@ -1,68 +1,114 @@
 {
-  "cases": {
-    "decision-2025": {
-      "first": 1,
-      "found": 2,
-      "of": 2
+  "golden": {
+    "cases": {
+      "alice: page the payments on-call": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "alice: replication lag before failing over": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "bob: checklist": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "bob: month-end close": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "carol: report a security incident": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "dave: hold procedure": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "dave: litigation hold": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      }
     },
-    "decision-latest-first": {
-      "first": 1,
-      "found": 1,
-      "of": 1
-    },
-    "impact-cross-team": {
-      "first": 2,
-      "found": 2,
-      "of": 2
-    },
-    "lineage-downstream": {
-      "first": 1,
-      "found": 1,
-      "of": 1
-    },
-    "lookup-order-hist": {
-      "first": 1,
-      "found": 1,
-      "of": 1
-    },
-    "migration-plan": {
-      "first": 1,
-      "found": 2,
-      "of": 2
-    },
-    "owner-people": {
-      "first": 1,
-      "found": 1,
-      "of": 1
-    },
-    "owner-ticket": {
-      "first": 1,
-      "found": 2,
-      "of": 2
-    },
-    "program-waves": {
-      "first": 1,
-      "found": 1,
-      "of": 1
-    },
-    "retention-legal": {
-      "first": 1,
-      "found": 1,
-      "of": 1
-    },
-    "retention-trap": {
-      "first": 2,
-      "found": 1,
-      "of": 1
-    },
-    "standards-everyone": {
-      "first": 1,
-      "found": 1,
-      "of": 1
-    }
+    "k": 10,
+    "mrr": 1.0,
+    "recall": 1.0,
+    "set": "golden",
+    "version": "2026-10-2"
   },
-  "k": 10,
-  "mrr": 0.9167,
-  "recall": 1.0,
-  "scenario": "migration"
+  "migration": {
+    "cases": {
+      "decision-2025": {
+        "first": 1,
+        "found": 2,
+        "of": 2
+      },
+      "decision-latest-first": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "impact-cross-team": {
+        "first": 2,
+        "found": 2,
+        "of": 2
+      },
+      "lineage-downstream": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "lookup-order-hist": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "migration-plan": {
+        "first": 1,
+        "found": 2,
+        "of": 2
+      },
+      "owner-people": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "owner-ticket": {
+        "first": 1,
+        "found": 2,
+        "of": 2
+      },
+      "program-waves": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "retention-legal": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "retention-trap": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      },
+      "standards-everyone": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      }
+    },
+    "k": 10,
+    "mrr": 0.9167,
+    "recall": 1.0,
+    "scenario": "migration"
+  }
 }

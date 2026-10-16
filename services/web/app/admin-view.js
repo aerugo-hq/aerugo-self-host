@@ -7,7 +7,7 @@ import { ago, kl, klUpload } from "../lib/client.js";
 import { Icon } from "./icons.js";
 import { SourceIcon, sourceName } from "./brand.js";
 import { Alert, Confirm, Empty, PageHead, SectionNav, SkeletonRows, Spinner, Table, Status, TeamPicker, stamp } from "./ui.js";
-import { ManagedNote, TerraformDetails, budgetItem, memberItem, modelItem, teamItem, toolName } from "./terraform.js";
+import { ManagedNote, TerraformDetails, budgetItem, connectionItem, memberItem, modelItem, teamItem, toolName } from "./terraform.js";
 
 const enc = encodeURIComponent;
 // What the gateway speaks. Vertex, Bedrock, and Azure work through an OpenAI-compatible gateway such as LiteLLM.
@@ -419,7 +419,13 @@ function Connections({ ws, teams, orgAdmin }) {
   const [nt, setNt] = useState(blankNotion); // the Notion form (S6)
   const [ct, setCt] = useState(blankCatalog); // the data catalog form (S7)
   const [hook, setHook] = useState(null); // the webhook panel open under a row (S8): { name, signing, made }
-  const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
+  const [declared, setDeclared] = useState([]); // each connection as the API reads it back, for Terraform (G2)
+  const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => {
+    setItems(r.connections);
+    setError(null);
+    Promise.all(r.connections.map((c) => kl(`workspaces/${enc(ws)}/connections/${enc(c.name)}`).catch(() => null)))
+      .then((all) => setDeclared(all.filter(Boolean)));
+  }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [ws]);
   const say = (name, tone, text) => setNote((n) => ({ ...n, [name]: [tone, text] }));
   async function resync(name) {
@@ -1019,6 +1025,7 @@ function Connections({ ws, teams, orgAdmin }) {
             editing === c.name ? h("tr", { key: `${c.name}-edit` }, h("td", { colSpan: 5 }, editForm(c))) : null,
             hook?.name === c.name ? h("tr", { key: `${c.name}-hook` }, h("td", { colSpan: 5 }, hookPanel(c))) : null])))
         : items ? h(Empty, null, "No sources connected to this team yet. Connect one above.") : null,
+    declared.length ? h("div", { className: "panel-body" }, h(TerraformDetails, { items: declared.map((c) => connectionItem(ws, c)) })) : null,
     confirming ? h(Confirm, { title: `Remove the connection “${confirming}”?`, action: "Remove connection", onCancel: () => setConfirming(null),
                              onConfirm: () => remove(confirming) },
       "Its documents leave this team, and anything only it brought in leaves Aerugo, grants and all. Shared documents other connections hold stay.") : null);

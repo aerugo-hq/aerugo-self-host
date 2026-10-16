@@ -26,6 +26,9 @@ class SecretStore:
         if ref.startswith("gcpsm://"):  # a secret a team keeps in GCP Secret Manager (ADR 0011)
             from . import gcp_secrets
             return gcp_secrets.get(ref)
+        if ref.startswith(("hcvault://", "awssm://", "azkv://")):  # Vault, AWS, or Azure (G3, ADR 0012)
+            from . import secret_refs
+            return secret_refs.get(ref)
         prefix = f"{_SCHEME}{self.mount}/"
         if not ref.startswith(prefix):
             raise ValueError("unsupported credential reference")

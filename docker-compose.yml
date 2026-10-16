@@ -177,6 +177,16 @@ services:
       KL_AWS_API_BASES: ${KL_AWS_API_BASES:-http://fake-llm:8080/aws}
       KL_PURVIEW_API_BASES: ${KL_PURVIEW_API_BASES:-http://fake-llm:8080/purview}
       KL_DATAHUB_API_BASES: ${KL_DATAHUB_API_BASES:-http://fake-llm:8080/datahub}
+      # The company's own secret stores (G3), as credential references: off unless set; in dev, the fakes smoke runs.
+      KL_HCVAULT_ADDR: ${KL_HCVAULT_ADDR:-http://fake-llm:8080/hcvault}
+      KL_AWS_SECRET_REGIONS: ${KL_AWS_SECRET_REGIONS:-us-east-1}
+      KL_AWS_SECRETS_ROLE: ${KL_AWS_SECRETS_ROLE:-arn:aws:iam::123456789012:role/aerugo-catalog}
+      KL_AWS_SECRETS_API_BASE: ${KL_AWS_SECRETS_API_BASE:-http://fake-llm:8080/aws}
+      KL_AZURE_KEY_VAULTS: ${KL_AZURE_KEY_VAULTS:-acme-smoke-vault}
+      KL_AZURE_TENANT_ID: ${KL_AZURE_TENANT_ID:-00000000-0000-4000-8000-000000000001}
+      KL_AZURE_CLIENT_ID: ${KL_AZURE_CLIENT_ID:-00000000-0000-4000-8000-000000000002}
+      KL_AZURE_LOGIN_BASE: ${KL_AZURE_LOGIN_BASE:-http://fake-llm:8080/azure-login}
+      KL_AZURE_KEY_VAULT_BASE: ${KL_AZURE_KEY_VAULT_BASE:-http://fake-llm:8080/azkv/{vault}}
       # Jira addresses besides Jira Cloud sites (ADR 0011); the fake ones (two sites) exist only while smoke runs.
       KL_JIRA_API_BASES: ${KL_JIRA_API_BASES:-http://fake-llm:8080/jira,http://fake-llm:8080/jira-b}
       # Okta addresses besides Okta orgs (ADR 0011: directories); the fake one exists only while smoke runs.

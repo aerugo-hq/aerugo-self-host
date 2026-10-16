@@ -18,6 +18,12 @@ x-prod-env: &prod-env
   KL_AWS_API_BASES: ""
   KL_PURVIEW_API_BASES: ""
   KL_DATAHUB_API_BASES: ""
+  KL_HCVAULT_ADDR: ""
+  KL_AWS_SECRET_REGIONS: ""
+  KL_AWS_SECRETS_API_BASE: ""
+  KL_AZURE_KEY_VAULTS: ""
+  KL_AZURE_LOGIN_BASE: https://login.microsoftonline.com
+  KL_AZURE_KEY_VAULT_BASE: https://{vault}.vault.azure.net
   KL_SLACK_API_BASES: https://slack.com/api
   KL_NOTION_API_BASES: https://api.notion.com/v1
   KL_JIRA_API_BASES: ""

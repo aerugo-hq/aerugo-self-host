@@ -1453,7 +1453,8 @@ def get_retention(caller: Caller = Depends(authenticate)):
                FROM retention_policies p LEFT JOIN workspaces w ON w.id = p.workspace_id
                ORDER BY p.target, w.slug NULLS FIRST, p.classification NULLS FIRST""").fetchall()
         holds = conn.execute(
-            """SELECT h.id, w.slug AS workspace, h.reason, h.created_by, h.created_at, h.released_by, h.released_at
+            """SELECT h.id, COALESCE(w.slug, h.team_slug) AS workspace, h.reason, h.created_by, h.created_at, h.released_by,
+                      h.released_at
                FROM legal_holds h LEFT JOIN workspaces w ON w.id = h.workspace_id
                ORDER BY h.released_at IS NOT NULL, h.created_at DESC""").fetchall()
         runs = conn.execute("SELECT at, counts FROM retention_runs ORDER BY at DESC LIMIT 20").fetchall()

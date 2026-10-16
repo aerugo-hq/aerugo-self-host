@@ -456,6 +456,19 @@ def handle_workspace_purge(conn, job) -> dict:
                        (job["payload"]["request_id"],)).fetchone()
     if not req or req["status"] != "running":
         return {"skipped": "the request was cancelled or already finished"}
+    # A hold placed after the purge was scheduled cancels it before anything is destroyed. ponytail: a hold placed
+    # between this check and purge_workspace (which checks again and refuses) can still lose tuples and secrets;
+    # lock the team's row here if holds ever race purges in practice.
+    if conn.execute("SELECT kl.retention_held(%s) AS held", (req["workspace_id"],)).fetchone()["held"]:
+        result = {"cancelled": "a legal hold covers the team"}
+        with conn.transaction():
+            conn.execute("UPDATE purge_requests SET status = 'cancelled', result = %s, updated_at = now() WHERE id = %s",
+                         (Jsonb(result), req["id"]))
+            conn.execute("INSERT INTO audit_events (org_id, actor, action, scope, details) "
+                         "VALUES (%s, %s, 'workspace.purge_cancelled', %s, %s)",
+                         (req["org_id"], req["requested_by"], [req["slug"]], Jsonb({"request": str(req["id"]), **result})))
+        log.info("purge of %s cancelled: a legal hold covers it", req["slug"])
+        return result
     plan = conn.execute("SELECT kl.purge_plan(%s) AS plan", (req["workspace_id"],)).fetchone()["plan"]
     result = {"tuples": 0, "secrets": 0}
     if plan:

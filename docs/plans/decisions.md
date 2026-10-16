@@ -136,3 +136,13 @@ such choice took the narrower, fail-closed option and is listed here, with its a
    release step for later.
 4. **The OKF export is a zip over the API** (A4), not a Git push: a team pushes it to its own repository, so Aerugo
    never writes to anyone's Git.
+
+## G2 and G3. Governance
+
+1. **No Terraform resource for imports or secret stores** (G2): an import is a one-time upload of an export (a pipeline
+   is how a repository keeps pushing), and which secret stores are allowed is the deployment's setting, not an API's.
+2. **The route resource's acceptance test needs a real GitHub connection** (G2), which CI doesn't have; it runs when
+   `AERUGO_TEST_ROUTE` names one, and is skipped otherwise.
+3. **Key Vault references can't name a team whose slug holds `--`** (G3): Key Vault names allow only dashes, so the
+   fence's separator is a double dash, which such a team could forge.
+4. **Every new store reads as the runner itself** (G3): no store takes a stored secret to unlock it.
