@@ -10,6 +10,7 @@ Permissions mirror Jira and fail closed:
   - An issue nobody may read isn't indexed at all."""
 import base64
 import re
+from datetime import datetime, timezone
 
 import httpx
 
@@ -25,6 +26,7 @@ from . import source_http
 PROJECT = re.compile(r"^[A-Z][A-Z0-9_]{0,49}$")
 ISSUE = re.compile(r"^[A-Z][A-Z0-9_]{0,49}-[0-9]{1,9}$")
 SITE = re.compile(r"^https://[a-z0-9][a-z0-9-]{0,62}\.atlassian\.net$")  # Jira Cloud
+OVERLAP_MINUTES = 10  # an incremental sync reaches this far before its cursor: clocks drift, and edits land mid-listing (H6)
 FIELDS = "summary,description,comment,status,assignee,reporter,issuetype,updated,security,labels,resolution,resolutiondate,attachment"
 ATTACHMENT_ID = re.compile(r"^[0-9]{1,20}$")
 ANYONE = {"applicationRole", "anyone"}  # permission holders meaning "anyone with access to this Jira"
@@ -148,11 +150,15 @@ class JiraClient:
                 return found
             start += len(page["values"])
 
-    def issues(self, project: str) -> list[dict]:
+    def issues(self, project: str, since: str | None = None) -> list[dict]:
+        """A project's issues, or only those updated since a cursor (H6): Jira's relative minutes, so no time zone of the
+        account's can shift it, with an overlap for clocks and edits in flight."""
+        jql, minutes = f"project = {project} ORDER BY updated DESC", minutes_since(since)
+        if minutes is not None:
+            jql = f"project = {project} AND updated >= -{minutes + OVERLAP_MINUTES}m ORDER BY updated DESC"
         out, token = [], None
         while len(out) < 20000:
-            page = self._get("search/jql", jql=f"project = {project} ORDER BY updated DESC", fields=FIELDS,
-                             maxResults=100, nextPageToken=token)
+            page = self._get("search/jql", jql=jql, fields=FIELDS, maxResults=100, nextPageToken=token)
             out += [i for i in page.get("issues") or [] if ISSUE.fullmatch(i.get("key") or "")]
             token = page.get("nextPageToken")
             if page.get("isLast", True) or not token:
@@ -194,13 +200,27 @@ def readers_of(users: list[dict], seen: dict) -> list[str]:
     return sorted(out)
 
 
-def sync_project(conn, connection: dict, client: JiraClient, project: str) -> dict:
+def minutes_since(cursor: str | None) -> int | None:
+    """Whole minutes since a cursor (an ISO time), or None for no cursor, or one that isn't a time."""
+    try:
+        then = datetime.fromisoformat(cursor) if cursor else None
+    except ValueError:
+        return None
+    if then is None or then.tzinfo is None:
+        return None
+    return max(0, int((datetime.now(timezone.utc) - then).total_seconds() // 60)) + 1
+
+
+def sync_project(conn, connection: dict, client: JiraClient, project: str, since: str | None = None) -> dict:
+    """A project's issues: all of them, or (since a cursor, H6) only those updated since; the cursor for the next
+    one is when this listing began."""
+    started = datetime.now(timezone.utc).isoformat()
     cfg = connection["config"] or {}
     seen: dict[str, dict] = {}  # the accounts Jira named, as it reports them
     everyone = bool(cfg.get("company_site")) and client.open_to_everyone(project)
     project_readers = [f"org:{config.ORG_SLUG}"] if everyone else readers_of(client.browsers(project=project), seen)
     items = []
-    for issue in client.issues(project):
+    for issue in client.issues(project, since=since):
         restricted = bool((issue.get("fields") or {}).get("security"))
         acl = readers_of(client.browsers(issue=issue["key"]), seen) if restricted else project_readers
         items.append(Item(key=f"jira-{issue['key']}", uri=f"{client.base}/browse/{issue['key']}",
@@ -218,4 +238,4 @@ def sync_project(conn, connection: dict, client: JiraClient, project: str) -> di
                 items.append(item)
     if seen:
         record_identities(conn, connection["org_id"], "atlassian", seen)
-    return sync_container(conn, connection, project, "jira", items)
+    return sync_container(conn, connection, project, "jira", items, complete=minutes_since(since) is None, cursor=started)

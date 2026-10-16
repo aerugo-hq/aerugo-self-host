@@ -363,6 +363,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
             return self._json(200, ci_jwks())
         site = self.path.split("/")[1]
+        if site in JIRA_SITES and self.path == f"/{site}/searches":  # the JQL each search asked for since its setup (H6)
+            return self._json(200, JIRA_SITES[site].get("searches", []))
         if site in JIRA_SITES and self.path.startswith(f"/{site}/rest/api/3/"):
             return self._jira(urlparse(self.path), JIRA_SITES[site])
         if self.path.startswith("/confluence/wiki/download/attachments/"):  # an attachment's bytes (Q7)
@@ -899,8 +901,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
         if rest == "project/search":
             return self._json(200, {"values": [{"id": k, "key": k, "name": p["name"]} for k, p in projects.items()], "isLast": True})
-        if rest == "search/jql":
-            key = q.get("jql", "").split("=", 1)[-1].split(" ORDER", 1)[0].strip()
+        if rest == "search/jql":  # project = KEY, and when a sync asks for changes only (H6), AND updated >= -Nm
+            from datetime import datetime, timedelta, timezone
+            jql = q.get("jql", "")
+            site.setdefault("searches", []).append(jql)
+            key = (re.search(r"project = (\S+)", jql) or [None, ""])[1]
+            within = re.search(r"updated >= -(\d+)m", jql)
+            recent = lambda i: not within or datetime.strptime(i.get("updated", "2026-10-01T10:00:00.000+0000"), "%Y-%m-%dT%H:%M:%S.%f%z") \
+                >= datetime.now(timezone.utc) - timedelta(minutes=int(within[1]))
             issues = [{"id": i["key"], "key": i["key"], "fields": {
                 "summary": i["summary"], "description": doc(i.get("description", "")), "updated": i.get("updated", "2026-10-01T10:00:00.000+0000"),
                 "security": i.get("security"), "issuetype": {"name": "Task"}, "status": {"name": "To Do"}, "labels": [],
@@ -910,7 +918,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "content": f"http://{self.headers.get('Host')}/{url.path.split('/')[1]}/rest/api/3/attachment/content/{a['id']}"} for a in i.get("attachments", [])],
                 "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": c.get("created", "2026-10-01T10:00:00.000+0000"),
                                           "body": doc(c["body"])} for c in i.get("comments", [])]}}}
-                for i in projects.get(key, {}).get("issues", [])]
+                for i in projects.get(key, {}).get("issues", []) if recent(i)]
             return self._json(200, {"issues": issues, "isLast": True})
         parts = rest.split("/")
         if len(parts) == 3 and parts[:2] == ["attachment", "content"]:  # an attachment's bytes (Q7)

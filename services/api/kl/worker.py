@@ -39,6 +39,7 @@ def source_kind_of(c: dict) -> str:
     """What a connection's documents are: a catalog's are its provider's (dataplex, unity, ...), every other its kind."""
     return (c["config"] or {})["provider"] if c["kind"] == "catalog" else c["kind"]
 SCHEDULER_SECONDS = float(os.environ.get("KL_SCHEDULER_SECONDS", "60"))  # how often to look for stale ones
+FULL_SYNC_HOURS = float(os.environ.get("KL_FULL_SYNC_HOURS", "24"))  # how often a sync reads everything again (H6)
 
 LEASE_SECONDS = float(os.environ.get("KL_JOB_LEASE_SECONDS", "120"))  # how long a job outlives a dead worker (C1)
 
@@ -292,8 +293,8 @@ def handle_connection_discover(conn, job) -> dict:
                  wanted is None or ct.external_id in wanted or ct.kind == "folder",  # a folder shared with it is chosen by that sharing
                  (ct.name or "")[:300] or None))  # its name as the source gives it, for the Documents tree
         conn.execute(CONNECTION_READY_SQL, (cid,))
-        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",
-                     (c["org_id"], Jsonb({"connection_id": str(cid)})))
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",  # a full read (H6)
+                     (c["org_id"], Jsonb({"connection_id": str(cid), "full": True})))
         audit(conn, c["org_id"], "connection.discover", {"connection_id": str(cid), "containers": len(found)})
     return {"containers": len(found)}
 
@@ -306,8 +307,11 @@ def handle_connection_sync(conn, job) -> dict:
         return {"skipped": "the connection was removed"}  # slice T2: its retire job cleans up
     if c["status"] == "disabled":
         return {"skipped": "connection disabled"}
-    containers = conn.execute("SELECT external_id, default_ref FROM connection_containers "
-                              "WHERE connection_id = %s AND selected ORDER BY external_id", (cid,)).fetchall()
+    # H6: each container from its cursor, or everything when discovery asked for it or its last full read is a day old
+    containers = conn.execute("SELECT external_id, default_ref, CASE WHEN %s OR reconciled_at IS NULL "
+                              "OR reconciled_at < now() - %s * interval '1 hour' THEN NULL ELSE cursor END AS since "
+                              "FROM connection_containers WHERE connection_id = %s AND selected ORDER BY external_id",
+                              (bool(job["payload"].get("full")), FULL_SYNC_HOURS, cid)).fetchall()
     # Q8: the team's media models, asked for by the classification each connector writes, so a model only ever gets what
     # its allowed classifications include, decided where the classification is.
     media = lambda classification, team=c["workspace_id"]: media_for(conn, team, classification)
@@ -359,7 +363,7 @@ def sync_containers(conn, c: dict, containers: list) -> list[dict]:
         results = [sync_repo(conn, c, connector, ct) for ct in containers]
     elif c["kind"] == "jira":
         client = jira.client_for(c)
-        results = [jira.sync_project(conn, c, client, ct["external_id"]) for ct in containers]
+        results = [jira.sync_project(conn, c, client, ct["external_id"], since=ct.get("since")) for ct in containers]
     elif c["kind"] == "confluence":
         client = confluence.client_for(c)
         results = [confluence.sync_space(conn, c, client, ct["external_id"]) for ct in containers]

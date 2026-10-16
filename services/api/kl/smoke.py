@@ -3765,6 +3765,81 @@ def a_throttled_source_slows_a_sync_but_never_fails_it():
 
 
 @check
+def a_jira_sync_reads_only_what_changed_until_its_reconcile():
+    """Incremental syncs (H6): after its first full read, a Jira connection asks Jira only for the issues updated since its last sync (a changed issue and a new one come in, one deleted at the source waits), and its reconcile, once a day, reads everything again, so the deleted one leaves"""
+    from datetime import timezone as tz
+    tag = secrets.token_hex(3).upper()
+    key, name = f"INC{tag}", f"inc-{tag.lower()}"
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    old, now = "2026-01-01T10:00:00.000+0000", lambda: datetime.now(tz.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000")
+
+    def setup(*issues) -> None:
+        site = {"projects": {key: {"name": f"Incremental {tag}", "company_wide": False, "browsers": [alice], "issues": [
+            {"key": f"{key}-{n}", "summary": f"{summary} {tag}", "description": "Kept current.", "updated": at} for n, summary, at in issues]}}}
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=site, timeout=10).status_code == 200
+
+    def indexed() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, title FROM kl.documents WHERE source_kind = 'jira' AND external_key LIKE %s",
+                                     (f"jira-{key}-%",)).fetchall())
+
+    def synced(after) -> None:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            with psycopg.connect(OWNER_DB) as conn:
+                last = conn.execute("SELECT last_synced_at FROM kl.connections WHERE name = %s", (name,)).fetchone()[0]
+                pending = conn.execute("SELECT 1 FROM kl.jobs j JOIN kl.connections c ON j.payload->>'connection_id' = c.id::text "
+                                       "WHERE c.name = %s AND j.status IN ('queued', 'running')", (name,)).fetchone()
+            if last and (after is None or last > after) and not pending:
+                return
+            time.sleep(1)
+        raise AssertionError("the connection never finished syncing")
+
+    def last_synced():
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT last_synced_at FROM kl.connections WHERE name = %s", (name,)).fetchone()[0]
+
+    def scheduled_sync() -> None:  # as the scheduler queues one (a refresh rediscovers, and reads everything)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("INSERT INTO kl.jobs (org_id, kind, payload) SELECT org_id, 'connection.sync', "
+                         "jsonb_build_object('connection_id', id::text, 'reason', 'schedule') FROM kl.connections WHERE name = %s", (name,))
+
+    try:
+        setup((1, "First", old), (2, "Second", old))
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
+            "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key],
+            "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        synced(None)
+        assert set(indexed()) == {f"jira-{key}-1", f"jira-{key}-2"}, f"the first, full read: {indexed()}"
+
+        setup((2, "Second, changed", now()), (3, "Third", now()))  # 1 deleted at the source; 2 changed; 3 new
+        before = last_synced()
+        scheduled_sync()
+        synced(before)
+        asked = httpx.get(f"{FAKE_JIRA}/searches", timeout=10).json()
+        got = indexed()
+        assert asked and all("updated >=" in jql for jql in asked), f"the second sync asked for everything: {asked}"
+        assert set(got) == {f"jira-{key}-1", f"jira-{key}-2", f"jira-{key}-3"} and "changed" in got[f"jira-{key}-2"], \
+            f"the changes didn't come in, or the deletion didn't wait for the reconcile: {got}"
+
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # a day later: time for the reconcile
+            conn.execute("UPDATE kl.connection_containers SET reconciled_at = now() - interval '25 hours' WHERE connection_id = "
+                         "(SELECT id FROM kl.connections WHERE name = %s)", (name,))
+        before = last_synced()
+        scheduled_sync()
+        synced(before)
+        asked = httpx.get(f"{FAKE_JIRA}/searches", timeout=10).json()
+        assert asked and "updated >=" not in asked[-1], f"the reconcile didn't read everything: {asked}"
+        assert set(indexed()) == {f"jira-{key}-2", f"jira-{key}-3"}, f"the reconcile kept the deleted issue: {indexed()}"
+        print("      the second sync asked only for updates (2 changed, 3 new, 1 kept); the reconcile read everything and removed 1")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga
