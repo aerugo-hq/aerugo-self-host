@@ -545,9 +545,33 @@ pipelines push repeatedly) and for secret stores (the deployment's settings, not
 Also, found by the provider's tests: a team whose legal hold was released can be purged (migration 0050; the
 foreign key had refused it for good), the hold kept on record with the team's name (`legal_holds.team_slug`); a hold
 placed after a purge was scheduled cancels it before anything is destroyed. Smoke: `a_released_hold_outlives_its_team`.
+C1 (`docs/PRODUCTION_REVIEW.md`, critical: a job a dead worker left `running` was never reclaimed, so its connection
+never synced again, revocations included). Running jobs hold a lease (migration 0051, `jobs.lease_until`): the claim
+takes one, and `worker.Lease`, a thread with a connection of its own, renews it every third of `KL_JOB_LEASE_SECONDS`
+(120) while the worker lives. The scheduler's tick first runs `reap`: a job whose lease ran out (or, claimed before
+leases, an hour after its claim) goes back in the queue through `finish`, its attempt counted, so a job that kills its
+worker every time fails after `max_attempts` and marks its connection. Every run is fenced by its claim's attempt
+number (`FENCE`): a worker whose job was taken over can't renew or settle it. On SIGTERM (`kl/shutdown.py`) the worker
+stops at the next safe point, between a sync's items (`sync_items.sync_container`) or containers (`sync_containers`),
+where each item's rows are already committed and a run again converges, and puts the job back at once, the attempt not
+counted (`REQUEUE_SQL`). The lease is renewed while the process lives rather than by each handler as it progresses: one
+place for every kind, whatever a step's length, so one lease length serves every kind; a job that hangs keeps its lease
+until M7 adds per-kind limits. Smoke: `a_stopped_or_killed_worker_never_strands_a_sync` runs a second worker in the
+smoke container (`SECOND_WORKER`, its claim made by the check, so the stack's worker never races it) against the fake
+Jira slowed per attachment (`delay` in `/jira/setup`), stops it with SIGTERM mid-sync (it stopped at 4 of 12 issues,
+exited cleanly, and the stack's worker finished the job on the same attempt), then kills it with SIGKILL (at 13 of 20;
+the lease ran out, the reaper took it over, and it finished on attempt 2). Proof: the check alone on the unfixed
+code (it failed: the stopped worker was still syncing after 4 seconds, and the worker the check's cleanup killed left
+its job `running`, as C1 says), then on the fix (it passed; backdating that stranded job's claim, the reaper took it
+over on the next tick); then the whole loop at fc73fa1 on a fresh stack with CI's settings: `make smoke` 155 passed,
+16 skipped (the optional GitHub, model, web sign-in, and telemetry checks), 0 failed; the golden set hit@1 1.0, MRR 1.0,
+found@5 1.0; `make eval-scenario` Recall@10 100%, MRR 0.92, no leaks, no regression; `make e2e` 31 passed; the
+provider's acceptance tests 12 passed (the route's skips without a real GitHub connection).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3; next, deployment (E in the build plan), then Q.
+done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
+findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1 is done; next, H1 and H5 together (connections), then H2 and
+H6, H3 with M2, and H4; then the mediums, M4 first; then deployment (E in the build plan), then Q.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;
