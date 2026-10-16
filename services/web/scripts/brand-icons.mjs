@@ -22,6 +22,11 @@ const MARKS = { // our file name: its names in the logos set, then in Simple Ico
   okta: { logos: ["okta-icon", "okta"], simple: "okta" },
   microsoftsharepoint: { logos: ["microsoft-sharepoint", "sharepoint"], simple: "microsoftsharepoint" },
   apacheairflow: { logos: ["airflow-icon", "airflow"], simple: "apacheairflow" },
+  googlecloud: { logos: ["google-cloud"], simple: "googlecloud" },
+  databricks: { logos: ["databricks"], simple: "databricks" },
+  awsglue: { logos: ["aws-glue"], simple: "amazonwebservices" },
+  microsoftpurview: { logos: ["microsoft-azure"], simple: "microsoftazure" },
+  datahub: { logos: ["datahub"], simple: "datahub" },
 };
 // A mark is a plain drawing: no scripts, no embedded images or pages, no references outside itself (a gradient's #id is fine).
 const UNSAFE = /<script|<foreignObject|<iframe|<image|\son[a-z]+\s*=|href\s*=\s*["']?\s*(?!#)|url\(\s*["']?\s*(?!#)/i;

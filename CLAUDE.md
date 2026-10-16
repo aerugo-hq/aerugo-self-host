@@ -438,9 +438,35 @@ token. The fake Notion (`NOTION`, `_notion`) insists on the token and the versio
 `notion_pages_reach_only_the_connecting_team`. The gallery's Notion form, saying who reads it; a browser test; every
 gallery source is now built. Terraform: `kind = "notion"` (the token as the write-only `api_token`); an acceptance
 test. Not built: reading people's own Notion permissions (the API has none), and comments.
+S7 (data catalogs): `kl/catalogs.py` turns any catalog's entries into documents and assets: `Entry` (a table, view,
+model, or dataset, its columns, facts, owners, and readers), `markdown_of` (its page), `entry_key` (a hash, since
+names hold any character), `record_assets` (K3's `assets` and `lineage_edges`, and migration 0042's `asset_owners`,
+replaced per source and team), `sync_entries` and `sync_catalog`. One connection kind, `catalog`, with its `provider`
+(`POST .../connections/catalog`, `catalog_settings` validating each): Dataplex (`kl/dataplex.py`: search, entries with
+their schema and contacts aspects, the Data Lineage API; BigQuery's dataset access and table IAM policy as readers),
+Unity Catalog (`kl/unity.py`: OAuth machine-to-machine, effective permissions, table lineage), Glue (`kl/glue.py`: STS
+`AssumeRoleWithWebIdentity` with the runner's identity token, SigV4 in the standard library held to AWS's get-vanilla
+vector, Lake Formation's grants through the company's SAML provider), Purview (`kl/purview.py`, on
+`directory.GraphClient` with Purview's audience: search, entities, lineage through processes, metadata policies by
+Entra object id, which Entra directories now record as `directory_people.external_id`), and DataHub (`kl/datahub.py`:
+GraphQL `scrollAcrossEntities`, owners as readers). Dataplex and Glue read as the runner itself, so only an org admin
+connects them. Accounts a catalog names are recorded for matching (`ext:google`, `ext:databricks`, `ext:aws`,
+`ext:datahub`). The worker's `CATALOGS` and `source_kind_of` (a catalog's documents are its provider's); removing one
+deletes its `asset_owners`. dbt and Dataform manifests from CI: `POST /v1/workspaces/{ws}/manifests` (a pipeline's
+token, `kl/manifests.py`, job `manifest.apply`). Who to ask adds a catalog's owners of the assets a page declares
+(`ASSET_OWNERS_SQL`, the asker's own teams only). Every address is allowlisted (`KL_DATAPLEX_API_BASES`,
+`KL_DATABRICKS_API_BASES`, `KL_AWS_API_BASES`, `KL_PURVIEW_API_BASES`, `KL_DATAHUB_API_BASES`; vendors' own hosts by
+pattern). The fakes (`CATALOG`, `_catalog`, one set of tables in five vendors' shapes, each behind its own sign-in;
+AWS calls verified by signature). Smoke: `ci_pushes_dbt_and_dataform_manifests` and one check per catalog
+(`catalog_round`). The gallery's Data catalog form; a browser test. Terraform: `kind = "catalog"` with `catalog`,
+`location`, `catalogs`, `region`, `role_arn`, `databases`, `collections`, `platforms`; an acceptance test. Also: a
+pause that lands while a job runs stays (`CONNECTION_READY_SQL`, `CONNECTION_FAILED_SQL`), and the provider's
+`keepWhenUnset` stops an unset computed attribute from replacing a connection on an unrelated change.
+`docs/connectors/data-catalogs.md`; the choices are in `docs/plans/decisions.md`. Not built: OpenMetadata, Dataplex
+glossary terms as their own entries, Glue lineage (it records none), and SageMaker's business glossary.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1 and S2 to S6; next S7 (data catalogs) and S8; then Q1 (its golden-set part) to Q8;
+done, and so are G1 and S2 to S7; next S8; then Q1 (its golden-set part) to Q8;
 E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI

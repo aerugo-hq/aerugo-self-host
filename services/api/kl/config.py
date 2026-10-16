@@ -32,6 +32,19 @@ SLACK_API_BASES = [b.strip().rstrip("/") for b in _env("KL_SLACK_API_BASES", "ht
 # Microsoft Graph addresses an Entra directory may use (S3); its tokens come from login.microsoftonline.com.
 MICROSOFT_GRAPH_BASES = [b.strip().rstrip("/") for b in _env("KL_MICROSOFT_GRAPH_BASES", "https://graph.microsoft.com").split(",")
                          if b.strip()]
+# Data catalogs a catalog connection may use (S7). Dataplex: Google's own APIs (the sentinel https://googleapis.com
+# means dataplex., bigquery., and datalineage.googleapis.com), or the dev fake. Unity Catalog: Databricks workspaces
+# (https://<workspace>.cloud.databricks.com, .azuredatabricks.net, .gcp.databricks.com, always allowed) and these. Glue:
+# AWS's own regional endpoints (always allowed) and these. Purview: Purview accounts (https://<account>.purview.azure.com,
+# always allowed) and these. DataHub: only these, since each company runs its own (none unless set).
+DATAPLEX_API_BASES = [b.strip().rstrip("/") for b in _env("KL_DATAPLEX_API_BASES", "https://googleapis.com").split(",") if b.strip()]
+DATABRICKS_API_BASES = [b.strip().rstrip("/") for b in _env("KL_DATABRICKS_API_BASES", "").split(",") if b.strip()]
+AWS_API_BASES = [b.strip().rstrip("/") for b in _env("KL_AWS_API_BASES", "").split(",") if b.strip()]
+PURVIEW_API_BASES = [b.strip().rstrip("/") for b in _env("KL_PURVIEW_API_BASES", "").split(",") if b.strip()]
+DATAHUB_API_BASES = [b.strip().rstrip("/") for b in _env("KL_DATAHUB_API_BASES", "").split(",") if b.strip()]
+# Where the runner's own identity token comes from for AWS (S7, Glue: AssumeRoleWithWebIdentity): a token file when the
+# platform mounts one (EKS, AWS_WEB_IDENTITY_TOKEN_FILE), otherwise the GCP metadata server's identity token.
+AWS_WEB_IDENTITY_TOKEN_FILE = _env("AWS_WEB_IDENTITY_TOKEN_FILE", "")
 # Jira addresses a connection may use besides Jira Cloud sites (https://<site>.atlassian.net, always allowed): in dev,
 # the fake one smoke runs. Anything else is refused, so a team admin can't point the worker at an internal host.
 JIRA_API_BASES = [b.strip().rstrip("/") for b in _env("KL_JIRA_API_BASES", "").split(",") if b.strip()]

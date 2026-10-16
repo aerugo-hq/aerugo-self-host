@@ -25,7 +25,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from psycopg.types.json import Jsonb
 
-from . import alerting, compiler, config, google_identity, imports, okf, originals, pipelines, telemetry
+from . import alerting, compiler, config, google_identity, imports, manifests, okf, originals, pipelines, telemetry
 from .auth import Caller, authenticate
 from .authz import fga
 from .connections_api import router as connections_router
@@ -1596,6 +1596,39 @@ def push_documents(ws: str, body: PushIn, authorization: str | None = Header(def
     return {"push": str(push_id), "upserts": len(keys), "deletes": len(body.deletes)}
 
 
+class ManifestIn(BaseModel):
+    kind: str = Field(pattern=r"^(dbt|dataform)$")  # dbt's manifest.json, or Dataform's compiled graph
+    project: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")  # names the project's documents, so each project replaces only its own
+    readers: list[str] = Field(min_length=1, max_length=50)
+    classification: Classification = "internal"
+    manifest: dict
+
+
+@app.post("/v1/workspaces/{ws}/manifests", status_code=202)
+def push_manifest(ws: str, body: ManifestIn, authorization: str | None = Header(default=None)):
+    """A CI pipeline pushes a dbt or Dataform project's manifest into a team (S7): each model, source, and table
+    becomes a document readable by the readers it names (each holding a role on the team), and an asset in the team
+    with its lineage and owners. Metadata only. A model gone since the project's last manifest leaves. Poll the push
+    for its result, as for documents."""
+    p = pipeline_caller(ws, authorization)
+    allowed = pipelines.allowed_readers(ws)
+    refused = sorted(r for r in set(body.readers) if r not in allowed)
+    if refused:
+        raise HTTPException(422, "these readers hold no role on the team, so a pipeline can't grant them: " + ", ".join(refused[:10]))
+    try:
+        entries, _ = (manifests.dbt if body.kind == "dbt" else manifests.dataform)(body.manifest)
+    except (ValueError, TypeError, AttributeError, KeyError) as e:
+        raise HTTPException(422, f"that isn't a {body.kind} manifest this can read: {str(e)[:200]}")
+    with scoped(p["org_id"], ["svc:pipelines"]) as conn:
+        push_id = conn.execute("INSERT INTO pipeline_pushes (org_id, workspace_id, pipeline_id, payload) VALUES (%s, %s, %s, %s) "
+                               "RETURNING id", (p["org_id"], p["workspace_id"], p["id"], Jsonb(body.model_dump()))).fetchone()["id"]
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'manifest.apply', %s)",
+                     (p["org_id"], Jsonb({"push_id": str(push_id)})))
+        audit(conn, p["org_id"], f"svc:pipeline-{p['name']}", "manifest.push", [ws],
+              {"pipeline": p["name"], "push": str(push_id), "kind": body.kind, "project": body.project, "entries": len(entries)})
+    return {"push": str(push_id), "kind": body.kind, "project": body.project, "entries": len(entries)}
+
+
 @app.get("/v1/workspaces/{ws}/documents/pushes/{push_id}")
 def push_status(ws: str, push_id: str, authorization: str | None = Header(default=None)):
     """A push's state, for the pipeline that pushed it."""
@@ -2139,7 +2172,7 @@ def document_content(key: str, caller: Caller = Depends(authenticate)):
 
 # A run's team comes through what it works on: its connection, its import (through the run), or its pipeline (through
 # the push). Retrying an import or a push can't help, since their uploads are cleared once applied, whatever happened.
-RETRYABLE = {"connection.discover", "connection.sync", "connection.retire", "import.retire", "pipeline.retire"}
+RETRYABLE = {"connection.discover", "connection.sync", "connection.retire", "import.retire", "pipeline.retire", "manifest.apply"}
 RUN_FROM = """
 FROM jobs j
 LEFT JOIN connections c      ON c.id = (j.payload->>'connection_id')::uuid
@@ -2664,6 +2697,19 @@ ORDER BY e.key
 """
 
 
+# The people a catalog says own an asset a page describes (one of the page's declared aliases is the asset's name),
+# for assets of the asker's own teams only (assets are their team's, as K3 keeps them), matched by verified email.
+ASSET_OWNERS_SQL = """
+SELECT DISTINCT p.username, a.name
+FROM concepts c
+JOIN assets a ON lower(a.name) = ANY(SELECT lower(x) FROM unnest(c.aliases) x)
+JOIN workspaces w ON w.id = a.workspace_id AND w.slug = ANY(%(teams)s)
+JOIN asset_owners o ON o.asset_id = a.id
+JOIN people p ON p.email = o.email
+WHERE c.id = %(concept)s
+ORDER BY p.username, a.name"""
+
+
 @app.get("/v1/concepts/{key}/people")
 def concept_people(key: str, caller: Caller = Depends(authenticate)):
     """Who to ask about a page: who verified it, who owns it, the members of an owning team, and who it names, each
@@ -2686,7 +2732,10 @@ def concept_people(key: str, caller: Caller = Depends(authenticate)):
                                             if t["user"].startswith("user:"))
             mentioned = [r["key"] for r in conn.execute(PERSON_MENTIONS_SQL, {"doc": c["document_id"]}).fetchall()] \
                 if c["document_id"] else []
-            answer = who_to_ask(meta, members, mentioned)
+            owners: dict[str, list[str]] = {}  # S7: owners of the assets this page describes, in the asker's own teams
+            for r in conn.execute(ASSET_OWNERS_SQL, {"concept": c["id"], "teams": sorted(mine)}).fetchall():
+                owners.setdefault(r["username"], []).append(r["name"])
+            answer = who_to_ask(meta, members, mentioned, owners)
             audit(conn, org_id, caller.username, "concept.people", [], {"concept": key, "returned": len(answer["people"])})
     if not c:
         raise HTTPException(404, "concept not found")

@@ -13,7 +13,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, config, confluence, curator, directory, gdrive, imports, jira, knowledge, links, microsoft365, notion, okf, originals, pipelines, privacy, slack, telemetry
+from . import alerting, catalogs, config, confluence, curator, dataplex, datahub, directory, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import embed, passage_text, vector_literal
@@ -25,7 +25,16 @@ from .vault import vault
 INGEST_DB = os.environ.get("KL_INGEST_DATABASE_URL", "postgresql://kl_ingest:ingest-dev-only@postgres:5432/kl")
 POLL_SECONDS = float(os.environ.get("KL_WORKER_POLL_SECONDS", "2"))
 RESYNC_MINUTES = float(os.environ.get("KL_RESYNC_MINUTES", "10"))      # freshness window per connection
-OWNED_KINDS = {"jira", "confluence", "slack", "microsoft", "notion"}  # kinds whose documents carry their connection (migration 0040)
+OWNED_KINDS = {"jira", "confluence", "slack", "microsoft", "notion", "catalog"}  # kinds whose documents carry their connection (migration 0040)
+# A data catalog's client by its provider (S7), and the source its accounts are recorded under for identity matching
+# (Purview's people are Entra's, which the Entra directory records).
+CATALOGS = {"dataplex": dataplex, "unity": unity, "glue": glue, "purview": purview, "datahub": datahub}
+CATALOG_IDENTITIES = {"dataplex": "google", "unity": "databricks", "glue": "aws", "purview": None, "datahub": "datahub"}
+
+
+def source_kind_of(c: dict) -> str:
+    """What a connection's documents are: a catalog's are its provider's (dataplex, unity, ...), every other its kind."""
+    return (c["config"] or {})["provider"] if c["kind"] == "catalog" else c["kind"]
 SCHEDULER_SECONDS = float(os.environ.get("KL_SCHEDULER_SECONDS", "60"))  # how often to look for stale ones
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -180,6 +189,14 @@ def materialize_bronze(conn) -> int:
     return built
 
 
+# A job's end never un-pauses its connection: a pause that lands while discovery or a sync runs stays (the API's
+# enabled reads status <> 'disabled'), and the outcome is still recorded.
+CONNECTION_READY_SQL = """UPDATE connections SET status = CASE WHEN status = 'disabled' THEN status ELSE 'ready' END,
+  last_error = NULL, updated_at = now() WHERE id = %s"""
+CONNECTION_FAILED_SQL = """UPDATE connections SET status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END,
+  last_error = %s, updated_at = now() WHERE id = %s"""
+
+
 # ------------------------------------------------------------------ handlers
 def handle_noop(conn, job) -> dict:
     return {"ok": True}
@@ -217,6 +234,9 @@ def handle_connection_discover(conn, job) -> dict:
     elif c["kind"] == "directory":  # ADR 0011: who's at the company, and who has left
         connector = directory.client_for(c)
         wanted = None
+    elif c["kind"] == "catalog":  # S7: the projects, catalogs, databases, collections, or platforms it reads
+        connector = CATALOGS[c["config"]["provider"]].client_for(conn, c)
+        wanted = None  # each client lists only what the connection names (or everything, where it may)
     else:
         raise RuntimeError(f"no connector for kind {c['kind']!r}")
     health = connector.test()
@@ -233,8 +253,7 @@ def handle_connection_discover(conn, job) -> dict:
                 (cid, c["org_id"], ct.external_id, ct.kind, ct.visibility, ct.default_ref,
                  wanted is None or ct.external_id in wanted or ct.kind == "folder",  # a folder shared with it is chosen by that sharing
                  (ct.name or "")[:300] or None))  # its name as the source gives it, for the Documents tree
-        conn.execute("UPDATE connections SET status = 'ready', last_error = NULL, updated_at = now() WHERE id = %s",
-                     (cid,))
+        conn.execute(CONNECTION_READY_SQL, (cid,))
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",
                      (c["org_id"], Jsonb({"connection_id": str(cid)})))
         audit(conn, c["org_id"], "connection.discover", {"connection_id": str(cid), "containers": len(found)})
@@ -274,9 +293,13 @@ def handle_connection_sync(conn, job) -> dict:
         results = [microsoft365.sync_library(conn, c, client, ct["external_id"]) for ct in containers]
     elif c["kind"] == "directory":
         results = [directory.sync_directory(conn, c, directory.client_for(c))]
+    elif c["kind"] == "catalog":
+        provider = c["config"]["provider"]
+        client = CATALOGS[provider].client_for(conn, c)
+        results = [catalogs.sync_catalog(conn, c, client, ct["external_id"], provider, CATALOG_IDENTITIES[provider]) for ct in containers]
     else:
         raise RuntimeError(f"no connector for kind {c['kind']!r}")
-    retired = retire_unlisted(conn, c, c["kind"], [ct["external_id"] for ct in containers]) \
+    retired = retire_unlisted(conn, c, source_kind_of(c), [ct["external_id"] for ct in containers]) \
         if c["kind"] in OWNED_KINDS else 0  # a container it no longer reads keeps nothing (migration 0040)
     embedded = embed_missing(conn)
     bronze = materialize_bronze(conn)
@@ -444,6 +467,27 @@ def handle_pipeline_push(conn, job) -> dict:
     return result
 
 
+def handle_manifest_apply(conn, job) -> dict:
+    """A CI pipeline's dbt or Dataform manifest (S7): its entries as the pipeline's documents and the team's assets,
+    then everything derived from them. The manifest isn't kept once it's applied."""
+    push = conn.execute("SELECT id, org_id, workspace_id, pipeline_id, payload FROM pipeline_pushes "
+                        "WHERE id = %s AND status = 'queued'", (job["payload"]["push_id"],)).fetchone()
+    if not push:
+        return {"skipped": "no queued push"}
+    try:
+        result = manifests.apply_manifest(conn, push)
+    except Exception as e:
+        with conn.transaction():
+            conn.execute("UPDATE pipeline_pushes SET status = 'failed', error = %s, payload = '{}', finished_at = now() "
+                         "WHERE id = %s", (type(e).__name__, push["id"]))
+        raise
+    result.update(embedded=embed_missing(conn), bronze=materialize_bronze(conn), **links.refresh(conn), personal_data=privacy.scan(conn))
+    with conn.transaction():
+        conn.execute("UPDATE pipeline_pushes SET status = 'done', result = %s, payload = '{}', finished_at = now() "
+                     "WHERE id = %s", (Jsonb(result), push["id"]))
+    return result
+
+
 def handle_pipeline_retire(conn, job) -> dict:
     """A removed pipeline's documents go with it (slice J1), their authorization first."""
     container = f"pipeline:{job['payload']['pipeline_id']}"
@@ -502,7 +546,8 @@ def handle_import_retire(conn, job) -> dict:
 
 
 SOURCE_KINDS = {"github": ["github", "okf"], "google": ["gdrive"], "jira": ["jira"], "confluence": ["confluence"],
-                "slack": ["slack"], "microsoft": ["microsoft"], "notion": ["notion"]}  # what each kind of connection's documents are
+                "slack": ["slack"], "microsoft": ["microsoft"], "notion": ["notion"],
+                "catalog": sorted(CATALOGS)}  # what each kind of connection's documents are
 
 
 def handle_connection_retire(conn, job) -> dict:
@@ -536,6 +581,9 @@ def handle_connection_retire(conn, job) -> dict:
                                                (ct["workspace_id"], [r["id"] for r in rows])).rowcount
             result["documents"] += conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([r["id"] for r in only_here],)).rowcount
         result["tuples"] += len(doomed)
+    if p["kind"] == "catalog":  # the owners it said its assets have (S7); the assets stay, as pushed lineage's do
+        with conn.transaction():
+            result["owners"] = conn.execute("DELETE FROM asset_owners WHERE source = %s", (p["connection_id"],)).rowcount
     if p.get("credential_ref"):
         vault.destroy(p["credential_ref"])
         result["secrets"] = 1
@@ -548,7 +596,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "connection.sync": handle_connection_sync, "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,
-            "pipeline.push": handle_pipeline_push, "pipeline.retire": handle_pipeline_retire,
+            "pipeline.push": handle_pipeline_push, "pipeline.retire": handle_pipeline_retire, "manifest.apply": handle_manifest_apply,
             "import.apply": handle_import_apply, "import.retire": handle_import_retire}
 RETENTION_SQL = ("INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'retention.apply' WHERE NOT EXISTS "
                  "(SELECT 1 FROM jobs WHERE kind = 'retention.apply' AND created_at > now() - interval '1 hour')")
@@ -565,8 +613,7 @@ def finish(conn, job, error: str | None = None) -> None:
         conn.execute("UPDATE jobs SET status = 'failed', last_error = %s, updated_at = now() WHERE id = %s",
                      (error, job["id"]))
         if job["kind"] in ("connection.discover", "connection.sync"):
-            conn.execute("UPDATE connections SET status = 'error', last_error = %s, updated_at = now() WHERE id = %s",
-                         (error, job["payload"].get("connection_id")))
+            conn.execute(CONNECTION_FAILED_SQL, (error, job["payload"].get("connection_id")))
     else:
         delay = min(300, 5 * 2 ** (job["attempts"] - 1))
         conn.execute("UPDATE jobs SET status = 'queued', last_error = %s, "

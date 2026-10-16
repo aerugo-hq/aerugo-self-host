@@ -40,6 +40,11 @@ def team_owns(org: str, ws: str, ref: str | None) -> bool:
     return project in config.GCP_SECRET_PROJECTS and secret.startswith(prefix) and len(secret) > len(prefix)
 
 
+def runner_token() -> str:
+    """The runner's own Google access token: its workload identity on GCP, or its key file elsewhere (S7, Dataplex)."""
+    return _access_token()
+
+
 def _access_token() -> str:
     if _token["value"] and _token["expires"] > time.time() + 60:
         return _token["value"]

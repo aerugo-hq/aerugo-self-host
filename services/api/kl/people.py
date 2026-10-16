@@ -12,9 +12,12 @@ def _verified(meta: dict) -> list[dict]:
     return [v] if isinstance(v, dict) else [e for e in (v or []) if isinstance(e, dict)]
 
 
-def who_to_ask(meta: dict, members: dict[str, list[str]], mentioned: list[str]) -> dict:
+def who_to_ask(meta: dict, members: dict[str, list[str]], mentioned: list[str],
+               asset_owners: dict[str, list[str]] | None = None) -> dict:
     """meta: the page's OKF front matter. members: {"group:<team>": [usernames]} for owning teams the asker is on.
-    mentioned: usernames named in the page. Returns {"people": [...], "teams": [...]}, strongest first."""
+    mentioned: usernames named in the page. asset_owners: {username: [asset names]} for assets the page describes that
+    a catalog says they own (S7), already limited to what the asker may see. Returns {"people": [...], "teams": [...]},
+    strongest first."""
     found: dict[str, dict] = {}
 
     def add(user: str, strength: float, reason: str) -> None:
@@ -39,6 +42,9 @@ def who_to_ask(meta: dict, members: dict[str, list[str]], mentioned: list[str]) 
             teams.append({"team": name, "reason": "owns it", "members_shown": owner in members})
             for user in members.get(owner, []):
                 add(user, TEAM, f"on the owning team, {name}")
+    for user, names in (asset_owners or {}).items():
+        for name in names:
+            add(user, OWNER, f"owns {name} in its catalog")
     for user in mentioned:
         add(user, MENTIONED, "named in it")
     # Each extra reason adds a little: two signals about the same person beat one.

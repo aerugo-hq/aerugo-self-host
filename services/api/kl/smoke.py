@@ -2861,7 +2861,8 @@ FAKE_GCP = "http://fake-llm:8080/gcp"  # a fake GCP Secret Manager, inside the f
 FAKE_CONFLUENCE = "http://fake-llm:8080/confluence"  # a fake Confluence Cloud, inside the fake model (smoke only)
 FAKE_MICROSOFT = "http://fake-llm:8080/microsoft"  # a fake Microsoft Graph and Entra token endpoint (smoke only)
 FAKE_SLACK = "http://fake-llm:8080/slack"  # a fake Slack workspace (its Web API at /api), inside the fake model (smoke only)
-FAKE_NOTION = "http://fake-llm:8080/notion"  # a fake Notion (its API at /v1), inside the fake model (smoke only)
+FAKE_NOTION = "http://fake-llm:8080/notion"
+FAKE_CATALOG = "http://fake-llm:8080"  # the fake catalogs (S7): /gcp-catalog, /databricks, /aws, /purview, /datahub  # a fake Notion (its API at /v1), inside the fake model (smoke only)
 
 
 @check
@@ -3301,6 +3302,30 @@ def microsoft_365_files_carry_their_own_sharing():
 
 
 @check
+def a_paused_connection_stays_paused_when_its_jobs_finish():
+    """A pause that lands while a connection's discovery or sync is running stays: the job's end records its outcome (ready, or the error) without un-pausing it, and the API still says it's paused"""
+    from .worker import CONNECTION_FAILED_SQL, CONNECTION_READY_SQL
+    name = f"paused-{secrets.token_hex(3)}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    r = api("POST", "/v1/workspaces/payments/connections/notion", "alice",
+            json={"name": name, "api_base": f"{FAKE_NOTION}/v1", "token": "ntn_smoke_notion_integration_token", "every_minutes": 60})
+    assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+    try:
+        assert api("PATCH", path, "alice", json={"enabled": False}).status_code == 200
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("SET search_path = kl")
+            conn.execute(CONNECTION_READY_SQL, (r.json()["id"],))  # a discovery that read the connection before the pause ends
+            assert conn.execute("SELECT status FROM connections WHERE id = %s", (r.json()["id"],)).fetchone()[0] == "disabled", \
+                "a discovery's end un-paused the connection"
+            conn.execute(CONNECTION_FAILED_SQL, ("the source refused", r.json()["id"]))  # a sync that fails after the pause
+            status, error = conn.execute("SELECT status, last_error FROM connections WHERE id = %s", (r.json()["id"],)).fetchone()
+            assert status == "disabled" and error == "the source refused", f"a failed job un-paused it, or lost its error: {status} {error}"
+        assert api("GET", path, "alice").json()["enabled"] is False, "the API says a paused connection is running"
+    finally:
+        api("DELETE", path, "alice")
+
+
+@check
 def notion_pages_reach_only_the_connecting_team():
     """S6, Notion live: what's shared with an integration (pages, child pages under their parents, a data source's rows) is readable by the connecting team's members and no one else, never the whole org, since Notion doesn't say who can read a page; a page in the trash or never shared isn't read; a page unshared leaves on the next sync; an export's copy of a page the live connector reads is retired; a token that isn't an integration's, an internal address, and another team's secret are refused"""
     import io
@@ -3372,6 +3397,320 @@ def notion_pages_reach_only_the_connecting_team():
     finally:
         api("DELETE", path, "alice")
         api("DELETE", f"/v1/workspaces/payments/imports/{iname}", "alice")
+
+
+@check
+def ci_pushes_dbt_and_dataform_manifests():
+    """S7, dbt and Dataform manifests from CI: a registered pipeline's token pushes a project's manifest; each model and source becomes a document only its named readers find, and an asset in the pipeline's team with lineage from what it depends on; a catalog owner shows in who to ask for the page that describes the asset, never another team's owner of the same name; a model gone from the next manifest leaves; readers off the team and a manifest that isn't one are refused"""
+    import uuid as uuidlib
+    from .authz import fga
+    from .pipelines import document_key
+    tag = uuidlib.uuid4().hex[:8]
+    repos = {"payments": f"acme/warehouse-{tag}", "finance": f"acme/finance-dbt-{tag}"}
+    names = {ws: f"dbt-{ws[:3]}-{tag}" for ws in repos}
+    stranger_admin = ("user:bob", "admin", "workspace:finance")  # no seed user administers finance
+
+    def mint(ws):
+        return httpx.post(f"{FAKE_CI}/token", json={"repository": repos[ws]}, timeout=10).json()["token"]
+
+    def push(ws, body):
+        r = httpx.post(f"{API}/v1/workspaces/{ws}/manifests", json=body, timeout=60, headers={"Authorization": f"Bearer {mint(ws)}"})
+        return r
+
+    def applied(ws, r):
+        assert r.status_code == 202, f"manifest push: {r.status_code} {r.text[:200]}"
+        url, deadline = f"{API}/v1/workspaces/{ws}/documents/pushes/{r.json()['push']}", time.monotonic() + 120
+        while time.monotonic() < deadline:
+            state = httpx.get(url, headers={"Authorization": f"Bearer {mint(ws)}"}, timeout=10).json()
+            if state["status"] != "queued":
+                assert state["status"] == "done", f"the manifest push failed: {state}"
+                return state["result"]
+            time.sleep(1)
+        raise AssertionError("the worker never applied the manifest")
+
+    def dbt(*nodes, owner="carol@acme.test"):
+        orders = {"resource_type": "model", "package_name": "shop", "name": f"orders_{tag}", "database": "proj", "schema": "shop",
+                  "description": f"Orders, one row per order {tag}.", "columns": {"order_id": {"name": "order_id", "data_type": "string",
+                                                                                              "description": "The order"}},
+                  "config": {"materialized": "table", "meta": {"owner": owner}}, "tags": ["finance"],
+                  "original_file_path": "models/orders.sql", "depends_on": {"nodes": [f"source.shop.raw.raw_orders_{tag}"]}}
+        ledger = {"resource_type": "model", "package_name": "shop", "name": "ledger", "description": f"The ledger model {tag}.",
+                  "meta": {"owner": owner}, "depends_on": {"nodes": []}}
+        source = {"resource_type": "source", "package_name": "shop", "name": f"raw_orders_{tag}", "identifier": f"raw_orders_{tag}",
+                  "database": "proj", "schema": "raw", "description": f"Raw orders {tag}."}
+        chosen = {"orders": (f"model.shop.orders_{tag}", orders), "ledger": ("model.shop.ledger", ledger)}
+        return {"metadata": {"adapter_type": "bigquery"}, "nodes": dict(chosen[n] for n in nodes),
+                "sources": {f"source.shop.raw.raw_orders_{tag}": source}}
+
+    def hits(u):
+        return {h["id"] for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def owners_named(u):
+        return {p["user"]: p["reasons"] for p in api("GET", "/v1/concepts/kb-ledger/people", u).json()["people"]}
+
+    pids = {}
+    fga.write(writes={stranger_admin})
+    try:
+        for user in ("carol", "dave"):  # their verified emails, for who to ask to match the catalog's owners
+            api("GET", "/v1/whoami", user)
+        for ws, admin in (("payments", "alice"), ("finance", "bob")):
+            r = api("POST", f"/v1/workspaces/{ws}/pipelines", admin, json={"name": names[ws], "issuer": FAKE_CI, "repository": repos[ws]})
+            assert r.status_code == 201, f"register: {r.status_code} {r.text[:200]}"
+            pids[ws] = r.json()["id"]
+        body = {"kind": "dbt", "project": "shop", "readers": ["group:payments"], "manifest": dbt("orders", "ledger")}
+        assert push("payments", {**body, "readers": ["group:finance"]}).status_code == 422, "a reader off the team was accepted"
+        assert push("payments", {**body, "manifest": {"nodes": "not a manifest"}}).status_code == 422, "a manifest that isn't one was accepted"
+        result = applied("payments", push("payments", body))
+        assert result["upserted"] == 3 and result["edges"] == 1, f"the manifest wasn't applied as its models: {result}"
+        orders = document_key(pids["payments"], f"manifest/shop/proj.shop.orders_{tag}")
+        assert orders in hits("alice") and orders in hits("carol"), "a model's document didn't reach its named readers"
+        assert orders not in hits("bob") and orders not in hits("dave"), "a model's document reached people it doesn't name"
+        impact = api("GET", "/v1/lineage/impact", "alice", params={"namespace": "bigquery", "name": f"proj.raw.raw_orders_{tag}", "kind": "dataset"})
+        assert impact.status_code == 200 and f"proj.shop.orders_{tag}" in json.dumps(impact.json()), \
+            f"the model's lineage from its source didn't reach the impact walk: {impact.text[:300]}"
+        assert api("GET", "/v1/lineage/impact", "bob", params={"namespace": "bigquery", "name": f"proj.raw.raw_orders_{tag}", "kind": "dataset"}).status_code == 404, \
+            "another team saw this team's lineage"
+        assert any("owns ledger" in reason for reason in owners_named("alice").get("carol", [])), \
+            f"the catalog's owner isn't in who to ask: {owners_named('alice')}"
+        applied("finance", push("finance", {"kind": "dbt", "project": "fin", "readers": ["group:finance"], "manifest": dbt("ledger", owner="dave@acme.test")}))
+        assert "dave" not in owners_named("alice"), "another team's catalog owner showed in who to ask"
+        graph = {"tables": [{"type": "table", "target": {"database": "proj", "schema": "df", "name": f"daily_{tag}"},
+                             "dependencyTargets": [{"database": "proj", "schema": "shop", "name": f"orders_{tag}"}],
+                             "actionDescriptor": {"description": f"Daily totals {tag}.", "columns": [{"path": ["day"], "description": "The day"}]}}],
+                 "declarations": []}
+        result = applied("payments", push("payments", {"kind": "dataform", "project": "df", "readers": ["group:payments"], "manifest": graph}))
+        assert result["upserted"] == 1 and result["edges"] == 1, f"the Dataform graph wasn't applied: {result}"
+        applied("payments", push("payments", {**body, "manifest": dbt("ledger")}))  # orders is gone from the project
+        assert orders not in hits("alice"), "a model gone from the next manifest stayed indexed"
+        assert document_key(pids["payments"], f"manifest/df/proj.df.daily_{tag}") in hits("alice"), "another project's documents went too"
+    finally:
+        for ws, admin in (("payments", "alice"), ("finance", "bob")):
+            api("DELETE", f"/v1/workspaces/{ws}/pipelines/{names[ws]}", admin)
+        fga.write(deletes={stranger_admin})
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.asset_owners WHERE source LIKE ANY(%s)", ([f"pipeline:{p}:%" for p in pids.values()],))
+
+
+def catalog_tables(tag: str, readers: list[str]) -> list[dict]:
+    """The fake catalogs' tables for one check (S7): orders, read by `readers` and fed by staging's raw_orders; a table only a
+    group may read (with no directory to expand it, nobody); and a calendar in its own dataset the company's domain reads."""
+    cols = [["order_id", "STRING", "The order"], ["amount", "NUMERIC", "In cents"]]
+    return [{"name": f"sales_{tag}.orders", "description": f"Orders, one row per order {tag}.", "columns": cols, "owner": "carol@acme.test",
+             "users": readers, "groups": [f"analysts-{tag}@acme.test"], "upstream": [f"staging_{tag}.raw_orders"], "version": "2"},
+            {"name": f"staging_{tag}.raw_orders", "description": f"Raw orders as they land {tag}.", "columns": cols[:1],
+             "users": ["carol@acme.test", "alice@acme.test"], "version": "1"},
+            {"name": f"hr_{tag}.salaries", "description": f"Salaries, for the group only {tag}.", "groups": [f"hr-{tag}@acme.test"], "version": "1"},
+            {"name": f"wide_{tag}.calendar", "description": f"The company calendar {tag}.", "domain": True, "version": "1"}]
+
+
+CATALOG_PEOPLE = [f"{u}@acme.test" for u in ("alice", "bob", "carol", "dave", "mallory-not-here")]
+
+
+def forget_matches(source: str, emails: list[str]) -> None:
+    """Undo the identity matching a check caused: the sso-email links to these accounts of a source, their tuples, and
+    the accounts themselves, so a later check starts from people unmatched."""
+    from .authz import fga
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        links = conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s) AND verified_by = 'sso-email' RETURNING source, canonical",
+                             ([f"ext:{source}.{e}" for e in emails],)).fetchall()
+        conn.execute("DELETE FROM kl.source_identities WHERE source = %s AND external_id = ANY(%s)", (source, emails))
+    held = {t for t in {(canonical, "owner", f"identity:{s[4:]}") for s, canonical in links}
+            if fga.read({"user": t[0], "relation": t[1], "object": t[2]})}
+    if held:
+        fga.write(deletes=held)
+
+
+def catalog_round(provider: str, admin: str, body: dict, key, lineage: tuple[str, str, str] | None, refusals: dict,
+                  setup: dict | None = None, domain_reads: bool = False, then=None, identities: str | None = None) -> None:
+    """One catalog's proof (S7): orders reaches the people the catalog lets read it, as themselves (identity matching),
+    and no one else; a group with no directory to expand it, and every grant the catalog can't tie to a person, reach
+    no one; with `domain_reads`, the company's domain reaches the org; the team sees the lineage, another team doesn't;
+    taken out of the catalog's grants, a reader loses orders on the next sync; each refusal is refused; `then(path)`
+    checks anything else while the connection is there."""
+    tag = body["name"].rsplit("-", 1)[1]
+    path = f"/v1/workspaces/payments/connections/{body['name']}"
+
+    def setup_tables(readers):
+        return httpx.post(f"{FAKE_CATALOG}/catalog/setup", json={"tables": catalog_tables(tag, readers), **(setup or {})}, timeout=10)
+
+    def hits(u):
+        return {h["id"] for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def until(test, seconds=150):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(3)
+        return test()
+
+    def sync_state():
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return conn.execute("SELECT status, last_error, last_synced_at FROM kl.connections WHERE name = %s", (body["name"],)).fetchone()
+
+    orders, raw, salaries, calendar = (key(f"{db}_{tag}.{t}") for db, t in (("sales", "orders"), ("staging", "raw_orders"), ("hr", "salaries"),
+                                                                             ("wide", "calendar")))
+    try:
+        assert setup_tables(["carol@acme.test", "mallory-not-here@acme.test"]).status_code == 200
+        for problem, (who, attempt, status) in refusals.items():
+            r = api("POST", "/v1/workspaces/payments/connections/catalog", who, json=attempt)
+            assert r.status_code == status, f"{problem}: {r.status_code} {r.text[:200]}"
+        r = api("POST", "/v1/workspaces/payments/connections/catalog", admin, json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: (sync_state() or {}).get("last_synced_at") is not None or (sync_state() or {}).get("status") == "error"), \
+            f"the {provider} catalog never synced"
+        assert sync_state()["status"] != "error", f"the {provider} sync failed: {sync_state()['last_error']}"
+        for u in ("alice", "bob", "carol", "dave"):  # identity matching links each to their catalog account by verified email
+            api("GET", "/v1/whoami", u)
+        assert until(lambda: orders in hits("carol")), f"{provider}: orders didn't reach the person the catalog lets read it"
+        assert orders not in hits("alice") and orders not in hits("bob") and orders not in hits("dave"), \
+            f"{provider}: orders reached someone the catalog doesn't let read it"
+        assert raw in hits("alice") and raw in hits("carol"), f"{provider}: raw_orders didn't reach both its readers"
+        assert not any(salaries in hits(u) for u in ("alice", "bob", "carol", "dave")), \
+            f"{provider}: a table only a group may read reached someone with no directory to expand the group"
+        if domain_reads:
+            assert calendar in hits("bob") and calendar in hits("carol"), f"{provider}: the company's domain didn't reach the org"
+        else:
+            assert not any(calendar in hits(u) for u in ("alice", "bob", "carol", "dave")), f"{provider}: a grant to a domain reached people"
+        doc = api("GET", "/v1/documents", "carol", params={"scope": "org", "key": orders}).json()["documents"]
+        assert doc, f"{provider}: orders isn't in its reader's documents"
+        content = api("GET", f"/v1/documents/{orders}/content", "carol")
+        assert content.status_code == 200 and "order_id" in content.text and "carol@acme.test" in content.text, \
+            f"{provider}: orders' page lacks its columns or owner: {content.text[:300]}"
+        assert api("GET", f"/v1/documents/{orders}/content", "dave").status_code == 404, f"{provider}: a stranger read orders' page"
+        if lineage:
+            namespace, upstream, downstream = lineage
+            impact = api("GET", "/v1/lineage/impact", "alice", params={"namespace": namespace, "name": upstream, "kind": "dataset"})
+            assert impact.status_code == 200 and downstream in json.dumps(impact.json()), \
+                f"{provider}: the catalog's lineage didn't reach the team's impact walk: {impact.text[:300]}"
+            assert api("GET", "/v1/lineage/impact", "bob", params={"namespace": namespace, "name": upstream, "kind": "dataset"}).status_code == 404, \
+                f"{provider}: another team saw this team's catalog lineage"
+        assert setup_tables(["mallory-not-here@acme.test"]).status_code == 200  # carol's grant on orders is revoked
+        assert api("POST", path + "/refresh", admin).status_code == 202
+        assert until(lambda: orders not in hits("carol")), f"{provider}: a revoked reader kept orders after the next sync"
+        assert raw in hits("carol"), f"{provider}: a table still granted left"
+        if then:
+            then(path)
+    finally:
+        api("DELETE", path, admin)
+        if identities:
+            forget_matches(identities, CATALOG_PEOPLE)
+
+
+@check
+def dataplex_entries_carry_bigquerys_own_readers():
+    """S7, Dataplex: read keyless as the runner's own identity; a BigQuery table's entry is readable by the people its dataset and IAM policy name, as their Google accounts, and the company's domain reaches the org only when the connection names it; groups without a directory, everyone, special groups, service accounts, and metadata-only roles reach no one; lineage from the Data Lineage API reaches the team's impact walk only; a revoked reader loses the entry on the next sync; only an org admin connects it, without a secret, to a project named by id and an allowed address"""
+    from .catalogs import entry_key
+    tag = secrets.token_hex(3)
+    body = {"name": f"dataplex-{tag}", "provider": "dataplex", "api_base": f"{FAKE_CATALOG}/gcp-catalog", "projects": ["acme-data"],
+            "domain": "acme.test", "every_minutes": 60}
+    refusals = {"a team admin connected the runner's own identity": ("alice", body, 403),
+                "an internal address was accepted": ("olivia", {**body, "api_base": "http://10.0.0.5"}, 422),
+                "a project not named by its id was accepted": ("olivia", {**body, "projects": ["Acme Data!"]}, 422),
+                "a domain not the company's was accepted": ("olivia", {**body, "domain": "evil.test"}, 422),
+                "a secret was taken for a keyless catalog": ("olivia", {**body, "token": "x" * 30}, 422)}
+    catalog_round("Dataplex", "olivia", body, lambda name: entry_key("dataplex", f"bigquery:acme-data.{name}"),
+                  ("bigquery", f"acme-data.staging_{tag}.raw_orders", f"acme-data.sales_{tag}.orders"), refusals, domain_reads=True,
+                  identities="google")
+
+
+@check
+def unity_catalog_tables_carry_their_effective_readers():
+    """S7, Unity Catalog: a service principal signs in by OAuth machine-to-machine; a table is readable by the people its effective permissions let SELECT it, as their Databricks accounts, and no one else (a group, and a browse-only grant, reach no one); its lineage reaches the team's impact walk only; a revoked reader loses it on the next sync; its catalogs change in place, validated; an address that isn't a Databricks workspace, a service principal not named by its id, and another team's secret are refused"""
+    from .catalogs import entry_key
+    tag = secrets.token_hex(3)
+    dbx = httpx.post(f"{FAKE_CATALOG}/catalog/setup", json={"tables": []}, timeout=10).json()["databricks"]
+    body = {"name": f"unity-{tag}", "provider": "unity", "api_base": f"{FAKE_CATALOG}/databricks", "client_id": dbx["client_id"],
+            "client_secret": dbx["client_secret"], "every_minutes": 60}
+    refusals = {"an internal address was accepted": ("alice", {**body, "api_base": "http://10.0.0.5"}, 422),
+                "a service principal not named by its id was accepted": ("alice", {**body, "client_id": "aerugo"}, 422),
+                "a reference to another team's secret was accepted": ("alice", {**body, "client_secret": None,
+                                                                               "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}, 422)}
+    def lists_change_in_place(path):
+        assert api("PATCH", path, "alice", json={"catalogs": ["main", "finance"]}).status_code == 200, "Unity's catalogs didn't change in place"
+        assert api("GET", path, "alice").json()["settings"]["catalogs"] == ["main", "finance"], "Terraform can't read back the catalogs"
+        assert api("PATCH", path, "alice", json={"catalogs": ["bad name!"]}).status_code == 422, "a malformed catalog was accepted"
+        assert api("PATCH", path, "alice", json={"platforms": ["snowflake"]}).status_code == 422, "another catalog's list was accepted"
+    catalog_round("Unity Catalog", "alice", body, lambda name: entry_key("unity-main", f"main.{name}"),
+                  ("unity", f"main.staging_{tag}.raw_orders", f"main.sales_{tag}.orders"), refusals, then=lists_change_in_place,
+                  identities="databricks")
+
+
+@check
+def glue_tables_carry_lake_formations_grants():
+    """S7, Glue: the runner assumes the company's role with its own identity token (no AWS key), and signs every call (SigV4, held to AWS's own test vector); a table is readable by the people Lake Formation grants SELECT through the company's SAML provider, as their AWS accounts, and no one else (a SAML group, IAMAllowedPrincipals, a database-level grant, and DESCRIBE reach no one); a revoked reader loses it on the next sync; only an org admin connects it, without a secret, to a role and region named exactly"""
+    import datetime
+    from .catalogs import entry_key
+    from .glue import Credentials, sign
+    vanilla = sign("GET", "https://example.amazonaws.com/", "us-east-1", "service", b"", {},
+                   Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", ""), datetime.datetime(2015, 8, 30, 12, 36))
+    assert vanilla["authorization"].endswith("Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"), \
+        f"SigV4 doesn't match AWS's get-vanilla test vector: {vanilla['authorization']}"
+    tag = secrets.token_hex(3)
+    role = httpx.post(f"{FAKE_CATALOG}/catalog/setup", json={"tables": []}, timeout=10).json()["role"]
+    body = {"name": f"glue-{tag}", "provider": "glue", "api_base": f"{FAKE_CATALOG}/aws", "region": "us-east-1", "role_arn": role,
+            "databases": [f"sales_{tag}", f"staging_{tag}", f"hr_{tag}", f"wide_{tag}"], "every_minutes": 60}
+    refusals = {"a team admin connected the runner's own identity": ("alice", body, 403),
+                "an internal address was accepted": ("olivia", {**body, "api_base": "http://10.0.0.5"}, 422),
+                "a role that isn't an IAM role's ARN was accepted": ("olivia", {**body, "role_arn": "arn:aws:iam::1:user/me"}, 422),
+                "a region that isn't one was accepted": ("olivia", {**body, "region": "moon-1"}, 422)}
+    catalog_round("Glue", "olivia", body, lambda name: entry_key("glue", f"us-east-1/{name}"), None, refusals, identities="aws")
+
+
+@check
+def purview_assets_carry_their_collections_readers():
+    """S7, Purview: an Entra app signs in with its certificate, for Purview's own audience; an asset is readable by the people its collection's policy names as data readers, by their Entra object ids through an Entra directory, and no one else (a collection administrator, and anyone the directory doesn't list, reach no one); lineage through a process reaches the team's impact walk only; a revoked reader loses it on the next sync; an address that isn't a Purview account, a tenant not named by its id, and a client secret are refused"""
+    tag = secrets.token_hex(3)
+    tenant = str(uuid.uuid4())
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    people = ("alice", "bob", "carol", "dave")
+    ids = {u: str(uuid.uuid4()) for u in people}
+    directory = {"name": f"entra-purview-{tag}", "provider": "entra", "api_base": FAKE_MICROSOFT, "tenant_id": tenant,
+                 "client_id": app["client_id"], "certificate": app["certificate"], "every_minutes": 60}
+    users = [{"id": ids[u], "mail": f"{u}@acme.test", "userPrincipalName": f"{u}@acme.test", "displayName": u.title(), "accountEnabled": True}
+             for u in people]
+    body = {"name": f"purview-{tag}", "provider": "purview", "api_base": f"{FAKE_CATALOG}/purview", "tenant_id": tenant,
+            "client_id": app["client_id"], "certificate": app["certificate"], "collections": [f"sales_{tag}", f"staging_{tag}", f"hr_{tag}", f"wide_{tag}"],
+            "every_minutes": 60}
+    refusals = {"an internal address was accepted": ("alice", {**body, "api_base": "http://10.0.0.5"}, 422),
+                "a tenant not named by its id was accepted": ("alice", {**body, "tenant_id": "contoso.onmicrosoft.com"}, 422),
+                "a client secret was accepted": ("alice", {**body, "certificate": None, "client_secret": "a-client-secret"}, 422)}
+    guid = lambda name: str(uuid.uuid5(uuid.NAMESPACE_URL, f"purview/{name}"))
+    try:
+        assert httpx.post(f"{FAKE_MICROSOFT}/setup", json={"users": users, "groups": {}}, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json=directory)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            with psycopg.connect(OWNER_DB) as conn:
+                if conn.execute("SELECT count(*) FROM kl.directory_people p JOIN kl.connections c ON c.id = p.connection_id "
+                                "WHERE c.name = %s AND p.external_id IS NOT NULL", (directory["name"],)).fetchone()[0] == len(people):
+                    break
+            time.sleep(2)
+        else:
+            raise AssertionError("the Entra directory never listed its people with their object ids")
+        catalog_round("Purview", "alice", body, lambda name: f"purview-{guid(name)}",
+                      ("purview", f"mssql://acme.database.windows.net/staging_{tag}/dbo/raw_orders",
+                       f"mssql://acme.database.windows.net/sales_{tag}/dbo/orders"), refusals,
+                      setup={"people": {f"{u}@acme.test": ids[u] for u in people}}, identities="microsoft")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{directory['name']}", "olivia")
+
+
+@check
+def datahub_datasets_reach_only_their_owners():
+    """S7, DataHub: an access token reads a platform's datasets through GraphQL; DataHub's view policies can't be read with it, so a dataset is readable only by the people DataHub names as its owners, as their DataHub accounts (a group owner reaches no one); its upstream lineage reaches the team's impact walk only; an owner removed loses it on the next sync; an address the deployment doesn't allow, a platform not named as DataHub names them, and another team's secret are refused"""
+    import hashlib
+    tag = secrets.token_hex(3)
+    token = httpx.post(f"{FAKE_CATALOG}/catalog/setup", json={"tables": []}, timeout=10).json()["datahub_token"]
+    body = {"name": f"datahub-{tag}", "provider": "datahub", "api_base": f"{FAKE_CATALOG}/datahub", "platforms": ["snowflake"],
+            "token": token, "every_minutes": 60}
+    refusals = {"an internal address was accepted": ("alice", {**body, "api_base": "http://10.0.0.5"}, 422),
+                "a platform DataHub wouldn't name was accepted": ("alice", {**body, "platforms": ["Snow Flake!"]}, 422),
+                "a reference to another team's secret was accepted": ("alice", {**body, "token": None,
+                                                                               "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}, 422)}
+    urn = lambda name: f"urn:li:dataset:(urn:li:dataPlatform:snowflake,{name},PROD)"
+    # DataHub's readers are its owners, so the fake names each table's readers as its owners
+    catalog_round("DataHub", "alice", body, lambda name: f"datahub-{hashlib.sha256(urn(name).encode()).hexdigest()[:32]}",
+                  ("snowflake", f"staging_{tag}.raw_orders", f"sales_{tag}.orders"), refusals, setup=None, identities="datahub")
 
 
 @check
@@ -4674,7 +5013,8 @@ def what_terraform_manages_is_marked_and_teams_read_by_slug():
 def main() -> None:
     wait_for(f"{API}/healthz")
     counts = {"PASS": 0, "SKIP": 0, "FAIL": 0}
-    for fn in CHECKS:
+    only = os.environ.get("KL_SMOKE_ONLY", "")  # debugging: run only the checks whose names hold this
+    for fn in [f for f in CHECKS if only in f.__name__]:
         label = (fn.__doc__ or fn.__name__).strip()
         try:
             status = "SKIP" if fn() is SKIP else "PASS"

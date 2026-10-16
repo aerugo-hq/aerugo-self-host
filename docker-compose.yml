@@ -170,6 +170,13 @@ services:
       KL_SLACK_API_BASES: ${KL_SLACK_API_BASES:-https://slack.com/api,http://fake-llm:8080/slack/api}
       # Microsoft Graph addresses Entra directories may use (S3); the fake one exists only while smoke runs.
       KL_MICROSOFT_GRAPH_BASES: ${KL_MICROSOFT_GRAPH_BASES:-https://graph.microsoft.com,http://fake-llm:8080/microsoft}
+      # Data catalogs (S7): Google's, Databricks', AWS's, and Purview's own addresses are always allowed; the fakes
+      # exist only while smoke runs.
+      KL_DATAPLEX_API_BASES: ${KL_DATAPLEX_API_BASES:-https://googleapis.com,http://fake-llm:8080/gcp-catalog}
+      KL_DATABRICKS_API_BASES: ${KL_DATABRICKS_API_BASES:-http://fake-llm:8080/databricks}
+      KL_AWS_API_BASES: ${KL_AWS_API_BASES:-http://fake-llm:8080/aws}
+      KL_PURVIEW_API_BASES: ${KL_PURVIEW_API_BASES:-http://fake-llm:8080/purview}
+      KL_DATAHUB_API_BASES: ${KL_DATAHUB_API_BASES:-http://fake-llm:8080/datahub}
       # Jira addresses besides Jira Cloud sites (ADR 0011); the fake ones (two sites) exist only while smoke runs.
       KL_JIRA_API_BASES: ${KL_JIRA_API_BASES:-http://fake-llm:8080/jira,http://fake-llm:8080/jira-b}
       # Okta addresses besides Okta orgs (ADR 0011: directories); the fake one exists only while smoke runs.

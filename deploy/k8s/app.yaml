@@ -20,6 +20,7 @@ data:
   KL_GOOGLE_API_BASES: https://www.googleapis.com
   KL_GOOGLE_ADMIN_API_BASES: https://admin.googleapis.com
   KL_MICROSOFT_GRAPH_BASES: https://graph.microsoft.com
+  KL_DATAPLEX_API_BASES: https://googleapis.com
   KL_SLACK_API_BASES: https://slack.com/api
   KL_NOTION_API_BASES: https://api.notion.com/v1
   KL_JIRA_API_BASES: ""   # Jira Cloud sites (https://<site>.atlassian.net) are always allowed; this adds others

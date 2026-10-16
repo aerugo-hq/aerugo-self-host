@@ -147,6 +147,19 @@ def test_the_notion_form_says_who_will_read_it(page):
     expect(form).to_contain_text("readable by this team's members, and no one else")
 
 
+def test_the_data_catalog_form_fits_each_catalog(page):
+    sign_in(page, "alice")
+    open_connector(page, "Data catalog")
+    form = page.get_by_role("form", name="Connect a data catalog")
+    expect(form.get_by_label("OAuth secret")).to_have_attribute("type", "password")  # Unity Catalog first: a secret is never shown
+    form.get_by_label("Catalog").select_option("dataplex")  # read as the runner itself: no secret, and an org admin's
+    expect(form.get_by_label("OAuth secret")).to_have_count(0)
+    expect(form.get_by_text("Only an org admin connects this one")).to_be_visible()
+    expect(form.get_by_role("button", name="Connect Dataplex")).to_be_disabled()
+    form.get_by_label("Catalog").select_option("datahub")
+    expect(form.get_by_text("readable only by the people DataHub names as its owners")).to_be_visible()
+
+
 def test_olivia_sets_up_and_removes_google_sign_in(page):
     sign_in(page, "olivia")
     page.goto(f"{WEB}/#/compliance/platform")

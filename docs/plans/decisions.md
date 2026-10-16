@@ -65,3 +65,25 @@ such choice took the narrower, fail-closed option and is listed here, with its a
    page. *Alternative:* don't connect Notion live until Notion's API reports who can read a page.
 2. **The whole org never counts,** even for a team the whole org may join (an `org:` principal holding a role on the
    team is left out), so connecting Notion never makes a page org-wide. Narrower than exports, which may name the org.
+
+## S7. Data catalogs
+
+1. **Catalogs read as the runner's own identity (Dataplex, Glue) are an org admin's to connect.** Every team shares
+   the runner's identity, so a team admin naming any project or role the runner can reach would see that catalog's
+   table names and lineage in their team. *Alternative:* a team admin connects them, with the deployment listing the
+   projects and roles each team may name.
+2. **Readers are who may read the data, not only the metadata,** a subset of who may see an entry in the catalog:
+   SELECT (or ALL) in Unity Catalog and Lake Formation; data viewers, editors, owners, and admins in BigQuery;
+   Purview's data readers and curators. Browse, describe, and metadata-viewer grants reach no one. Narrower.
+3. **DataHub's readers are its owners,** since a token can't read DataHub's view policies, which by default let every
+   DataHub user view everything. Narrower. *Alternative:* the whole org on an instance its admin confirms, like
+   `company_site`.
+4. **Purview's readers are only the collection's own policy,** without what a child collection inherits from its
+   parent. Narrower.
+5. **Unity Catalog's service principal needs MANAGE on a catalog** (or to own it) to read its grants: Databricks has
+   no read-only privilege for that. The guide says so; Aerugo never writes one.
+6. **A catalog's asset names, columns, and lineage are the connecting team's,** as K3's pushed lineage is, whoever may
+   read each entry's document; an entry's description and owners are in its document only, behind its own readers.
+7. **The fakes are proof of shape, not of each vendor:** each client was written from the vendor's API reference and
+   checked against a fake of it, and Glue's request signing against AWS's own test vector. None has been run against
+   a real Dataplex, Databricks, AWS, Purview, or DataHub yet.

@@ -83,14 +83,14 @@ baseline is already in place (only its golden-set part is left), so each source 
       today: the connecting team only), and never widen it
 
 ### S7. Data catalogs
-- [ ] Dataplex Universal Catalog: entries (datasets, tables, views, columns), descriptions, aspects, glossary terms,
-      owners, and lineage (the Data Lineage API); keyless on GCP
-- [ ] Then the Glue Data Catalog and SageMaker Catalog (an IAM role through OIDC), Purview, and Unity Catalog
-- [ ] dbt and Dataform manifests (models, columns, tests, lineage), from a repository
-- [ ] DataHub or OpenMetadata
-- [ ] Assets on the Map; descriptions as entries linked to the documents that mention them; owners into who to ask;
+- [x] Dataplex Universal Catalog: entries (datasets, tables, views, columns), descriptions, aspects, glossary terms,
+      owners, and lineage (the Data Lineage API); keyless on GCP (glossary terms as their own entries: not yet)
+- [x] Then the Glue Data Catalog and SageMaker Catalog (an IAM role through OIDC), Purview, and Unity Catalog
+- [x] dbt and Dataform manifests (models, columns, tests, lineage), from a repository
+- [x] DataHub or OpenMetadata
+- [x] Assets on the Map; descriptions as entries linked to the documents that mention them; owners into who to ask;
       lineage into impact walks
-- [ ] Metadata only, never data; each entry's readers mirrored from the catalog's access control, failing closed
+- [x] Metadata only, never data; each entry's readers mirrored from the catalog's access control, failing closed
 
 ### S8. Faster permission changes
 - [ ] Permission-only refreshes between content syncs: readers, without re-reading bodies

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import config, confluence, directory, gcp_secrets, gdrive, jira, microsoft365, notion, slack
+from . import config, confluence, dataplex, datahub, directory, gcp_secrets, gdrive, glue, jira, microsoft365, notion, purview, slack, unity
 from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
@@ -447,6 +447,132 @@ def create_microsoft_connection(ws: str, body: MicrosoftConnectionIn, caller: Ca
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
+class CatalogConnectionIn(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+    provider: str = Field(pattern=r"^(dataplex|unity|glue|purview|datahub)$")
+    api_base: str | None = Field(default=None, max_length=300)  # the catalog's address; Dataplex's and Glue's are their own
+    projects: list[str] | None = Field(default=None, max_length=100)     # Dataplex: the projects it reads
+    location: str | None = Field(default=None, max_length=40)            # Dataplex: where lineage is kept (global)
+    domain: str | None = Field(default=None, max_length=253)             # Dataplex: the company's domain, as the org
+    catalogs: list[str] | None = Field(default=None, max_length=200)     # Unity Catalog: the catalogs it reads (all)
+    region: str | None = Field(default=None, max_length=30)              # Glue
+    role_arn: str | None = Field(default=None, max_length=600)           # Glue: the role the runner assumes
+    databases: list[str] | None = Field(default=None, max_length=500)    # Glue: the databases it reads (all)
+    tenant_id: str | None = Field(default=None, max_length=36)           # Purview
+    client_id: str | None = Field(default=None, max_length=36)           # Unity's service principal, Purview's app
+    collections: list[str] | None = Field(default=None, max_length=200)  # Purview: the collections it reads
+    platforms: list[str] | None = Field(default=None, max_length=50)     # DataHub: the platforms it reads
+    client_secret: str | None = Field(default=None, min_length=8, max_length=500, repr=False)  # Unity's service principal
+    certificate: str | None = Field(default=None, max_length=20000, repr=False)              # Purview's app (PEM)
+    token: str | None = Field(default=None, min_length=20, max_length=4000, repr=False)       # DataHub's access token
+    credential_ref: str | None = Field(default=None, max_length=300)
+    every_minutes: int | None = Field(default=None, ge=5, le=10080)
+
+
+def catalog_settings(ws: str, body: CatalogConnectionIn) -> tuple[dict, dict | None]:
+    """A catalog connection's config and the secret to store (None: none, or the team's own reference), validated for
+    its provider. Raises HTTPException(422) on anything that doesn't fit."""
+    def fail(why: str):
+        raise HTTPException(422, why)
+    keyless = body.provider in ("dataplex", "glue")  # read as the runner itself: no secret at all
+    secrets = [s for s in (body.client_secret, body.certificate, body.token) if s]
+    if keyless and (secrets or body.credential_ref):
+        fail("Dataplex and Glue are read as the runner's own identity: give no secret")
+    if not keyless and len(secrets) + bool(body.credential_ref) != 1:
+        fail("give the catalog's credential, or a credential reference: one, not both")
+    if body.credential_ref and not team_secret(ws, body.credential_ref):
+        fail(ref_rule(ws))
+    cfg: dict = {"provider": body.provider, "every_minutes": body.every_minutes}
+    secret = None
+    if body.provider == "dataplex":
+        if not body.projects or not all(dataplex.PROJECT.fullmatch(p) for p in body.projects):
+            fail("name the Google Cloud projects to read, by their ids")
+        if body.location and not dataplex.LOCATION.fullmatch(body.location):
+            fail("that isn't a Google Cloud location")
+        domain = (body.domain or "").strip().lower() or None
+        if domain and domain not in config.ORG_EMAIL_DOMAINS:
+            fail("the domain must be one of the company's own (KL_ORG_EMAIL_DOMAINS)")
+        cfg.update(api_base=(body.api_base or dataplex.GOOGLE).rstrip("/"), projects=body.projects, location=body.location or "global",
+                   domain=domain)
+        if not dataplex.allowed_base(cfg["api_base"]):
+            fail("that Google API address isn't allowed here")
+    elif body.provider == "glue":
+        if not glue.REGION.fullmatch(body.region or "") or not glue.ROLE.fullmatch(body.role_arn or ""):
+            fail("name the AWS region and the IAM role's ARN the runner assumes")
+        if body.databases is not None and not all(glue.NAME.fullmatch(d) for d in body.databases):
+            fail("Glue's databases are named in lower case: letters, digits, _ and -")
+        cfg.update(api_base=(body.api_base or "").rstrip("/"), region=body.region, role_arn=body.role_arn, databases=body.databases)
+        if not glue.allowed_base(cfg["api_base"]):
+            fail("that AWS address isn't allowed here")
+    elif body.provider == "unity":
+        if not unity.allowed_base(body.api_base or "") or not directory.GUID.fullmatch(body.client_id or ""):
+            fail("name the Databricks workspace's address and the service principal's application id")
+        if body.catalogs is not None and not all(unity.NAME.fullmatch(c) for c in body.catalogs):
+            fail("catalogs are named by letters, digits, _ and -")
+        if body.certificate or body.token:
+            fail("Unity Catalog takes the service principal's OAuth secret")
+        cfg.update(api_base=body.api_base.rstrip("/"), client_id=body.client_id.lower(), catalogs=body.catalogs)
+        secret = {"client_secret": body.client_secret} if body.client_secret else None
+    elif body.provider == "purview":
+        if not purview.allowed_base(body.api_base or "") or not directory.GUID.fullmatch(body.tenant_id or "") \
+                or not directory.GUID.fullmatch(body.client_id or ""):
+            fail("name the Purview account's address, the tenant, and the app registration by their ids")
+        if not body.collections or not all(purview.COLLECTION.fullmatch(c) for c in body.collections):
+            fail("name the collections to read, by their ids")
+        if body.client_secret or body.token:
+            fail("Purview's app signs in with its certificate, never a secret")
+        cfg.update(api_base=body.api_base.rstrip("/"), tenant_id=body.tenant_id.lower(), client_id=body.client_id.lower(),
+                   collections=body.collections)
+        try:
+            secret = {"certificate": directory.entra_certificate(body.certificate)} if body.certificate else None
+        except ValueError as e:
+            fail(str(e))
+    else:  # datahub
+        if not datahub.allowed_base(body.api_base or ""):
+            fail("that DataHub address isn't allowed here (KL_DATAHUB_API_BASES)")
+        if not body.platforms or not all(datahub.PLATFORM.fullmatch(p) for p in body.platforms):
+            fail("name the platforms to read, as DataHub names them (bigquery, snowflake)")
+        if body.client_secret or body.certificate:
+            fail("DataHub takes an access token")
+        cfg.update(api_base=body.api_base.rstrip("/"), platforms=body.platforms)
+        secret = {"token": body.token} if body.token else None
+    return cfg, secret
+
+
+@router.post("/connections/catalog", status_code=201)
+def create_catalog_connection(ws: str, body: CatalogConnectionIn, caller: Caller = Depends(authenticate),
+                              managed: tuple | None = Depends(managed_header)):
+    """Connect a data catalog to a team (S7): Dataplex, Unity Catalog, Glue, Purview, or DataHub. Metadata only, never
+    data: each entry becomes a document only the people the catalog lets read it find, and an asset with its lineage
+    and owners for this team. Dataplex and Glue are read as the runner's own identity, which every team shares, so
+    only an org admin connects them; any other is the team's admins', with its own credential."""
+    require_workspace_admin(caller, ws)
+    if body.provider in ("dataplex", "glue"):
+        require_org_admin(caller)
+    cfg, secret = catalog_settings(ws, body)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
+        if not ws_row:
+            raise HTTPException(404, "workspace not found")
+        if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
+            raise HTTPException(409, "a connection with that name already exists in this workspace")
+        cid = uuid.uuid4()
+        ref = vault.put(f"kl/connections/{cid}", secret) if secret else body.credential_ref
+        row = conn.execute(
+            """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
+               VALUES (%s, %s, %s, 'catalog', %s, %s, %s, %s) RETURNING id, name, kind, status""",
+            (cid, org_id, ws_row["id"], body.name, Jsonb(cfg), ref, caller.username),
+        ).fetchone()
+        note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
+                     (org_id, Jsonb({"connection_id": str(row["id"])})))
+        audit(conn, org_id, caller.username, "connection.create", [ws],
+              {"name": body.name, "kind": "catalog", "provider": body.provider,
+               "credential": "runner" if not ref else "reference" if body.credential_ref else "stored"})
+    return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
+
+
 @router.post("/connections/directory", status_code=201)
 def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Caller = Depends(authenticate),
                                 managed: tuple | None = Depends(managed_header)):
@@ -566,7 +692,7 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
 # one the team gave (its own secret); a secret Aerugo stored itself is never named.
 SETTINGS = ("api_base", "projects", "company_site", "every_minutes", "domain", "drives", "repositories", "provider",
             "spaces", "labels", "page_trees", "admin_email", "tenant_id", "client_id", "channels", "company_workspace",
-            "history_days", "sites")
+            "history_days", "sites", "location", "catalogs", "region", "role_arn", "databases", "collections", "platforms")
 
 
 def settings_of(ws: str, cfg: dict, credential_ref: str | None) -> dict:
@@ -670,6 +796,10 @@ class ConnectionPatch(BaseModel):
     channels: list[str] | None = Field(default=None, max_length=500)  # Slack: the channels it brings in, by id
     sites: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Microsoft 365: the sites it reads
     history_days: int | None = Field(default=None, ge=1, le=3650)     # Slack: how far back it reads
+    catalogs: list[str] | None = Field(default=None, max_length=200)    # Unity Catalog: the catalogs it reads
+    databases: list[str] | None = Field(default=None, max_length=500)   # Glue: the databases it reads
+    collections: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Purview: its collections
+    platforms: list[str] | None = Field(default=None, min_length=1, max_length=50)     # DataHub: its platforms
     bot_token: str | None = Field(default=None, min_length=10, max_length=300, repr=False)  # Slack: a rotation
     token: str | None = Field(default=None, min_length=20, max_length=300, repr=False)  # Notion: a rotation
     every_minutes: int | None = Field(default=None, ge=5, le=10080)   # how often it syncs (ADR 0011)
@@ -697,23 +827,34 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
     and token. Anything that changes what it brings in is discovered and synced again. Secrets are never echoed, and
     the audit records which fields changed, never their values."""
     require_workspace_admin(caller, ws)
-    rotating = body.client_secret is not None or body.refresh_token is not None
-    if rotating and (body.client_secret is None or body.refresh_token is None):
-        raise HTTPException(422, "rotating Google credentials takes both the client secret and the refresh token")
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = owned_connection(conn, ws, name)
-        google_directory = c["kind"] == "directory" and (c["config"] or {}).get("provider") == "google"
-        if c["kind"] == "directory":  # a directory decides who has left, company-wide (S2)
-            require_org_admin(caller)
+        provider = (c["config"] or {}).get("provider")
+        unity_secret = body.client_secret if c["kind"] == "catalog" else None  # Unity Catalog's service principal
+        rotating = c["kind"] != "catalog" and (body.client_secret is not None or body.refresh_token is not None)
+        if rotating and (body.client_secret is None or body.refresh_token is None):
+            raise HTTPException(422, "rotating Google credentials takes both the client secret and the refresh token")
+        google_directory = c["kind"] == "directory" and provider == "google"
+        if c["kind"] == "directory" or (c["kind"] == "catalog" and provider in ("dataplex", "glue")):
+            require_org_admin(caller)  # a directory decides who has left (S2); these catalogs read as the runner (S7)
         if body.admin_email is not None and not google_directory:
             raise HTTPException(422, "only a Google Workspace directory acts as an admin")
         if body.repositories is not None and c["kind"] != "github":
             raise HTTPException(422, "only a GitHub connection has repositories")
         if (body.drives is not None or rotating) and c["kind"] != "google":
             raise HTTPException(422, "only a Google connection has drives and a refresh token")
-        if body.projects is not None and (c["kind"] != "jira" or not all(jira.PROJECT.fullmatch(p) for p in body.projects)):
+        if body.projects is not None and provider == "dataplex" and c["kind"] == "catalog":
+            if not body.projects or not all(dataplex.PROJECT.fullmatch(p) for p in body.projects):
+                raise HTTPException(422, "name the Google Cloud projects to read, by their ids")
+        elif body.projects is not None and (c["kind"] != "jira" or not all(jira.PROJECT.fullmatch(p) for p in body.projects)):
             raise HTTPException(422, "only a Jira connection has projects, keyed like EDP")
+        catalog_lists = {"catalogs": ("unity", unity.NAME), "databases": ("glue", glue.NAME), "collections": ("purview", purview.COLLECTION),
+                         "platforms": ("datahub", datahub.PLATFORM)}  # S7: each catalog's own list, validated as at creation
+        for field, (owner, rule) in catalog_lists.items():
+            values = getattr(body, field)
+            if values is not None and (c["kind"] != "catalog" or provider != owner or not all(rule.fullmatch(v) for v in values)):
+                raise HTTPException(422, f"only a {owner} catalog has {field}, named as it names them")
         if (body.channels is not None or body.history_days is not None or body.bot_token) and c["kind"] != "slack":
             raise HTTPException(422, "only a Slack connection has channels, a history window, and a bot token")
         if body.sites is not None and (c["kind"] != "microsoft" or not all(microsoft365.SITE.fullmatch(s) for s in body.sites)):
@@ -733,7 +874,7 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if body.projects is not None:
             cfg["projects"] = body.projects
             changed.append("projects")
-        for field in ("channels", "history_days", "sites"):
+        for field in ("channels", "history_days", "sites", "catalogs", "databases", "collections", "platforms"):
             if getattr(body, field) is not None:
                 cfg[field] = getattr(body, field)
                 changed.append(field)
@@ -758,18 +899,26 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if rotating:  # a new version of its secret; the connection reads the new one from now on
             ref = vault.put(f"kl/connections/{c['id']}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token})
             changed.append("credentials")
-        if body.api_token or body.email or body.service_account_key or body.certificate or body.bot_token or body.token:  # a new secret for one Aerugo stored
+        if body.api_token or body.email or body.service_account_key or body.certificate or body.bot_token or body.token \
+                or unity_secret:  # a new secret for one Aerugo stored
             if not stored_secret(c["id"], ref):
                 raise HTTPException(422, "this connection reads a secret the team keeps (or GitHub's app): rotate it there")
-            if body.token:
-                if c["kind"] != "notion" or not body.token.startswith(("ntn_", "secret_")):
-                    raise HTTPException(422, "only a Notion connection takes an integration token (ntn_... or secret_...)")
-                secret = {"token": body.token}
+            if unity_secret:
+                if provider != "unity":
+                    raise HTTPException(422, "only a Unity Catalog connection takes a service principal's secret")
+                secret = {"client_secret": unity_secret}
+            elif body.token:
+                if c["kind"] == "catalog" and provider == "datahub":
+                    secret = {"token": body.token}
+                elif c["kind"] != "notion" or not body.token.startswith(("ntn_", "secret_")):
+                    raise HTTPException(422, "only Notion (ntn_... or secret_...) and DataHub take a token")
+                else:
+                    secret = {"token": body.token}
             elif body.bot_token:
                 secret = {"bot_token": body.bot_token}
             elif body.certificate:
-                if not (c["kind"] == "microsoft" or (c["kind"] == "directory" and (c["config"] or {}).get("provider") == "entra")):
-                    raise HTTPException(422, "only an Entra directory and a Microsoft 365 connection have a certificate")
+                if not (c["kind"] == "microsoft" or (c["kind"], provider) in (("directory", "entra"), ("catalog", "purview"))):
+                    raise HTTPException(422, "only an Entra directory, Microsoft 365, and Purview have a certificate")
                 try:
                     secret = {"certificate": directory.entra_certificate(body.certificate)}
                 except ValueError as e:
@@ -815,8 +964,8 @@ def remove_connection(ws: str, name: str, caller: Caller = Depends(authenticate)
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = owned_connection(conn, ws, name)
-        if c["kind"] == "directory":  # a directory decides who has left, company-wide (S2)
-            require_org_admin(caller)
+        if c["kind"] == "directory" or (c["kind"] == "catalog" and (c["config"] or {}).get("provider") in ("dataplex", "glue")):
+            require_org_admin(caller)  # a directory decides who has left (S2); these catalogs read as the runner (S7)
         routed = (c["config"] or {}).get("teams") or {}  # repositories it sends to other teams (slice F1)
         containers = [{"external_id": r["external_id"], "workspace_id": routed.get(r["external_id"]) or str(c["workspace_id"])}
                       for r in conn.execute("SELECT external_id FROM connection_containers WHERE connection_id = %s",
