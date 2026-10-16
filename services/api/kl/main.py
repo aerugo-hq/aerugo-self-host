@@ -44,6 +44,7 @@ from .providers import probe
 from .ranking import current_first, fuse
 from .rerank import POOL as RERANK_POOL, RerankError, rerank as rerank_rows
 from .vault import vault
+from .hooks import router as hooks_router
 from .webhooks import router as webhooks_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -52,6 +53,7 @@ log = logging.getLogger("kl.api")
 app = FastAPI(title="knowledge-layer API", version="0.1.0")
 app.include_router(connections_router)
 app.include_router(webhooks_router)
+app.include_router(hooks_router)
 telemetry.setup("kl-api")
 
 

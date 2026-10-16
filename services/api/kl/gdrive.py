@@ -227,8 +227,10 @@ def viewer_tuples(key: str, acl: list[str]) -> set:
 
 
 def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str) -> dict:
-    """Index one shared drive: new and changed files, everyone's current access, and nothing left of removed files."""
+    """Index one shared drive: new and changed files, everyone's current access, and nothing left of removed files. With
+    `readers_only` on the connection (S8), only access: as `sync_items.sync_container` does."""
     org_id, team = connection["org_id"], team_for(connection, drive_id)
+    readers_only = bool(connection.get("readers_only"))
     domain = (connection["config"] or {}).get("domain")
     groups = directory_groups(conn)  # read every sync: a member taken out of a group loses the file on the next one
     files = client.files(drive_id)
@@ -247,8 +249,10 @@ def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str) -> di
             continue
         key, version = f"gd-{f['id']}", f.get("md5Checksum") or f"{f.get('version')}:{f.get('modifiedTime')}"
         prev = existing.get(key)
+        if readers_only and not prev:  # S8: a readers refresh reads no body; a new file waits for the content sync
+            continue
         with conn.transaction():
-            if not prev or prev["content_hash"] != version:
+            if not readers_only and (not prev or prev["content_hash"] != version):
                 try:
                     title, sections = extract(name, client.content(f), f["name"])
                 except ExtractionError as e:

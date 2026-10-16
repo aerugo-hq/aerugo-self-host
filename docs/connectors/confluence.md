@@ -43,3 +43,5 @@ reads: the account sets what's indexed, and each page keeps Confluence's own rea
 - **Confirm the company site** only for your company's own Confluence, never a partner's or a vendor's.
 - **Moving from exports:** once a space is connected live, the pages an export brought into the same team are
   retired at the next sync, so none is indexed twice. Stop importing that space.
+- **Faster permission changes:** a restriction added, or a space's grant taken away, arrives within minutes (the
+  readers refresh), or at once with a signed webhook; see `permission-changes.md`.

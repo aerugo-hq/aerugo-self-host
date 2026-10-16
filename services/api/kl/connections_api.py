@@ -2,14 +2,16 @@
 what it can reach. Connecting a repo never widens access: mirrored source permissions decide
 who sees its content (slice 3), not the connection."""
 import re
+import secrets
 import uuid
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from . import config, confluence, dataplex, datahub, directory, gcp_secrets, gdrive, glue, jira, microsoft365, notion, purview, slack, unity
+from .hooks import HOOK_KINDS
 from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
@@ -651,12 +653,14 @@ def list_connections(ws: str, caller: Caller = Depends(authenticate)):
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         rows = conn.execute(
-            """SELECT c.name, c.kind, c.status, c.updated_at, c.last_synced_at, c.config->>'every_minutes' AS every_minutes
+            """SELECT c.name, c.kind, c.status, c.updated_at, c.last_synced_at, c.config->>'every_minutes' AS every_minutes,
+                      greatest(c.readers_refreshed_at, c.last_synced_at) AS readers_read_at, c.config ? 'webhook_ref' AS webhook
                FROM connections c JOIN workspaces w ON w.id = c.workspace_id WHERE w.slug = %s ORDER BY c.name""", (ws,)).fetchall()
         managers = managed_info(conn, "connection", [f"{ws}/{r['name']}" for r in rows])
-    # last_synced_at is also when its readers were last read: every sync re-reads them (ADR 0011).
-    return {"connections": [{**r, "updated_at": r["updated_at"].isoformat(),
-                             "last_synced_at": r["last_synced_at"].isoformat() if r["last_synced_at"] else None,
+    # readers_read_at is when its readers were last read: every sync re-reads them (ADR 0011), and so does S8's refresh.
+    stamp = lambda t: t.isoformat() if t else None
+    return {"connections": [{**r, "updated_at": r["updated_at"].isoformat(), "last_synced_at": stamp(r["last_synced_at"]),
+                             "readers_read_at": stamp(r["readers_read_at"]),
                              "every_minutes": int(r["every_minutes"]) if r["every_minutes"] else None,
                              "managed_by": managers.get(f"{ws}/{r['name']}")} for r in rows]}
 
@@ -669,7 +673,8 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = conn.execute(
-            """SELECT c.id, c.name, c.kind, c.status, c.last_error, c.config, c.credential_ref, c.last_synced_at FROM connections c
+            """SELECT c.id, c.name, c.kind, c.status, c.last_error, c.config, c.credential_ref, c.last_synced_at,
+                      greatest(c.readers_refreshed_at, c.last_synced_at) AS readers_read_at FROM connections c
                JOIN workspaces w ON w.id = c.workspace_id WHERE w.slug = %s AND c.name = %s""", (ws, name)).fetchone()
         if not c:
             raise HTTPException(404, "connection not found")
@@ -685,7 +690,51 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
             "enabled": c["status"] != "disabled", "managed_by": manager,
             "settings": settings_of(ws, c["config"] or {}, c["credential_ref"]),
             "last_synced_at": c["last_synced_at"].isoformat() if c["last_synced_at"] else None,
-            "containers": containers}
+            "readers_read_at": c["readers_read_at"].isoformat() if c["readers_read_at"] else None,
+            "webhook": bool((c["config"] or {}).get("webhook_ref")), "containers": containers}
+
+
+class WebhookIn(BaseModel):
+    signing_secret: str | None = Field(default=None, min_length=16, max_length=200, repr=False)  # Slack: its app's
+
+
+@router.post("/connections/{name}/webhook", status_code=201)
+def create_webhook(ws: str, name: str, body: WebhookIn, request: Request, caller: Caller = Depends(authenticate)):
+    """A webhook for a Jira, Confluence, or Slack connection (S8): the source tells Aerugo something changed, and the
+    connection's readers are read again at once rather than on the next refresh. For Jira and Confluence, Aerugo makes
+    the secret and shows it once, with the address to give the source's admin webhook; for Slack, give the app's
+    signing secret. Setting one again replaces the secret. Its admins only."""
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+        if c["kind"] not in HOOK_KINDS:
+            raise HTTPException(422, "only Jira, Confluence, and Slack sign their webhooks: other sources' permission changes "
+                                     "arrive with the readers refresh")
+        if (c["kind"] == "slack") != bool(body.signing_secret):
+            raise HTTPException(422, "Slack signs with its app's signing secret: give it; Jira and Confluence take the one Aerugo makes")
+        secret = body.signing_secret or secrets.token_urlsafe(32)
+        ref = vault.put(f"kl/connections/{c['id']}/webhook", {"secret": secret})
+        conn.execute("UPDATE connections SET config = config || jsonb_build_object('webhook_ref', %s::text), updated_at = now() "
+                     "WHERE id = %s", (ref, c["id"]))
+        audit(conn, org_id, caller.username, "connection.webhook.set", [ws], {"name": name, "kind": c["kind"]})
+    return {"url": f"{str(request.base_url).rstrip('/')}/v1/hooks/{c['kind']}/{c['id']}",
+            "secret": None if body.signing_secret else secret}
+
+
+@router.delete("/connections/{name}/webhook", status_code=204)
+def remove_webhook(ws: str, name: str, caller: Caller = Depends(authenticate)):
+    """Stop taking a connection's webhook: its secret is destroyed, and its readers come with the refresh's cadence."""
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+        ref = (c["config"] or {}).get("webhook_ref")
+        if not ref:
+            raise HTTPException(404, "this connection has no webhook")
+        conn.execute("UPDATE connections SET config = config - 'webhook_ref', updated_at = now() WHERE id = %s", (c["id"],))
+        audit(conn, org_id, caller.username, "connection.webhook.remove", [ws], {"name": name})
+    vault.destroy(ref)
 
 
 # What a connection was declared with, as Terraform reads it back. A credential reference is returned only when it's
@@ -975,6 +1024,7 @@ def remove_connection(ws: str, name: str, caller: Caller = Depends(authenticate)
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.retire', %s)", (org_id, Jsonb({
             "connection_id": str(c["id"]), "kind": c["kind"], "containers": containers,
             # the secret Aerugo stored for it is destroyed; a team's own secret, and GitHub's shared app, are not
-            "credential_ref": c["credential_ref"] if stored_secret(c["id"], c["credential_ref"]) else None})))
+            "credential_ref": c["credential_ref"] if stored_secret(c["id"], c["credential_ref"]) else None,
+            "webhook_ref": (c["config"] or {}).get("webhook_ref")})))
         audit(conn, org_id, caller.username, "connection.remove", [ws], {"name": name, "kind": c["kind"], "containers": len(containers)})
     return {"removed": name, "containers": len(containers)}

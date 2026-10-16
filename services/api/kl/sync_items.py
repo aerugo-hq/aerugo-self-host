@@ -33,8 +33,13 @@ def viewer_tuples(key: str, acl: list[str]) -> set:
 def sync_container(conn, connection: dict, container: str, source_kind: str, items: list[Item],
                    classification: str = "internal") -> dict:
     """A connection's documents are its own (migration 0040): container refs and keys are unique per site, not per org,
-    so another connection's same-named container or same key is never read, updated, or deleted here."""
+    so another connection's same-named container or same key is never read, updated, or deleted here.
+
+    With `readers_only` on the connection (S8's readers refresh), no body is read: an item already indexed gets its
+    current readers (whatever its version), one nobody may read now, or gone from the source, leaves, and a new item
+    waits for the next content sync."""
     org_id, team = connection["org_id"], team_for(connection, container)
+    readers_only = bool(connection.get("readers_only"))
     existing = {r["external_key"]: r for r in conn.execute(
         "SELECT id, external_key, content_hash FROM documents WHERE source_kind = %s AND container_ref = %s AND connection_id = %s",
         (source_kind, container, connection["id"]))}
@@ -43,8 +48,10 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
         if not item.acl:  # nobody may read it: it isn't indexed at all
             continue
         prev = existing.get(item.key)
+        if readers_only and not prev:
+            continue
         with conn.transaction():
-            if not prev or prev["content_hash"] != item.version:
+            if not readers_only and (not prev or prev["content_hash"] != item.version):
                 try:
                     title, sections = item.sections()
                 except Exception as e:  # one unreadable item never stops the rest

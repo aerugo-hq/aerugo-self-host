@@ -464,9 +464,24 @@ pause that lands while a job runs stays (`CONNECTION_READY_SQL`, `CONNECTION_FAI
 `keepWhenUnset` stops an unset computed attribute from replacing a connection on an unrelated change.
 `docs/connectors/data-catalogs.md`; the choices are in `docs/plans/decisions.md`. Not built: OpenMetadata, Dataplex
 glossary terms as their own entries, Glue lineage (it records none), and SageMaker's business glossary.
+S8 (faster permission changes): a readers refresh, `connection.refresh_readers` (`handle_connection_refresh_readers`,
+sharing `sync_containers` with the content sync), re-reads only readers between content syncs, every
+`KL_READERS_REFRESH_MINUTES` (5) for `READERS_KINDS` (Drive, Jira, Confluence, Slack, Microsoft 365, Notion;
+`READERS_SQL`): with `readers_only` on the connection, `sync_container` and `gdrive.sync_drive` read no body, give an
+indexed item its current readers whatever its version, drop what nobody may read, and add nothing (migration 0043:
+`connections.readers_refreshed_at`; lists and reads show `readers_read_at`). Signed webhooks (`kl/hooks.py`,
+`/v1/hooks/<kind>/<connection id>`) for Jira and Confluence (`X-Hub-Signature`, a secret Aerugo makes and shows once,
+deliveries by `X-Atlassian-Webhook-Identifier`) and Slack (v0 signatures with the app's signing secret, five minutes,
+`url_verification` answered only when signed, events by `event_id`): checked first, every failure the same 401,
+recorded once in `webhook_deliveries`, and only ever queuing their own connection's readers refresh.
+`POST`/`DELETE .../connections/{name}/webhook` (the secret under `kl/connections/<id>/webhook`, destroyed with the
+connection). Graph and Drive sign nothing, so they get no hook (`docs/plans/decisions.md`). The row's Webhook panel.
+Smoke: `a_revoked_jira_grant_leaves_on_a_signed_webhook_and_on_the_refresh` and
+`slack_hooks_are_signed_fresh_and_taken_once`. `docs/connectors/permission-changes.md`. Not built: Confluence and
+Jira's own event filters (any signed delivery refreshes), and Terraform for webhooks (a secret shown once).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1 and S2 to S7; next S8; then Q1 (its golden-set part) to Q8;
+done, and so are G1 and S2 to S8; next Q1 (its golden-set part) to Q8;
 E1 to E3; A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI

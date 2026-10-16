@@ -93,10 +93,10 @@ baseline is already in place (only its golden-set part is left), so each source 
 - [x] Metadata only, never data; each entry's readers mirrored from the catalog's access control, failing closed
 
 ### S8. Faster permission changes
-- [ ] Permission-only refreshes between content syncs: readers, without re-reading bodies
-- [ ] Webhooks where sources offer them: GitHub, Jira, Confluence, Slack, Microsoft Graph change notifications, Drive's
-      push notifications
-- [ ] A revoked share takes effect within minutes, and smoke proves it
+- [x] Permission-only refreshes between content syncs: readers, without re-reading bodies
+- [x] Webhooks where sources offer them: GitHub, Jira, Confluence, Slack, Microsoft Graph change notifications, Drive's
+      push notifications (signed ones: Graph and Drive sign nothing, so they ride the readers refresh)
+- [x] A revoked share takes effect within minutes, and smoke proves it
 
 ## 2. Quality: how good its answers are
 
