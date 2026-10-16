@@ -3700,6 +3700,21 @@ def team_rows_stay_in_their_team_and_the_change_feed_keeps_ninety_days():
 
 
 @check
+def the_claim_checker_never_passes_a_contradiction():
+    """Claims (H4): a claim that negates its source, or gives an amount or a count of days its source doesn't, is unsupported however many words it shares, and says why; the source's own statements stay supported"""
+    from .claims import check as check_claims
+    passage = "Refunds over $500 are approved by the finance lead. Records are kept for 90 days."
+    cases = [("Refunds over $500 are approved by the finance lead [1].", True), ("Records are kept for 90 days [1].", True),
+             ("Refunds over $500 are not approved by the finance lead [1].", False), ("Records are kept for 30 days [1].", False),
+             ("Refunds over $50 are approved by the finance lead [1].", False), ("Refunds are never approved by the finance lead [1].", False)]
+    for claim, supported in cases:
+        got = check_claims(claim, {1: passage})
+        assert got and got[0]["supported"] is supported, f"{claim!r} was judged the wrong way: {got}"
+        assert supported or got[0].get("reason"), f"a contradiction was unsupported without saying why: {got}"
+    print(f"      {len(cases)} claims judged right: the passage's own two supported, four contradictions not, each with its reason")
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga
