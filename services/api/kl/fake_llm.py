@@ -119,6 +119,23 @@ NOTION_VERSION = "2026-03-11"
 # access endpoint, holding the secrets smoke sets through POST /gcp/secrets as JSON objects.
 GCP_SECRETS: dict = {}
 GCP_TOKEN = "fake-gcp-workload-token"
+# Fake data catalogs (S7): one set of tables, which smoke sets through POST /catalog/setup, served in each catalog's own
+# shapes and behind each one's own sign-in: Dataplex with BigQuery's access and the Data Lineage API (the runner's GCP
+# token); Unity Catalog (OAuth machine-to-machine); Glue and Lake Formation (STS trading the runner's identity token
+# for a role, and every call SigV4-signed); Purview (an Entra app's certificate, for Purview's audience); and DataHub's
+# GraphQL (an access token). A table: {"name": "<db>.<table>", "description", "columns": [[name, type, description]],
+# "owner": email, "users": [emails who may read it], "groups": [group emails, granting through a directory only],
+# "domain": bool (the company's domain may read it), "upstream": ["<db>.<table>"]}; "people": {email: Entra object id},
+# for Purview, which names people by id. Pages hold one table, so every client's paging is exercised.
+CATALOG: dict = {"tables": [], "people": {}}
+CATALOG_PROJECT = "acme-data"
+DATABRICKS = {"client_id": "0b1e6a4e-6d0c-4c7e-9a43-5f2d8c1e7a10", "client_secret": "dbx-smoke-oauth-secret", "token": "dbx-smoke-token"}
+AWS = {"role": "arn:aws:iam::123456789012:role/aerugo-catalog", "key_id": "ASIAFAKESMOKE", "secret": "fake-aws-secret-key",
+       "session": "fake-aws-session-token", "saml": "arn:aws:iam::123456789012:saml-provider/acme"}
+GCP_IDENTITY = "fake-gcp-identity-token-for-sts.amazonaws.com"
+PURVIEW = os.environ.get("KL_FAKE_PURVIEW", "http://fake-llm:8080/purview")
+PURVIEW_TOKEN = "fake-purview-token"
+DATAHUB_TOKEN = "datahub-smoke-access-token-0123456789"
 
 
 def new_service_account(email: str) -> dict:
@@ -171,13 +188,15 @@ def new_entra_app(tenant: str) -> dict:
     return {"tenant_id": tenant.lower(), "client_id": client, "certificate": bundle}
 
 
-def entra_token(tenant: str, form: dict) -> tuple[int, dict]:
-    """Entra's token endpoint, the client credentials grant with a certificate, checked as Entra checks it."""
+def entra_token(tenant: str, form: dict, login: str = MICROSOFT, scope: str = "https://graph.microsoft.com/.default",
+                token: str = GRAPH_TOKEN) -> tuple[int, dict]:
+    """Entra's token endpoint, the client credentials grant with a certificate, checked as Entra checks it: for Graph,
+    or (S7) for Purview's own audience at its fake's address."""
     import jwt as pyjwt
     field = lambda k: form.get(k, [""])[0]
     if field("grant_type") != "client_credentials" or field("client_assertion_type") != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer":
         return 400, {"error": "unsupported_grant_type"}
-    if field("scope") != "https://graph.microsoft.com/.default":
+    if field("scope") != scope:
         return 400, {"error": "invalid_scope"}
     app = GRAPH["apps"].get(field("client_id"))
     assertion = field("client_assertion")
@@ -185,7 +204,7 @@ def entra_token(tenant: str, form: dict) -> tuple[int, dict]:
         header = pyjwt.get_unverified_header(assertion)
         if not app or app["tenant"] != tenant or header.get("alg") != "PS256" or header.get("x5t#S256") != app["thumbprint"]:
             raise ValueError("unknown app, tenant, algorithm, or certificate")
-        claims = pyjwt.decode(assertion, app["key"], algorithms=["PS256"], audience=f"{MICROSOFT}/{tenant}/oauth2/v2.0/token",
+        claims = pyjwt.decode(assertion, app["key"], algorithms=["PS256"], audience=f"{login}/{tenant}/oauth2/v2.0/token",
                               options={"require": ["exp", "nbf", "iat", "jti", "iss", "sub"]})
         if claims["iss"] != field("client_id") or claims["sub"] != field("client_id") or claims["exp"] - claims["nbf"] > 600:
             raise ValueError("the assertion isn't the app's own, or lives too long")
@@ -193,7 +212,7 @@ def entra_token(tenant: str, form: dict) -> tuple[int, dict]:
         return 401, {"error": "invalid_client", "error_description": str(e)[:200]}
     GRAPH_REQUESTS.append({"tenant": tenant, "client_id": field("client_id"), "aud": claims["aud"], "alg": header["alg"],
                            "x5t#S256": header["x5t#S256"], "scope": field("scope")})
-    return 200, {"access_token": f"{GRAPH_TOKEN}.{field('client_id')}", "token_type": "Bearer", "expires_in": 3599}  # the app's own
+    return 200, {"access_token": f"{token}.{field('client_id')}", "token_type": "Bearer", "expires_in": 3599}  # the app's own
 
 
 def graph_transitive(group: str, seen: frozenset = frozenset()) -> list[dict]:
@@ -322,6 +341,13 @@ class Handler(BaseHTTPRequestHandler):
             search = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}.get("search", "")
             gone = 'status eq "DEPROVISIONED"' in search
             return self._json(200, [u for u in OKTA["users"] if (u.get("status") == "DEPROVISIONED") == gone])
+        if urlparse(self.path).path == "/gcp-metadata/computeMetadata/v1/instance/service-accounts/default/identity":
+            if self.headers.get("Metadata-Flavor") != "Google":
+                return self._json(403, {"error": "Missing Metadata-Flavor: Google"})
+            audience = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}.get("audience")
+            return self._xml(200, GCP_IDENTITY) if audience == "sts.amazonaws.com" else self._json(400, {"error": "audience"})
+        if self.path.startswith(("/gcp-catalog/", "/databricks/", "/purview/")):
+            return self._catalog("GET", urlparse(self.path), b"")
         if self.path == "/gcp-metadata/computeMetadata/v1/instance/service-accounts/default/token":
             if self.headers.get("Metadata-Flavor") != "Google":  # as the real metadata server insists
                 return self._json(403, {"error": "Missing Metadata-Flavor: Google"})
@@ -337,6 +363,206 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"name": self.path[len("/gcp/v1/"):-len(":access")],
                                     "payload": {"data": base64.b64encode(json.dumps(value).encode()).decode()}})
         self._json(404, {})
+
+    def _catalog(self, method: str, url, raw: bytes):
+        """Every fake catalog's API (S7), each behind its own sign-in, all serving CATALOG's tables."""
+        import base64, uuid as uuidlib
+        path, q, tables = url.path, {k: v[0] for k, v in parse_qs(url.query).items()}, CATALOG["tables"]
+        parts = lambda t: t["name"].split(".", 1)
+        page = lambda items, start: (items[start:start + 1], str(start + 1) if start + 1 < len(items) else None)
+        body = json.loads(raw or b"{}") if raw[:1] in (b"{", b"") else {}
+        if path.startswith("/gcp-catalog/"):  # Dataplex, BigQuery's access, and Data Lineage, as the runner's own identity
+            if self.headers.get("Authorization") != f"Bearer {GCP_TOKEN}":
+                return self._json(401, {"error": {"code": 401, "status": "UNAUTHENTICATED"}})
+            entry = lambda t: f"projects/{CATALOG_PROJECT}/locations/us/entryGroups/@bigquery/entries/{t['name'].replace('.', '-')}"
+            fqn = lambda name: f"bigquery:{CATALOG_PROJECT}.{name}"
+            if method == "POST" and path == f"/gcp-catalog/dataplex/v1/projects/{CATALOG_PROJECT}/locations/global:searchEntries":
+                if q.get("query") != f"projectid={CATALOG_PROJECT}":
+                    return self._json(400, {"error": {"status": "INVALID_ARGUMENT"}})
+                found, following = page(tables, int(q.get("pageToken") or 0))
+                return self._json(200, {"results": [{"dataplexEntry": {"name": entry(t)}} for t in found],
+                                        **({"nextPageToken": following} if following else {})})
+            if method == "POST" and path.startswith(f"/gcp-catalog/datalineage/v1/projects/{CATALOG_PROJECT}/locations/") and path.endswith(":searchLinks"):
+                target = (body.get("target") or {}).get("fullyQualifiedName")
+                return self._json(200, {"links": [{"source": {"fullyQualifiedName": fqn(up)}, "target": {"fullyQualifiedName": target}}
+                                                  for t in tables if fqn(t["name"]) == target for up in t.get("upstream", [])]})
+            for t in tables:
+                ds, tb = parts(t)
+                if method == "GET" and path == f"/gcp-catalog/dataplex/v1/{entry(t)}" and q.get("view") == "ALL":
+                    return self._json(200, {
+                        "name": entry(t), "fullyQualifiedName": fqn(t["name"]), "updateTime": t.get("version", "1"),
+                        "entryType": "projects/655216118709/locations/global/entryTypes/bigquery-table",
+                        "entrySource": {"system": "BigQuery", "description": t.get("description", ""), "labels": {"tier": "gold"},
+                                        "resource": f"//bigquery.googleapis.com/projects/{CATALOG_PROJECT}/datasets/{ds}/tables/{tb}"},
+                        "aspects": {"655216118709.global.schema": {"data": {"fields": [{"name": n, "dataType": ty, "description": d}
+                                                                                       for n, ty, d in t.get("columns", [])]}},
+                                    "655216118709.global.contacts": {"data": {"identities": [{"role": "Owner", "id": t["owner"]}] if t.get("owner") else []}}}})
+                if method == "GET" and path == f"/gcp-catalog/bigquery/bigquery/v2/projects/{CATALOG_PROJECT}/datasets/{ds}":
+                    access = [{"role": "READER", "specialGroup": "projectReaders"}, {"role": "READER", "iamMember": "allUsers"}]
+                    access += [{"role": "READER", "domain": "acme.test"} for o in tables if parts(o)[0] == ds and o.get("domain")]
+                    return self._json(200, {"access": access})
+                if method == "POST" and path == f"/gcp-catalog/bigquery/bigquery/v2/projects/{CATALOG_PROJECT}/datasets/{ds}/tables/{tb}:getIamPolicy":
+                    return self._json(200, {"bindings": [
+                        {"role": "roles/bigquery.dataViewer", "members": [f"user:{u}" for u in t.get("users", [])] + [f"group:{g}" for g in t.get("groups", [])]
+                         + ["allAuthenticatedUsers", "serviceAccount:etl@acme-data.iam.gserviceaccount.com"]},
+                        {"role": "roles/bigquery.metadataViewer", "members": ["user:mallory@acme.test"]}]})
+            return self._json(404, {"error": {"code": 404, "status": "NOT_FOUND"}})
+        if path.startswith("/databricks/"):  # Unity Catalog, as a service principal
+            if path == "/databricks/oidc/v1/token" and method == "POST":
+                form = parse_qs(raw.decode())
+                basic = base64.b64encode(f"{DATABRICKS['client_id']}:{DATABRICKS['client_secret']}".encode()).decode()
+                if self.headers.get("Authorization") != f"Basic {basic}" or form.get("grant_type") != ["client_credentials"]:
+                    return self._json(401, {"error": "invalid_client"})
+                return self._json(200, {"access_token": DATABRICKS["token"], "token_type": "Bearer", "expires_in": 3600})
+            if self.headers.get("Authorization") != f"Bearer {DATABRICKS['token']}":
+                return self._json(401, {"error_code": "UNAUTHENTICATED"})
+            rest = path[len("/databricks/api/"):]
+            if rest == "2.1/unity-catalog/catalogs":
+                return self._json(200, {"catalogs": [{"name": "main"}, {"name": "bad name!"}]})
+            if rest == "2.1/unity-catalog/schemas":  # every table is in main; any other catalog is empty
+                found, following = page(sorted({parts(t)[0] for t in tables}) if q.get("catalog_name") == "main" else [], int(q.get("page_token") or 0))
+                return self._json(200, {"schemas": [{"name": s} for s in found], **({"next_page_token": following} if following else {})})
+            if rest == "2.1/unity-catalog/tables" and q.get("catalog_name") == "main":
+                mine = [t for t in tables if parts(t)[0] == q.get("schema_name")]
+                found, following = page(mine, int(q.get("page_token") or 0))
+                return self._json(200, {"tables": [{"full_name": f"main.{t['name']}", "table_type": "MANAGED", "comment": t.get("description", ""),
+                                                    "owner": t.get("owner", ""), "updated_at": int(t.get("version", 1)),
+                                                    "columns": [{"name": n, "type_text": ty, "comment": d} for n, ty, d in t.get("columns", [])]}
+                                                   for t in found], **({"next_page_token": following} if following else {})})
+            for t in tables:
+                if rest == f"2.1/unity-catalog/effective-permissions/table/main.{t['name']}":
+                    return self._json(200, {"privilege_assignments": [
+                        {"principal": u, "privileges": [{"privilege": "SELECT", "inherited_from_type": "SCHEMA"}]} for u in t.get("users", [])]
+                        + [{"principal": g.split("@")[0], "privileges": [{"privilege": "SELECT"}]} for g in t.get("groups", [])]
+                        + [{"principal": "mallory@acme.test", "privileges": [{"privilege": "BROWSE"}]}]})
+            if rest == "2.0/lineage-tracking/table-lineage":
+                return self._json(200, {"upstreams": [{"tableInfo": {"catalog_name": "main", "schema_name": up.split(".")[0], "name": up.split(".")[1]}}
+                                                      for t in tables if f"main.{t['name']}" == q.get("table_name") for up in t.get("upstream", [])]})
+            return self._json(404, {"error_code": "NOT_FOUND"})
+        if path.startswith("/aws/"):  # STS, Glue, and Lake Formation
+            if path.rstrip("/") == "/aws/sts":
+                form = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+                if form.get("Action") != "AssumeRoleWithWebIdentity" or form.get("WebIdentityToken") != GCP_IDENTITY or form.get("RoleArn") != AWS["role"]:
+                    return self._xml(403, "<ErrorResponse><Error><Code>AccessDenied</Code></Error></ErrorResponse>")
+                return self._xml(200, '<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">'
+                                      "<AssumeRoleWithWebIdentityResult><Credentials>"
+                                      f"<AccessKeyId>{AWS['key_id']}</AccessKeyId><SecretAccessKey>{AWS['secret']}</SecretAccessKey>"
+                                      f"<SessionToken>{AWS['session']}</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>"
+                                      "</Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>")
+            service = path.split("/")[2]
+            if not self._signed_by_role(service, path, raw):
+                return self._json(403, {"__type": "InvalidSignatureException"})
+            if service == "glue":
+                target = self.headers.get("X-Amz-Target")
+                if target == "AWSGlue.GetDatabases":
+                    found, following = page(sorted({parts(t)[0] for t in tables}), int(body.get("NextToken") or 0))
+                    return self._json(200, {"DatabaseList": [{"Name": d} for d in found], **({"NextToken": following} if following else {})})
+                if target == "AWSGlue.GetTables":
+                    mine = [t for t in tables if parts(t)[0] == body.get("DatabaseName")]
+                    found, following = page(mine, int(body.get("NextToken") or 0))
+                    return self._json(200, {"TableList": [{"Name": parts(t)[1], "DatabaseName": parts(t)[0], "Description": t.get("description", ""),
+                                                           "Owner": t.get("owner", ""), "TableType": "EXTERNAL_TABLE", "UpdateTime": float(t.get("version", 1)),
+                                                           "Parameters": {"classification": "parquet"},
+                                                           "StorageDescriptor": {"Location": f"s3://acme-lake/{t['name']}/",
+                                                                                 "Columns": [{"Name": n, "Type": ty, "Comment": d} for n, ty, d in t.get("columns", [])]}}
+                                                          for t in found], **({"NextToken": following} if following else {})})
+                return self._json(400, {"__type": "UnknownOperationException"})
+            if service == "lakeformation" and path == "/aws/lakeformation/ListPermissions":
+                table = (body.get("Resource") or {}).get("Table") or {}
+                spec = next((t for t in tables if t["name"] == f"{table.get('DatabaseName')}.{table.get('Name')}"), None)
+                if spec is None or body.get("IncludeRelated") != "TRUE":
+                    return self._json(400, {"__type": "InvalidInputException"})
+                res = {"Table": {"DatabaseName": table["DatabaseName"], "Name": table["Name"]}}
+                grants = [{"Principal": {"DataLakePrincipalIdentifier": f"{AWS['saml']}:user/{u}"}, "Permissions": ["SELECT"], "Resource": res}
+                          for u in spec.get("users", [])]
+                grants += [{"Principal": {"DataLakePrincipalIdentifier": f"{AWS['saml']}:group/{g}"}, "Permissions": ["SELECT"], "Resource": res}
+                           for g in spec.get("groups", [])]
+                grants += [{"Principal": {"DataLakePrincipalIdentifier": "IAMAllowedPrincipals"}, "Permissions": ["ALL"], "Resource": res},
+                           {"Principal": {"DataLakePrincipalIdentifier": f"{AWS['saml']}:user/mallory@acme.test"}, "Permissions": ["ALL"],
+                            "Resource": {"Database": {"Name": table["DatabaseName"]}}},
+                           {"Principal": {"DataLakePrincipalIdentifier": f"{AWS['saml']}:user/trent@acme.test"}, "Permissions": ["DESCRIBE"], "Resource": res}]
+                return self._json(200, {"PrincipalResourcePermissions": grants})
+            return self._json(404, {})
+        if path.startswith("/purview/"):  # Purview's Data Map, as an Entra app with its certificate
+            client = (self.headers.get("Authorization") or "").removeprefix(f"Bearer {PURVIEW_TOKEN}.")
+            if client not in GRAPH["apps"]:
+                return self._json(401, {"error": {"code": "Unauthorized"}})
+            guid = lambda name: str(uuidlib.uuid5(uuidlib.NAMESPACE_URL, f"purview/{name}"))
+            qualified = lambda name: f"mssql://acme.database.windows.net/{name.replace('.', '/dbo/')}"
+            oid = lambda email: CATALOG["people"].get(email)
+            if path == "/purview/policystore/metadataPolicies" and q.get("api-version") == "2021-07-01":
+                values = []
+                for c in sorted({parts(t)[0] for t in tables}):
+                    readers = sorted({oid(u) for t in tables if parts(t)[0] == c for u in t.get("users", []) if oid(u)})
+                    admins = sorted({oid(t["owner"]) for t in tables if parts(t)[0] == c and oid(t.get("owner", ""))})
+                    rule = lambda role, ids: {"id": f"purviewmetadatarole_builtin_{role}:{c}", "dnfCondition": [[
+                        {"attributeName": "principal.microsoft.id", "attributeValueIncludedIn": ids},
+                        {"attributeName": "derived.purview.role", "attributeValueIncludedIn": [f"purviewmetadatarole_builtin_{role}"]}]]}
+                    values.append({"name": f"policy_{c}", "properties": {"collection": {"referenceName": c, "type": "CollectionReference"},
+                                                                         "attributeRules": [rule("data-reader", readers), rule("collection-administrator", admins)]}})
+                return self._json(200, {"values": values})
+            if path == "/purview/datamap/api/search/query" and method == "POST":
+                mine = [t for t in tables if parts(t)[0] == (body.get("filter") or {}).get("collectionId")]
+                found, following = page(mine, int(body.get("continuationToken") or 0))
+                return self._json(200, {"value": [{"id": guid(t["name"]), "qualifiedName": qualified(t["name"]), "entityType": "azure_sql_table"} for t in found],
+                                        **({"continuationToken": following} if following else {})})
+            for t in tables:
+                if path == f"/purview/datamap/api/atlas/v2/entity/guid/{guid(t['name'])}":
+                    cols = {guid(f"{t['name']}#{n}"): {"typeName": "azure_sql_column", "attributes": {"name": n, "data_type": ty, "description": d}}
+                            for n, ty, d in t.get("columns", [])}
+                    return self._json(200, {"entity": {"guid": guid(t["name"]), "typeName": "azure_sql_table", "updateTime": int(t.get("version", 1)),
+                                                       "attributes": {"qualifiedName": qualified(t["name"]), "name": parts(t)[1], "userDescription": t.get("description", "")},
+                                                       "relationshipAttributes": {"columns": [{"guid": g} for g in cols]},
+                                                       "contacts": {"Owner": [{"id": oid(t["owner"])}] if oid(t.get("owner", "")) else []}},
+                                            "referredEntities": cols})
+                if path == f"/purview/datamap/api/atlas/v2/lineage/{guid(t['name'])}" and q.get("direction") == "INPUT":
+                    process = guid(f"{t['name']}#process")
+                    nodes = {guid(t["name"]): {"typeName": "azure_sql_table", "attributes": {"qualifiedName": qualified(t["name"])}},
+                             process: {"typeName": "azure_data_factory_process", "attributes": {"qualifiedName": f"adf://copy/{t['name']}"}}}
+                    nodes.update({guid(up): {"typeName": "azure_sql_table", "attributes": {"qualifiedName": qualified(up)}} for up in t.get("upstream", [])})
+                    return self._json(200, {"guidEntityMap": nodes})
+            return self._json(404, {"error": {"code": "NotFound"}})
+        if path == "/datahub/api/graphql" and method == "POST":  # DataHub's GraphQL, with an access token
+            if self.headers.get("Authorization") != f"Bearer {DATAHUB_TOKEN}":
+                return self._json(401, {"message": "Unauthorized"})
+            if "scrollAcrossEntities" not in str(body.get("query")):
+                return self._json(200, {"errors": [{"message": "unknown query"}]})
+            given = (body.get("variables") or {}).get("input") or {}
+            platform = ((given.get("orFilters") or [{"and": [{"values": ["urn:li:dataPlatform:snowflake"]}]}])[0]["and"][0]["values"][0])
+            urn = lambda name: f"urn:li:dataset:(urn:li:dataPlatform:snowflake,{name},PROD)"
+            mine = tables if platform == "urn:li:dataPlatform:snowflake" else []
+            found, following = page(mine, int(given.get("scrollId") or 0))
+            return self._json(200, {"data": {"scrollAcrossEntities": {"nextScrollId": following, "searchResults": [{"entity": {
+                "urn": urn(t["name"]), "properties": {"description": t.get("description", "")}, "editableProperties": None,
+                "schemaMetadata": {"fields": [{"fieldPath": n, "nativeDataType": ty, "description": d} for n, ty, d in t.get("columns", [])]},
+                "ownership": {"owners": [{"owner": {"properties": {"email": u}}} for u in t.get("users", [])]
+                              + [{"owner": {"name": g}} for g in t.get("groups", [])]},
+                "tags": {"tags": [{"tag": {"properties": {"name": "gold"}}}]}, "glossaryTerms": {"terms": [{"term": {"properties": {"name": "Order"}}}]},
+                "upstream": {"relationships": [{"entity": {"urn": urn(up)}} for up in t.get("upstream", [])]}}} for t in found]}}})
+        return self._json(404, {})
+
+    def _signed_by_role(self, service: str, path: str, raw: bytes) -> bool:
+        """Whether an AWS call is SigV4-signed with the role's credentials, over exactly what was sent (S7)."""
+        import datetime
+        from .glue import Credentials, sign
+        auth = self.headers.get("Authorization") or ""
+        m = re.fullmatch(r"AWS4-HMAC-SHA256 Credential=([A-Z0-9]+)/(\d{8})/([a-z0-9-]+)/([a-z]+)/aws4_request, SignedHeaders=([a-z0-9;-]+), Signature=[0-9a-f]{64}", auth)
+        if not m or m[1] != AWS["key_id"] or m[4] != service or self.headers.get("X-Amz-Security-Token") != AWS["session"]:
+            return False
+        names = m[5].split(";")
+        given = {k: self.headers.get(k) or "" for k in names if k not in ("host", "x-amz-date", "x-amz-security-token")}
+        when = datetime.datetime.strptime(self.headers.get("X-Amz-Date") or "", "%Y%m%dT%H%M%SZ")
+        expected = sign("POST", f"http://{self.headers.get('Host')}{path}", m[3], service, raw, given,
+                        Credentials(AWS["key_id"], AWS["secret"], AWS["session"]), when)
+        return expected["authorization"] == auth
+
+    def _xml(self, status: int, body: str) -> None:
+        data = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/xml")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _drive(self, url):
         if self.headers.get("Authorization") != f"Bearer {DRIVE_TOKEN}":
@@ -669,6 +895,15 @@ class Handler(BaseHTTPRequestHandler):
             FOLDERS.clear()
             FOLDERS.update(self._body()["folders"])
             return self._json(200, {})
+        if path == "/catalog/setup":  # smoke sets the fake catalogs' tables, and Entra's object ids for Purview
+            body = self._body()
+            CATALOG.update({"tables": body.get("tables", []), "people": body.get("people", {})})
+            return self._json(200, {"project": CATALOG_PROJECT, "databricks": DATABRICKS, "role": AWS["role"], "datahub_token": DATAHUB_TOKEN})
+        if path.startswith("/purview/") and path.endswith("/oauth2/v2.0/token"):  # Entra's token endpoint, for Purview's audience
+            form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+            return self._json(*entra_token(path.split("/")[2].lower(), form, PURVIEW, "https://purview.azure.net/.default", PURVIEW_TOKEN))
+        if path.startswith(("/gcp-catalog/", "/databricks/", "/aws/", "/purview/", "/datahub/")):
+            return self._catalog("POST", urlparse(self.path), self.rfile.read(int(self.headers.get("Content-Length", 0))))
         if path == "/gcp/secrets":  # smoke sets the fake Secret Manager's secrets, each a JSON object
             GCP_SECRETS.update(self._body()["secrets"])
             return self._json(200, {})

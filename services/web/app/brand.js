@@ -10,13 +10,15 @@ import { Icon } from "./icons.js";
 export const BRANDS = {
   github: "github", gdrive: "googledrive", google_drive: "googledrive", google: "googledrive", confluence: "confluence",
   jira: "jira", notion: "notion", slack: "slack", okta: "okta", directory: "okta", microsoft: "microsoftsharepoint",
-  lineage: "apacheairflow",
+  lineage: "apacheairflow", catalog: "googlecloud", dataplex: "googlecloud", unity: "databricks", glue: "awsglue",
+  purview: "microsoftpurview", datahub: "datahub",
 };
 const GLYPHS = { github: "code", pipelines: "refresh", lineage: "map", imports: "draft" }; // where there's no logo
 const NAMES = {
   github: "GitHub", gdrive: "Google Drive", google_drive: "Google Drive", google: "Google Drive", confluence: "Confluence",
   jira: "Jira", notion: "Notion", slack: "Slack", okta: "Okta", directory: "Okta", microsoft: "Microsoft 365",
-  okf: "Knowledge page", upload: "Upload", pipeline: "Pipeline", import: "Import",
+  okf: "Knowledge page", upload: "Upload", pipeline: "Pipeline", import: "Import", catalog: "Data catalog", dataplex: "Dataplex",
+  unity: "Unity Catalog", glue: "AWS Glue", purview: "Microsoft Purview", datahub: "DataHub",
 };
 
 // A source's name as people know it, the same wherever it shows.

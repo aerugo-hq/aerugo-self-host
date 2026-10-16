@@ -235,18 +235,26 @@ class GoogleDirectoryClient:
 class GraphClient:
     """Microsoft Graph, read only, as an app registration signing in with a certificate (a client assertion, never a
     client secret). Pages follow @odata.nextLink only on Graph itself; one anywhere else ends the sync, as a listing
-    cut short. Entra's directory (S3) and Microsoft 365 (S5) each build on it."""
+    cut short. Entra's directory (S3) and Microsoft 365 (S5) each build on it; Purview (S7) too, for its own audience."""
+    scope = GRAPH_SCOPE
+
+    def allowed(self, api_base: str) -> bool:
+        return allowed_graph(api_base)
+
+    def microsofts(self) -> bool:
+        """Whether this is Microsoft's own service (its tokens from login.microsoftonline.com), not the dev fake."""
+        return self.base == GRAPH
 
     def __init__(self, api_base: str, tenant_id: str, client_id: str, certificate: dict):
-        if not allowed_graph(api_base):
-            raise ValueError("that Microsoft Graph address isn't allowed here")
+        if not self.allowed(api_base):
+            raise ValueError("that Microsoft address isn't allowed here")
         if not GUID.fullmatch(tenant_id) or not GUID.fullmatch(client_id):
             raise ValueError("a tenant and a client are named by their ids")
         self.base, self.tenant, self.client, self._cert = api_base.rstrip("/"), tenant_id.lower(), client_id.lower(), certificate
         self._token: str | None = None
 
     def _token_url(self) -> str:
-        login = "https://login.microsoftonline.com" if self.base == GRAPH else self.base  # Microsoft's, or the dev fake's
+        login = "https://login.microsoftonline.com" if self.microsofts() else self.base  # Microsoft's, or the dev fake's
         return f"{login}/{self.tenant}/oauth2/v2.0/token"
 
     def _access_token(self) -> str:
@@ -258,16 +266,20 @@ class GraphClient:
                                     "nbf": now, "iat": now, "exp": now + 300}, self._cert["private_key"], algorithm="PS256",
                                    headers={"typ": "JWT", "x5t#S256": self._cert["thumbprint"]})
             r = httpx.post(self._token_url(), timeout=15, data={
-                "grant_type": "client_credentials", "client_id": self.client, "scope": GRAPH_SCOPE,
+                "grant_type": "client_credentials", "client_id": self.client, "scope": self.scope,
                 "client_assertion_type": ASSERTION_TYPE, "client_assertion": assertion})
             r.raise_for_status()
             self._token = r.json()["access_token"]
         return self._token
 
     def _get(self, url: str, params: dict | None, headers: dict | None = None) -> dict:
+        return self._call("GET", url, params, headers)
+
+    def _call(self, method: str, url: str, params: dict | None, headers: dict | None = None, body: dict | None = None) -> dict:
         attempt = 0
         while True:
-            r = httpx.get(url, params=params, timeout=30, headers={"Authorization": f"Bearer {self._access_token()}", **(headers or {})})
+            r = httpx.request(method, url, params=params, json=body, timeout=30,
+                              headers={"Authorization": f"Bearer {self._access_token()}", **(headers or {})})
             if attempt == RETRIES or r.status_code not in (429, 503, 504):  # Graph's throttling, and its busy answers
                 r.raise_for_status()
                 return r.json()
@@ -321,7 +333,8 @@ class EntraClient(GraphClient):
                 if not deleted and u.get("accountEnabled") is None:
                     raise ListingCutShort("Graph didn't say whether accounts are enabled: grant User.Read.All")
                 active = (not deleted and u["accountEnabled"] is True) or found.get(email, {}).get("active", False)
-                found[email] = {"email": email, "name": str(u.get("displayName") or "")[:200], "active": active}
+                found[email] = {"email": email, "name": str(u.get("displayName") or "")[:200], "active": active,
+                                "external_id": str(u.get("id") or "").lower()[:200] or None}
         return list(found.values())
 
     def groups(self, active: set[str]) -> tuple[dict[str, list[str]], dict[str, str], list[str]]:
@@ -409,8 +422,8 @@ def sync_directory(conn, connection: dict, client) -> dict:
         gone = [{"email": e, "name": n, "active": False} for e, n in sorted(held.items()) if e not in listed]  # listed before, not now: left
         conn.execute("DELETE FROM directory_people WHERE connection_id = %s", (cid,))
         conn.cursor().executemany(
-            "INSERT INTO directory_people (org_id, connection_id, email, display_name, active) VALUES (%s, %s, %s, %s, %s)",
-            [(org_id, cid, p["email"], p["name"], p["active"]) for p in people + gone])
+            "INSERT INTO directory_people (org_id, connection_id, email, display_name, active, external_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            [(org_id, cid, p["email"], p["name"], p["active"], p.get("external_id")) for p in people + gone])
         if client.feeds:
             rows = {(g, m) for g, members in groups.items() for m in members}
             before = {(r["group_email"], r["member_email"]) for r in conn.execute(

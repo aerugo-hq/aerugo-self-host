@@ -361,6 +361,7 @@ export const CONNECTORS = [
   { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members; a thread is one document.", ready: true, action: "Connect" },
   { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, one by one, with each file's own sharing.", ready: true, action: "Connect" },
   { id: "notion", name: "Notion", what: "Pages and databases shared with an internal integration, readable by this team's members.", ready: true, action: "Connect" },
+  { id: "catalog", name: "Data catalog", what: "Dataplex, Unity Catalog, Glue, Purview, or DataHub: tables with their columns, owners, and lineage, readable by whom the catalog lets read each one.", ready: true, action: "Connect" },
   { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta, Google Workspace, or Microsoft Entra): a leaver's matched access goes at once. Google's and Entra's groups also reach the files shared with them.", ready: true, action: "Connect" },
 ];
 const EVERY = [[15, "Every 15 minutes"], [60, "Every hour"], [360, "Every 6 hours"], [1440, "Every day"]];
@@ -370,6 +371,16 @@ const blankConfluence = { name: "confluence", api_base: "", email: "", api_token
 const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
 const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
 const blankNotion = { name: "notion", token: "", every_minutes: 60, credential_ref: "" };
+const blankCatalog = { name: "catalog", provider: "unity", api_base: "", projects: "", domain: "", region: "", role_arn: "", tenant_id: "", client_id: "",
+                       client_secret: "", certificate: "", token: "", collections: "", platforms: "", every_minutes: 1440, credential_ref: "" };
+// What each catalog needs, as its form says it: read as the runner itself (no secret), and where its readers come from.
+const CATALOG_KINDS = {
+  dataplex: { label: "Dataplex", runner: true, lede: "Read as the runner's own Google identity: grant it Dataplex Catalog Viewer, BigQuery Metadata Viewer, and Data Lineage Viewer on each project. A BigQuery table is readable by the people and Google groups its dataset and IAM policy name." },
+  unity: { label: "Unity Catalog", lede: "Create a Databricks service principal with an OAuth secret, and grant it BROWSE (or USE and SELECT metadata) on the catalogs to index. A table is readable by the people its effective permissions let SELECT it; groups reach no one." },
+  glue: { label: "AWS Glue", runner: true, lede: "Create an IAM role the runner may assume with its own identity token (no AWS key), allowed glue:GetDatabases, glue:GetTables, and lakeformation:ListPermissions. A table is readable by the people Lake Formation grants SELECT through your SAML provider." },
+  purview: { label: "Microsoft Purview", lede: "Register an app in Entra with a certificate, and make it a Data Reader on the collections to index. An asset is readable by the people and groups its collection names as data readers, once an org admin connects Entra as a directory." },
+  datahub: { label: "DataHub", lede: "Create a DataHub user for Aerugo and an access token for it. DataHub's view policies can't be read with a token, so a dataset is readable only by the people DataHub names as its owners." },
+};
 const blankM365 = { name: "microsoft", tenant_id: "", client_id: "", certificate: "", sites: "", every_minutes: 60, credential_ref: "" };
 const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "" };
 const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", tenant_id: "", client_id: "",
@@ -400,6 +411,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [sl, setSl] = useState(blankSlack); // the Slack form (S4)
   const [ms, setMs] = useState(blankM365); // the Microsoft 365 form (S5)
   const [nt, setNt] = useState(blankNotion); // the Notion form (S6)
+  const [ct, setCt] = useState(blankCatalog); // the data catalog form (S7)
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [ws]);
   const say = (name, tone, text) => setNote((n) => ({ ...n, [name]: [tone, text] }));
@@ -489,6 +501,31 @@ function Connections({ ws, teams, orgAdmin }) {
       setChosen(null);
       setGallery(false);
       setNt(blankNotion);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function connectCatalog(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const p = ct.provider, byRef = CATALOG_KINDS[p].runner ? "" : ct.credential_ref.trim();
+    const only = (provider, value) => (p === provider ? value : null);
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/catalog`, { method: "POST", body: {
+        name: ct.name.trim(), provider: p, api_base: ct.api_base.trim().replace(/\/+$/, "") || null,
+        projects: only("dataplex", list(ct.projects)), domain: only("dataplex", ct.domain.trim().toLowerCase() || null),
+        region: only("glue", ct.region.trim()), role_arn: only("glue", ct.role_arn.trim()),
+        tenant_id: only("purview", ct.tenant_id.trim()), client_id: p === "unity" || p === "purview" ? ct.client_id.trim() : null,
+        collections: only("purview", list(ct.collections)), platforms: only("datahub", list(ct.platforms)),
+        client_secret: byRef ? null : only("unity", ct.client_secret), certificate: byRef ? null : only("purview", ct.certificate.trim()),
+        token: byRef ? null : only("datahub", ct.token.trim()), credential_ref: byRef || null, every_minutes: Number(ct.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setCt(blankCatalog);
       load();
     } catch (e) {
       setError(e.message);
@@ -663,6 +700,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const setS = (key) => (e) => setSl({ ...sl, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const setM = (key) => (e) => setMs({ ...ms, [key]: e.target.value });
   const setN = (key) => (e) => setNt({ ...nt, [key]: e.target.value });
+  const setK = (key) => (e) => setCt({ ...ct, [key]: e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
   const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
   const steps = {
@@ -767,6 +805,54 @@ function Connections({ ws, teams, orgAdmin }) {
           "A secret with service_account (its client_email and private_key), under this team's own connections path.")),
       h("div", { className: "actions connector-wide" },
         h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Drive"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    catalog: () => h("form", { className: "panel-body connector-form", onSubmit: connectCatalog, "aria-label": "Connect a data catalog" },
+      h("p", { className: "connector-lede" }, CATALOG_KINDS[ct.provider].lede, " Metadata only, never data; each table's lineage and owners reach this team's map and who to ask."),
+      field("Catalog", h("select", { className: "select", value: ct.provider, onChange: setK("provider") },
+        Object.entries(CATALOG_KINDS).map(([id, k]) => h("option", { key: id, value: id }, k.label)))),
+      CATALOG_KINDS[ct.provider].runner && !orgAdmin
+        ? h("p", { className: "connector-lede connector-wide" }, h("b", null, "Only an org admin connects this one: "),
+            "it's read as the runner's own identity, which every team shares. Ask an org admin, or connect a catalog with its own credential.")
+        : null,
+      field("Name", h("input", { className: "input", value: ct.name, onChange: setK("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      ct.provider === "dataplex" ? field("Projects", h("input", { className: "input mono", value: ct.projects, onChange: setK("projects"), placeholder: "acme-data, acme-analytics", required: true }),
+        "Google Cloud project ids, separated by commas.") : null,
+      ct.provider === "dataplex" ? field("Company domain", h("input", { className: "input", value: ct.domain, onChange: setK("domain"), placeholder: "acme.com" }),
+        "Optional. A table shared with this domain becomes readable by everyone in the org. Leave it empty to never widen that far.") : null,
+      ct.provider === "glue" ? field("Region", h("input", { className: "input mono", value: ct.region, onChange: setK("region"), placeholder: "us-east-1", required: true })) : null,
+      ct.provider === "glue" ? field("Role ARN", h("input", { className: "input mono", value: ct.role_arn, onChange: setK("role_arn"), placeholder: "arn:aws:iam::123456789012:role/aerugo-catalog", required: true, autoComplete: "off" })) : null,
+      ct.provider === "unity" || ct.provider === "purview" || ct.provider === "datahub"
+        ? field({ unity: "Workspace address", purview: "Purview account address", datahub: "DataHub address" }[ct.provider],
+            h("input", { className: "input mono", value: ct.api_base, onChange: setK("api_base"), required: true,
+                         placeholder: { unity: "https://acme.cloud.databricks.com", purview: "https://acme.purview.azure.com", datahub: "https://datahub.acme.internal:9002" }[ct.provider] }))
+        : null,
+      ct.provider === "purview" ? field("Tenant ID", h("input", { className: "input mono", value: ct.tenant_id, onChange: setK("tenant_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" })) : null,
+      ct.provider === "unity" || ct.provider === "purview"
+        ? field(ct.provider === "unity" ? "Service principal's application ID" : "Application (client) ID",
+            h("input", { className: "input mono", value: ct.client_id, onChange: setK("client_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" }))
+        : null,
+      ct.provider === "purview" ? field("Collections", h("input", { className: "input mono", value: ct.collections, onChange: setK("collections"), placeholder: "sales, finance", required: true }),
+        "Collection ids, separated by commas.") : null,
+      ct.provider === "datahub" ? field("Platforms", h("input", { className: "input mono", value: ct.platforms, onChange: setK("platforms"), placeholder: "snowflake, bigquery", required: true }),
+        "As DataHub names them, separated by commas.") : null,
+      CATALOG_KINDS[ct.provider].runner || ct.credential_ref ? null
+        : ct.provider === "purview"
+        ? h("label", { className: "field connector-wide" }, h("span", null, "Certificate"),
+            h("textarea", { className: "input mono", rows: 4, value: ct.certificate, onChange: setK("certificate"), required: true, spellCheck: false, autoComplete: "off",
+                            placeholder: "-----BEGIN PRIVATE KEY-----\n...\n-----BEGIN CERTIFICATE-----\n..." }),
+            h("span", { className: "hint" }, "Paste the app's private key and its certificate (PEM). Kept in OpenBao and never shown again."))
+        : field(ct.provider === "unity" ? "OAuth secret" : "Access token",
+            h("input", { className: "input mono", type: "password", value: ct.provider === "unity" ? ct.client_secret : ct.token,
+                         onChange: setK(ct.provider === "unity" ? "client_secret" : "token"), required: true, autoComplete: "off" }),
+            "Stored in OpenBao and never shown again."),
+      field("Sync", h("select", { className: "select", value: ct.every_minutes, onChange: setK("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      CATALOG_KINDS[ct.provider].runner ? null : h("details", { className: "connector-wide" }, h("summary", null, "Use a credential the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: ct.credential_ref, onChange: setK("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/${ct.provider}` }),
+          { unity: "A secret with client_secret", purview: "A secret with certificate (its private_key, certificate, and thumbprint)", datahub: "A secret with token" }[ct.provider]
+            + ", under this team's own connections path.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy || (CATALOG_KINDS[ct.provider].runner && !orgAdmin) },
+          busy ? "Connecting…" : `Connect ${CATALOG_KINDS[ct.provider].label}`),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
     directory: () => !orgAdmin
       ? h("div", { className: "panel-body connector-form" },

@@ -78,7 +78,8 @@ def handle(event: str, delivery: str, payload: dict) -> dict:
             return {"duplicate": True, "queued": 0}
         queued = 0
         if event == "installation" and payload.get("action") in ("deleted", "suspend") and installation:
-            conn.execute("UPDATE connections SET status = 'error', last_error = %s, updated_at = now() "
+            conn.execute("UPDATE connections SET status = CASE WHEN status = 'disabled' THEN status ELSE 'error' END, "
+                         "last_error = %s, updated_at = now() "
                          "WHERE kind = 'github' AND (config->>'installation_id')::bigint = %s",
                          (f"GitHub App installation {payload['action']}", installation))
         elif kind and isinstance(installation, int):
