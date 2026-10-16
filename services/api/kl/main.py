@@ -400,6 +400,9 @@ def _retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
         exact = {r["external_key"] for r in canonical}
         candidates = ([{**r, "matched": ["canonical"], "score": 1.0} for r in canonical]
                       + [r for r in candidates if r["external_key"] not in exact])
+    retired = {r["concept_key"] for r in conn.execute(RETIRED_SQL).fetchall()}  # E2: retired in review, until confirmed
+    if retired:
+        candidates = [r for r in candidates if r["external_key"] not in retired]
     if mode == "curated":
         candidates = [r for r in candidates if r.get("tier") in CURATED]
     if focus:  # only the named documents, each with its best passage even when no channel found it
@@ -418,6 +421,8 @@ def _retrieve(conn, caller: Caller, q: str, targets: list[str], limit: int,
         log.warning("ACL drift: index allowed %s for %s, authz engine denied", row["external_key"], caller.username)
 
     def allowed(row) -> bool:
+        if row["external_key"] in retired:
+            return False
         if not fga.check(caller.fga_user, "viewer", f"document:{row['external_key']}"):
             drift(row)
             return False
@@ -694,19 +699,67 @@ def budget_after(conn, org_id: str, caller: Caller, model_ref: str, state: dict 
 
 
 # ------------------------------------------------------------------ search
+# E1: each result's container by name (as the documents list names it), and the narrowing by source and container.
+CONTAINERS_SQL = """
+SELECT d.external_key, d.container_ref,
+       coalesce((SELECT cc.display_name FROM connection_containers cc
+                 WHERE cc.external_id = d.container_ref AND cc.display_name IS NOT NULL
+                   AND (d.connection_id IS NULL OR cc.connection_id = d.connection_id) LIMIT 1),
+                (SELECT i.name FROM imports i WHERE d.container_ref = 'import:' || i.id::text),
+                (SELECT p.name FROM pipelines p WHERE d.container_ref = 'pipeline:' || p.id::text),
+                substring(d.container_ref FROM '^(?:seed|scenario/[^/]+)/(.+)$')) AS container_name
+FROM documents d WHERE d.external_key = ANY(%(keys)s)"""
+SOURCE_FILTER = re.compile(r"^[a-z][a-z_]{1,29}$")
+FACET_POOL = 50  # how many results a filtered search looks through: its facets say what's among them
+
+
+def filters(raw: str | None, rule: re.Pattern | None = None) -> list[str]:
+    """A comma-separated filter as its values; anything but a string (a route called directly, as MCP does) is none."""
+    values = [v.strip() for v in (raw if isinstance(raw, str) else "").split(",") if v.strip()][:20]
+    if any(len(v) > 300 or (rule and not rule.fullmatch(v)) for v in values):
+        raise HTTPException(422, "filter by source kinds (like jira, confluence) and by container references")
+    return values
+
+
+def narrowed(conn, rows: list[dict], sources: list[str], containers: list[str]) -> tuple[list[dict], dict]:
+    """Rows the caller may already see, each with its container by name, kept to the chosen sources and containers;
+    and the facets among them all (sources and containers with how many results each), so the chips say what's there."""
+    held = {r["external_key"]: r for r in conn.execute(CONTAINERS_SQL, {"keys": [r["external_key"] for r in rows]}).fetchall()} if rows else {}
+    for r in rows:
+        c = held.get(r["external_key"]) or {}
+        r["container"] = {"ref": c.get("container_ref"), "name": c.get("container_name")} if c.get("container_ref") else None
+    facets = {"sources": {}, "containers": {}}
+    for r in rows:
+        if r.get("source_kind"):
+            facets["sources"][r["source_kind"]] = facets["sources"].get(r["source_kind"], 0) + 1
+        if r["container"]:
+            key = r["container"]["ref"]
+            entry = facets["containers"].setdefault(key, {"ref": key, "name": r["container"]["name"], "source_kind": r.get("source_kind"), "count": 0})
+            entry["count"] += 1
+    kept = [r for r in rows if (not sources or r.get("source_kind") in sources)
+            and (not containers or (r["container"] and r["container"]["ref"] in containers))]
+    return kept, {"sources": [{"kind": k, "count": n} for k, n in sorted(facets["sources"].items(), key=lambda x: (-x[1], x[0]))],
+                  "containers": sorted(facets["containers"].values(), key=lambda x: (-x["count"], x["name"] or x["ref"]))[:20]}
+
+
 @app.get("/v1/search")
 def search(
     q: str = Query(min_length=2, max_length=200),
     scope: str = Query(default="org", description="'org', or comma-separated workspace slugs"),
     limit: int = Query(default=10, ge=1, le=50),
     rerank: bool = Query(default=True, description="Let the org's reranker reorder the best results (if one is set)"),
+    source: str | None = Query(default=None, max_length=400, description="Only these sources, comma-separated: jira, confluence, gdrive"),
+    container: str | None = Query(default=None, max_length=4000, description="Only these containers, by reference, comma-separated"),
     caller: Caller = Depends(authenticate),
 ):
+    sources, containers = filters(source, SOURCE_FILTER), filters(container)
     org_id = resolve_org_id(config.ORG_SLUG)
     rate_limit(org_id, caller, "search", None)
     with scoped(org_id, caller.principals) as conn:
         targets = resolve_targets(conn, caller, scope)
-        candidates, returned, dropped = retrieve(conn, caller, q, targets, limit, rerank=rerank)
+        candidates, returned, dropped = retrieve(conn, caller, q, targets, max(limit, FACET_POOL) if sources or containers else limit, rerank=rerank)
+        returned, facets = narrowed(conn, returned, sources, containers)  # E1: only what passed the post-check is counted
+        returned = returned[:limit]
         reranked = any("rerank" in r["matched"] for r in returned)
 
         audit(conn, org_id, caller.username, "search", targets, {
@@ -734,7 +787,10 @@ def search(
             "score": round(float(r["score"]), 5),
             **({"related_to": r["related_to"], "relation": r["relation"]} if r.get("related_to") else {}),
             **({"reaches": r["reaches"]} if r.get("reaches") else {}),  # Q4: what the assets it describes feed
+            "container": r.get("container"),  # E1: where it sits in its source, by name
         } for r in returned],
+        "facets": facets,
+        "filters": {"sources": sources, "containers": containers},
         "note": ACCESS_NOTE,
     }
 
@@ -1883,6 +1939,8 @@ class AskIn(BaseModel):
     include_passages: bool = Field(default=False, description="Return each source's passage as the model read it")
     focus: list[str] | None = Field(default=None, max_length=5, description="Keys of the documents to answer from (@ in Ask)")
     mode: Literal["smart", "keyword", "meaning", "curated"] = "smart"
+    sources: list[str] | None = Field(default=None, max_length=20, description="Answer only from these sources (E1)")
+    containers: list[str] | None = Field(default=None, max_length=20, description="Answer only from these containers, by reference")
 
 
 HISTORY_TURNS = 6  # question-and-answer pairs a follow-up carries
@@ -1918,7 +1976,8 @@ def with_history(history: str, prompt: str) -> str:
 
 def answer_question(caller: Caller, question: str, model: str, scope: str = "org", max_sources: int = 6,
                     include_passages: bool = False, earlier: list[dict] | None = None,
-                    focus: list[str] | None = None, mode: str = "smart") -> dict:
+                    focus: list[str] | None = None, mode: str = "smart", sources_only: list[str] | None = None,
+                    containers_only: list[str] | None = None) -> dict:
     """Answer from the caller's visible sources only, with numbered citations. Sources the chosen model
     may not receive (egress policy) are withheld before the prompt is built; with no sources left, the
     model is never called."""
@@ -1945,8 +2004,11 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
             raise HTTPException(404, "model not found")
         targets = resolve_targets(conn, caller, scope)
         last_question = next((m["content"] for m in reversed(earlier or []) if m["role"] == "user"), "")
-        _, visible, dropped = retrieve(conn, caller, f"{last_question} {question}".strip(), targets, max_sources,
-                                       mode=mode, focus=focus)
+        narrow = [s for s in sources_only or [] if SOURCE_FILTER.fullmatch(s)], [c for c in containers_only or [] if 0 < len(c) <= 300]
+        _, visible, dropped = retrieve(conn, caller, f"{last_question} {question}".strip(), targets,
+                                       max(max_sources, FACET_POOL) if any(narrow) else max_sources, mode=mode, focus=focus)
+        if any(narrow):  # E1: only the chosen sources and containers
+            visible = narrowed(conn, visible, *narrow)[0][:max_sources]
         allowed = set(endpoint["allowed_classifications"])
         history = earlier_turns(conn, earlier or [], model, allowed)
         with telemetry.span("ask.egress") as s:
@@ -2012,7 +2074,7 @@ def ask(body: AskIn, caller: Caller = Depends(authenticate)):
     may not receive (egress policy) are withheld before the prompt is built; with no sources left, the
     model is never called."""
     return answer_question(caller, body.question, body.model, body.scope, body.max_sources, body.include_passages,
-                           focus=body.focus, mode=body.mode)
+                           focus=body.focus, mode=body.mode, sources_only=body.sources, containers_only=body.containers)
 
 
 # ------------------------------------------------------------------ conversations (slice R1)
@@ -2027,6 +2089,8 @@ class ConversationAsk(BaseModel):
     scope: str = "org"
     focus: list[str] | None = Field(default=None, max_length=5, description="Keys of the documents to answer from (@ in Ask)")
     mode: Literal["smart", "keyword", "meaning", "curated"] = "smart"
+    sources: list[str] | None = Field(default=None, max_length=20, description="Answer only from these sources (E1)")
+    containers: list[str] | None = Field(default=None, max_length=20, description="Answer only from these containers, by reference")
 
 
 class ConversationRename(BaseModel):
@@ -2114,7 +2178,8 @@ def list_conversations(q: str | None = Query(None, min_length=2, max_length=200)
 @app.post("/v1/conversations", status_code=201)
 def start_conversation(body: ConversationAsk, caller: Caller = Depends(authenticate)):
     """Ask a first question. The question and its answer start a new conversation, private to you."""
-    result = answer_question(caller, body.question, body.model, body.scope, focus=body.focus, mode=body.mode)
+    result = answer_question(caller, body.question, body.model, body.scope, focus=body.focus, mode=body.mode,
+                             sources_only=body.sources, containers_only=body.containers)
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         row = conn.execute("INSERT INTO conversations (org_id, owner, title) VALUES (%s, %s, %s) "
@@ -2141,7 +2206,8 @@ def follow_up(cid: str, body: ConversationAsk, caller: Caller = Depends(authenti
     with scoped(org_id, caller.principals) as conn:
         owned_conversation(conn, cid)
         earlier = conversation_messages(conn, org_id, caller, cid)
-    result = answer_question(caller, body.question, body.model, body.scope, earlier=earlier, focus=body.focus, mode=body.mode)
+    result = answer_question(caller, body.question, body.model, body.scope, earlier=earlier, focus=body.focus, mode=body.mode,
+                             sources_only=body.sources, containers_only=body.containers)
     with scoped(org_id, caller.principals) as conn:
         owned_conversation(conn, cid)
         store_turn(conn, org_id, cid, body, result)
@@ -2798,6 +2864,106 @@ def lineage_impact(namespace: str = Query(min_length=1, max_length=200), name: s
             "downstream": [{"kind": nodes[a]["kind"], "namespace": nodes[a]["namespace"], "name": nodes[a]["name"],
                             "hops": h, "teams": sorted(nodes[a]["workspaces"])}
                            for a, h in sorted(downstream.items(), key=lambda item: (item[1], item[0]))]}
+
+
+# ------------------------------------------------------------------ knowledge health (E2)
+HEALTH_PAGES_SQL = """
+SELECT DISTINCT ON (k.id) k.id, k.concept_key, k.title, k.tier, k.aliases, k.document_id, k.latest_hash, v.content, v.key_ref
+FROM concepts k
+JOIN documents d            ON d.id = k.document_id
+JOIN workspace_documents wd ON wd.document_id = d.id
+JOIN workspaces w           ON w.id = wd.workspace_id
+LEFT JOIN concept_versions v ON v.concept_id = k.id AND v.hash = k.latest_hash
+WHERE w.slug = %(ws)s AND k.tier IN ('silver', 'gold')
+ORDER BY k.id"""
+SHARED_NAMES_SQL = """
+SELECT lower(a) AS alias, array_agg(DISTINCT k.concept_key) AS keys, array_agg(DISTINCT k.title) AS titles
+FROM concepts k CROSS JOIN LATERAL unnest(k.aliases) a
+WHERE k.tier IN ('silver', 'gold') GROUP BY lower(a) HAVING count(DISTINCT k.id) > 1"""
+REPLACED_SQL = """
+SELECT e.to_key, f.title FROM concept_edges e JOIN concepts f ON f.id = e.from_concept_id
+WHERE e.relation = 'supersedes' AND e.to_key = ANY(%(keys)s)"""
+INBOUND_SQL = """
+SELECT k.concept_key, (SELECT count(*) FROM concept_edges e JOIN concepts f ON f.id = e.from_concept_id WHERE e.to_key = k.concept_key)
+     + (SELECT count(*) FROM reference_links l JOIN documents s ON s.id = l.source_id WHERE l.target_id = k.document_id) AS inbound
+FROM concepts k WHERE k.concept_key = ANY(%(keys)s)"""
+LATEST_REVIEW_SQL = """
+SELECT DISTINCT ON (concept_id) concept_id, action, by_user, at, at_hash, note FROM page_reviews
+WHERE concept_id = ANY(%(ids)s) ORDER BY concept_id, at DESC, id DESC"""
+RETIRED_SQL = """
+SELECT k.concept_key FROM (SELECT DISTINCT ON (concept_id) concept_id, action FROM page_reviews ORDER BY concept_id, at DESC, id DESC) r
+JOIN concepts k ON k.id = r.concept_id WHERE r.action = 'retire'"""
+
+
+class ReviewIn(BaseModel):
+    action: str = Field(pattern=r"^(confirm|update|retire)$")
+    note: str | None = Field(default=None, max_length=500)
+
+
+@app.get("/v1/workspaces/{ws}/health")
+def team_health(ws: str, caller: Caller = Depends(authenticate)):
+    """What about this team's curated pages needs someone (E2): stale, conflicting, orphaned, or without an owner, each
+    said plainly, with its last review. Its admins only, and only pages they may read (RLS): a name another page shares
+    is named only when they may read that page too."""
+    from .health import issues
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    now = datetime.now(timezone.utc)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(HEALTH_PAGES_SQL, {"ws": ws}).fetchall()
+        keys, ids = [r["concept_key"] for r in rows], [r["id"] for r in rows]
+        shared = conn.execute(SHARED_NAMES_SQL).fetchall()
+        replaced: dict[str, list[str]] = {}
+        for r in conn.execute(REPLACED_SQL, {"keys": keys}).fetchall() if keys else []:
+            replaced.setdefault(r["to_key"], []).append(r["title"])
+        inbound = {r["concept_key"]: r["inbound"] for r in conn.execute(INBOUND_SQL, {"keys": keys}).fetchall()} if keys else {}
+        latest = {r["concept_id"]: r for r in conn.execute(LATEST_REVIEW_SQL, {"ids": ids}).fetchall()} if ids else {}
+        teams = {r["slug"] for r in conn.execute("SELECT slug FROM workspaces").fetchall()}
+        pages, metas = [], {}
+        for r in rows:
+            metas[r["concept_key"]] = okf.parse(originals.open_one(r["content"], r["key_ref"]), r["concept_key"]).meta if r["content"] else {}
+        people = sorted({str(o).partition(":")[2] for m in metas.values() for o in (m.get("x-kl") or {}).get("owners") or []
+                         if str(o).startswith(("human:", "user:"))})
+        left = {x["username"] for x in conn.execute(LEFT_SQL, {"users": people}).fetchall()} if people else set()
+        for r in rows:
+            review = latest.get(r["id"])
+            conflicts = [(s["alias"], ", ".join(t for t in s["titles"] if t != r["title"]) or "another page")
+                         for s in shared if r["concept_key"] in s["keys"]]  # only pages the caller may read (RLS)
+            found = issues({"meta": metas[r["concept_key"]], "last_review": {"action": review["action"], "by": review["by_user"], "at": review["at"]} if review else None,
+                            "conflicts": conflicts, "replaced_by": replaced.get(r["concept_key"], []), "inbound": inbound.get(r["concept_key"], 0),
+                            "left": left, "teams": teams}, now)
+            waiting = review and review["action"] == "update" and review["at_hash"] == r["latest_hash"]
+            pages.append({"id": r["concept_key"], "title": r["title"], "tier": r["tier"], "issues": found,
+                          "retired": bool(review and review["action"] == "retire"),
+                          "update_requested": {"by": review["by_user"], "at": review["at"].isoformat(), "note": review["note"]} if waiting else None,
+                          "last_review": {"action": review["action"], "by": review["by_user"], "at": review["at"].isoformat()} if review else None})
+        recent = conn.execute("""SELECT k.concept_key, k.title, r.action, r.by_user, r.at, r.note FROM page_reviews r JOIN concepts k ON k.id = r.concept_id
+                                 JOIN workspaces w ON w.id = r.workspace_id WHERE w.slug = %s ORDER BY r.at DESC, r.id DESC LIMIT 20""", (ws,)).fetchall()
+        audit(conn, org_id, caller.username, "health.read", [ws], {"pages": len(pages), "needing": sum(1 for p in pages if p["issues"] or p["retired"])})
+    needing = [p for p in pages if p["issues"] or p["retired"] or p["update_requested"]]
+    counts = {kind: sum(1 for p in pages for i in p["issues"] if i["kind"] == kind) for kind in ("stale", "conflicting", "orphaned", "ownerless")}
+    return {"team": ws, "pages": len(pages), "needing": needing, "counts": counts,
+            "reviews": [{"id": r["concept_key"], "title": r["title"], "action": r["action"], "by": r["by_user"], "at": r["at"].isoformat(), "note": r["note"]}
+                        for r in recent]}
+
+
+@app.post("/v1/workspaces/{ws}/health/{key}", status_code=201)
+def review_page(ws: str, key: str, body: ReviewIn, caller: Caller = Depends(authenticate)):
+    """Work the review queue (E2): confirm a page (it counts as reviewed now, and a retired one comes back), ask for an
+    update (shown until its content changes), or retire it (search and Ask leave it out). Its team's admins only."""
+    require_workspace_admin(caller, ws)
+    if not CONCEPT_KEY.fullmatch(key):
+        raise HTTPException(404, "page not found")
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        page = next((r for r in conn.execute(HEALTH_PAGES_SQL, {"ws": ws}).fetchall() if r["concept_key"] == key), None)
+        if not page:
+            raise HTTPException(404, "page not found")
+        team = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()["id"]
+        conn.execute("INSERT INTO page_reviews (org_id, workspace_id, concept_id, action, by_user, at_hash, note) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                     (org_id, team, page["id"], body.action, caller.username, page["latest_hash"], body.note))
+        audit(conn, org_id, caller.username, f"health.{body.action}", [ws], {"page": key, "note": bool(body.note)})
+    return {"id": key, "action": body.action}
 
 
 # ------------------------------------------------------------------ diagrams, audio, and video (Q8)

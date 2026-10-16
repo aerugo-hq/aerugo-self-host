@@ -509,9 +509,20 @@ audio, and video (`kl/media.py`): WebVTT and SubRip transcripts become sections 
 classifications include the content's (egress); `gateway.describe_image` and `gateway.transcribe`; Drive's syncs use
 them. Smoke: a check for each. Not built: a model judging entailment on top of the word check, decisions in Ask's
 ranking beyond K5's, Drive's comments, attachments read by the media models, and media in GitHub and Microsoft 365.
+E1 to E3 (experience). E1: search narrows by source and container (`/v1/search?source=&container=`, Ask's `sources` and
+`containers`; `narrowed`, `CONTAINERS_SQL`, `FACET_POOL`): each result says its container by name, and `facets` count
+only results that passed the post-check; Search shows them as chips. E2: knowledge health (`kl/health.py`, `GET
+/v1/workspaces/{ws}/health`, `health-view.js` at `#/t/<team>/health`, team admins only): each curated page that's stale
+(never verified, or past its `review_days`, 90 by default), conflicting (a name another readable page shares, or a newer
+page replaces it), orphaned (nothing links to it), or without an owner, said in a sentence; the review queue (`POST
+.../health/{key}`, migration 0048's `page_reviews`) confirms (reviewed now; restores a retired page), asks for an
+update (shown until its content changes), or retires (search and Ask leave it out: `RETIRED_SQL`), each recorded. E3:
+the Map's clusters keep their colors across reloads (`stableColors`: each cluster's anchor, the member whose id sorts
+first, chooses its color, biggest first) and are named from their pages' titles in the browser (`clusterNames`), so a
+name is only ever built from what the viewer was given; the Map shows them as a legend. Smoke and browser tests for each.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
-done, and so are G1, S2 to S8, and Q1 to Q8; next E1 to E3; A1 to A4; G2 and G3.
+done, and so are G1, S2 to S8, Q1 to Q8, and E1 to E3; next A1 to A4; G2 and G3.
 
 Then the platform: the runner (ADR 0011, hosted: in the company's cluster, calling out only), GCP first (Vertex AI
 models, Secret Manager references), then Vault, AWS, and Azure; a build-time provider address for private mirrors;

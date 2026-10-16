@@ -22,6 +22,7 @@ export default function SearchView({ me, initial = "", team = "" }) {
   const [mac, setMac] = useState(false); // read after mount, so the server and browser render the same text
   const [pending, setPending] = useState(""); // a search started elsewhere, run once the mode is search
   const [marks, setMarks] = useState({}); // feedback sent for this search or answer: result id, "_missing", or "_answer"
+  const [only, setOnly] = useState({ sources: [], containers: [] }); // E1: the sources and containers chosen; none, everything
 
   useEffect(() => setMac(/Mac|iPhone|iPad/.test(navigator.platform)), []);
 
@@ -59,14 +60,18 @@ export default function SearchView({ me, initial = "", team = "" }) {
       });
   }, [me]);
 
-  async function run(text = q.trim()) {
+  async function run(text = q.trim(), narrow = only) {
     if (text.length < (mode === "search" ? 2 : 3) || (mode === "ask" && !model)) return;
     setBusy(true);
     setError(null);
     setAsked(text);
     setMarks({});
     try {
-      if (mode === "search") setResults(await kl(`search?q=${encodeURIComponent(text)}&scope=${team ? encodeURIComponent(team) : "org"}&limit=20`));
+      if (mode === "search") {
+        const filter = (name, values) => (values.length ? `&${name}=${encodeURIComponent(values.join(","))}` : "");
+        setResults(await kl(`search?q=${encodeURIComponent(text)}&scope=${team ? encodeURIComponent(team) : "org"}&limit=20`
+          + filter("source", narrow.sources) + filter("container", narrow.containers)));
+      }
       else {
         setAnswer(null);
         setAnswer(await kl("ask", { method: "POST", body: { question: text, model, scope: "org" } }));
@@ -78,6 +83,14 @@ export default function SearchView({ me, initial = "", team = "" }) {
     }
   }
   const submit = (event) => { event.preventDefault(); run(); };
+  // A chip narrows the search to a source or a container, or widens it again; the same words run at once.
+  const toggle = (field, value) => {
+    const next = { ...only, [field]: only[field].includes(value) ? only[field].filter((v) => v !== value) : [...only[field], value] };
+    setOnly(next);
+    if (asked) run(asked, next);
+  };
+  const narrowing = results && results.facets && (results.facets.sources.length > 1 || results.facets.containers.length > 1
+    || only.sources.length || only.containers.length);
   // Feedback grows the golden set (make eval-mine). It names only documents you can see, so it's safe to send.
   async function sendFeedback(slot, body) {
     setMarks((m) => ({ ...m, [slot]: "saving" }));
@@ -133,6 +146,15 @@ export default function SearchView({ me, initial = "", team = "" }) {
       h("div", { className: "results-meta" },
         h("span", null, `${results.results.length} result${results.results.length === 1 ? "" : "s"} for “${asked}”`),
         h("span", null, "Limited to sources you can access")),
+      narrowing ? h("div", { className: "search-filters" },
+        h("div", { className: "chips", role: "group", "aria-label": "Only from these sources" },
+          results.facets.sources.map((s) => h("button", { key: s.kind, type: "button", className: "chip", "aria-pressed": only.sources.includes(s.kind),
+                                                          onClick: () => toggle("sources", s.kind) },
+            h(SourceIcon, { kind: s.kind }), `${sourceName(s.kind)} ${s.count}`))),
+        results.facets.containers.length > 1 || only.containers.length ? h("div", { className: "chips", role: "group", "aria-label": "Only from these places" },
+          results.facets.containers.slice(0, 8).map((c) => h("button", { key: c.ref, type: "button", className: "chip", "aria-pressed": only.containers.includes(c.ref),
+                                                                       onClick: () => toggle("containers", c.ref), title: c.ref },
+            `${c.name || c.ref} ${c.count}`))) : null) : null,
       h("div", { className: "panel" }, results.results.length ? [
         ...results.results.map((r) => h("div", { key: r.id, className: "result-row" },
           h("a", { className: "result", href: inScope(`#/documents/${encodeURIComponent(r.id)}`, team) }, // opens any document, in place
@@ -140,6 +162,7 @@ export default function SearchView({ me, initial = "", team = "" }) {
             r.section ? h("div", { className: "faint small" }, r.section) : null,
             h("p", { className: "result-snippet" }, r.snippet),
             h("div", { className: "meta" }, h(Tier, { tier: r.tier }), r.source_kind ? h("span", null, sourceName(r.source_kind)) : null,
+              r.container && r.container.name ? h("span", null, `in ${r.container.name}`) : null,
               h("span", { className: "mono" }, r.id),
               (r.matched || []).length ? h("span", null, `matched ${r.matched.map((m) => CHANNELS[m] || m).join(", ")}`) : null,
               r.related_to ? h("span", null, `via ${r.related_to}`) : null)),
@@ -150,8 +173,10 @@ export default function SearchView({ me, initial = "", team = "" }) {
                           onClick: () => sendFeedback("_missing", { kind: "search", verdict: "missing" }) },
               marks._missing === "error" ? "Couldn't save. Try again" : "None of these answered it")),
       ]
-        : h(Empty, { action: h("button", { type: "button", className: "btn btn-sm", onClick: () => switchTo("ask") }, "Ask instead") },
-            `Nothing you can access matches “${asked}”.`))) : null,
+        : h(Empty, { action: only.sources.length || only.containers.length
+            ? h("button", { type: "button", className: "btn btn-sm", onClick: () => { const all = { sources: [], containers: [] }; setOnly(all); run(asked, all); } }, "Search everything")
+            : h("button", { type: "button", className: "btn btn-sm", onClick: () => switchTo("ask") }, "Ask instead") },
+            only.sources.length || only.containers.length ? `Nothing in the chosen sources matches “${asked}”.` : `Nothing you can access matches “${asked}”.`))) : null,
 
     mode === "ask" && busy ? h("div", { className: "panel results" }, h("div", { className: "loading-line" }, h(Spinner), "Reading your sources…")) : null,
     mode === "ask" && answer ? h("div", { className: "panel results answer" },

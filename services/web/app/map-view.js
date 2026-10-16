@@ -19,6 +19,7 @@ const HOW = (e) => (e.kind === "reference" ? `recorded reference${e.evidence ? `
   : e.kind === "lineage" ? "data feeds it" : e.kind === "describes" ? "describes it" : e.kind); // lineage: slice K3
 
 export default function MapView({ team = "" } = {}) { // in a team's scope, only that team (slice N1)
+  const [legend, setLegend] = useState([]); // the clusters, named from what's in them (E3)
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [query, setQuery] = useState("");
@@ -139,7 +140,7 @@ export default function MapView({ team = "" } = {}) { // in a team's scope, only
   } else {
     stage = h("div", { className: "graph-stage" },
       h(KnowledgeGraph, { nodes: data.nodes, edges: data.edges, visible, selectedId: selected && selected.id,
-                          onSelect: setSelected, onReady: (a) => { api.current = a; } }),
+                          onSelect: setSelected, onReady: (a) => { api.current = a; }, onClusters: setLegend }),
       visible && !visible.size ? h("div", { className: "graph-empty overlay" },
         h("p", null, "Nothing on the map matches these filters."),
         h("button", { type: "button", className: "btn btn-sm", onClick: clearFilters }, "Clear filters")) : null);
@@ -176,6 +177,9 @@ export default function MapView({ team = "" } = {}) { // in a team's scope, only
           h("button", { type: "button", className: "btn btn-icon btn-sm", onClick: () => api.current && api.current.zoomOut(), "aria-label": "Zoom out" }, h(Icon, { name: "minus" })),
           h("button", { type: "button", className: "btn btn-icon btn-sm", onClick: () => api.current && api.current.fit(), "aria-label": "Fit to screen" }, h(Icon, { name: "fit" })))),
       stage,
+      legend.some((c) => c.size > 1) ? h("ul", { className: "map-legend", "aria-label": "Clusters on the map" },
+        legend.filter((c) => c.size > 1).slice(0, 8).map((c, i) => h("li", { key: i },
+          h("span", { className: `swatch c-${c.color}`, "aria-hidden": true }), h("span", null, c.name), h("span", { className: "count" }, c.size)))) : null,
       span ? h("div", { className: "replay" },
         h("button", { type: "button", className: "btn btn-ghost btn-icon", "aria-label": playing ? "Pause replay" : "Replay how the map grew",
                       onClick: () => { if (playing) setPlaying(false); else { setAt(span[0]); setPlaying(true); } } },

@@ -1664,6 +1664,111 @@ def diagrams_audio_and_video_are_read_by_the_models_a_team_chose():
 
 
 @check
+def knowledge_health_says_what_needs_someone_and_the_queue_acts_on_it():
+    """E2, knowledge health: a team's admins see each curated page that needs someone, said plainly (never verified, sharing a name with another page, linked from nothing, with no owner); confirming it counts as a review now; retiring it leaves it out of search until it's confirmed again; asking for an update is shown until its content changes; every action is recorded; nobody but the team's admins sees the page or acts"""
+    from .authz import fga
+    curated_ready()
+    tag = uuid.uuid4().hex[:6]
+    key = f"kb-health-{tag}"
+    okf_text = (f"---\ntitle: Settlement window {tag}\nx-kl:\n  id: {key}\n  aliases: [sev1 playbook]\n---\n\n"
+                f"# Settlement window {tag}\n\nSettlement closes at five.\n")
+    tuples = {("group:payments#member", "viewer", f"document:{key}")}
+    try:
+        with psycopg.connect(OWNER_DB) as conn:
+            org = acme_org_id()
+            payments = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'payments'").fetchone()[0]
+            doc = conn.execute("INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, content_hash, "
+                               "classification, acl_principals, tier) VALUES (%s, 'okf', %s, 'v1', %s, %s, 'h1', 'internal', %s, 'silver') RETURNING id",
+                               (org, f"https://kb.acme.test/{key}", key, f"Settlement window {tag}", ["group:payments"])).fetchone()[0]
+            conn.execute("INSERT INTO kl.chunks (org_id, document_id, ordinal, heading_path, body, acl_principals) VALUES (%s, %s, 0, NULL, %s, %s)",
+                         (org, doc, f"Settlement closes at five {tag}.", ["group:payments"]))
+            conn.execute("INSERT INTO kl.workspace_documents (workspace_id, document_id, org_id) VALUES (%s, %s, %s)", (payments, doc, org))
+            cid = conn.execute("INSERT INTO kl.concepts (org_id, concept_key, tier, document_id, title, acl_principals, aliases, latest_hash) "
+                               "VALUES (%s, %s, 'silver', %s, %s, %s, %s, 'h1') RETURNING id",
+                               (org, key, doc, f"Settlement window {tag}", ["group:payments"], ["sev1 playbook"])).fetchone()[0]
+            conn.execute("INSERT INTO kl.concept_versions (concept_id, org_id, hash, content) VALUES (%s, %s, 'h1', %s)", (cid, org, okf_text))
+        fga.write(writes=tuples)
+
+        def health(user="alice"):
+            r = api("GET", "/v1/workspaces/payments/health", user)
+            return r if user != "alice" else r.json()
+
+        def mine():
+            return next((p for p in health()["needing"] if p["id"] == key), None)
+        assert health("bob").status_code in (403, 404), "someone outside the team's admins saw its health"
+        page = mine()
+        kinds = sorted(i["kind"] for i in page["issues"]) if page else []
+        assert kinds == ["conflicting", "orphaned", "ownerless", "stale"], f"the page's problems weren't all said: {page}"
+        assert any("Sev1" in i["text"] or "sev1" in i["text"] for i in page["issues"] if i["kind"] == "conflicting"), page["issues"]
+        assert api("POST", f"/v1/workspaces/payments/health/{key}", "bob", json={"action": "confirm"}).status_code in (403, 404), "a non-admin worked the queue"
+        assert api("POST", f"/v1/workspaces/payments/health/{key}", "alice", json={"action": "confirm"}).status_code == 201
+        assert "stale" not in [i["kind"] for i in mine()["issues"]], "a confirmed page still reads as stale"
+
+        def found():
+            return key in {h["id"] for h in api("GET", "/v1/search", "alice", params={"q": f"settlement {tag}", "scope": "org"}).json()["results"]}
+        assert found(), "the page isn't searchable to begin with"
+        assert api("POST", f"/v1/workspaces/payments/health/{key}", "alice", json={"action": "retire", "note": "Merged into the runbook"}).status_code == 201
+        assert not found() and mine()["retired"], "a retired page was still found"
+        assert api("POST", f"/v1/workspaces/payments/health/{key}", "alice", json={"action": "confirm"}).status_code == 201
+        assert found(), "a page confirmed after retiring didn't come back"
+        assert api("POST", f"/v1/workspaces/payments/health/{key}", "alice", json={"action": "update", "note": "The window moved"}).status_code == 201
+        assert mine()["update_requested"]["note"] == "The window moved", "an update request wasn't shown"
+        reviews = [(r["id"], r["action"]) for r in health()["reviews"] if r["id"] == key]
+        assert reviews[:4] == [(key, "update"), (key, "confirm"), (key, "retire"), (key, "confirm")], f"the actions weren't recorded: {reviews}"
+    finally:
+        doomed = {t for t in tuples if fga.read({"user": t[0], "relation": t[1], "object": t[2]})}
+        if doomed:
+            fga.write(deletes=doomed)
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.documents WHERE external_key = %s", (key,))
+
+
+@check
+def search_narrows_by_source_and_container_and_says_where_each_result_sits():
+    """E1, search by source: results say their container by name; the facets count only what the caller may see; a search narrowed to a source or a container returns only those, and so does Ask; a malformed filter is refused"""
+    from .authz import fga
+    tag = uuid.uuid4().hex[:6]
+    docs = {f"e1-{tag}-a": ("jira", f"E1PROJ{tag}", f"Cutover issue {tag}"), f"e1-{tag}-b": ("confluence", f"E1SPACE{tag}", f"Cutover page {tag}")}
+    tuples = {("user:alice", "viewer", f"document:{key}") for key in docs}
+    try:
+        with psycopg.connect(OWNER_DB) as conn:
+            org = acme_org_id()
+            commons = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'commons'").fetchone()[0]
+            for key, (kind, container, title) in docs.items():
+                doc = conn.execute("INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, content_hash, "
+                                   "classification, acl_principals, container_ref) VALUES (%s, %s, %s, 'v1', %s, %s, %s, 'internal', %s, %s) RETURNING id",
+                                   (org, kind, f"https://kb.acme.test/{key}", key, title, key, ["user:alice"], f"seed/{container}")).fetchone()[0]
+                conn.execute("INSERT INTO kl.chunks (org_id, document_id, ordinal, heading_path, body, acl_principals) VALUES (%s, %s, 0, NULL, %s, %s)",
+                             (org, doc, f"The cutover plan, as of today {tag}.", ["user:alice"]))
+                conn.execute("INSERT INTO kl.workspace_documents (workspace_id, document_id, org_id) VALUES (%s, %s, %s)", (commons, doc, org))
+        fga.write(writes=tuples)
+
+        def search(user, **narrow):
+            r = api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 20, **narrow})
+            assert r.status_code == 200, r.text[:200]
+            return r.json()
+        everything = search("alice")
+        mine = {h["id"]: h for h in everything["results"] if h["id"] in docs}
+        assert set(mine) == set(docs), f"the documents weren't found: {sorted(mine)}"
+        assert mine[f"e1-{tag}-a"]["container"] == {"ref": f"seed/E1PROJ{tag}", "name": f"E1PROJ{tag}"}, mine[f"e1-{tag}-a"]
+        kinds = {f["kind"] for f in everything["facets"]["sources"]}
+        assert {"jira", "confluence"} <= kinds, f"the facets didn't count the sources: {everything['facets']}"
+        only = search("alice", source="jira")
+        assert [h["id"] for h in only["results"] if h["id"] in docs] == [f"e1-{tag}-a"] and all(h["source_kind"] == "jira" for h in only["results"]), only["results"]
+        placed = search("alice", container=f"seed/E1SPACE{tag}")
+        assert [h["id"] for h in placed["results"]] == [f"e1-{tag}-b"], placed["results"]
+        theirs = search("bob")  # bob can read neither: the facets don't count them
+        assert not any(c["ref"].endswith(tag) for c in theirs["facets"]["containers"]), "the facets counted documents the caller can't see"
+        assert api("GET", "/v1/search", "alice", params={"q": tag, "source": "Jira; DROP"}).status_code == 422, "a malformed filter was taken"
+    finally:
+        doomed = {t for t in tuples if fga.read({"user": t[0], "relation": t[1], "object": t[2]})}
+        if doomed:
+            fga.write(deletes=doomed)
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.documents WHERE external_key = ANY(%s)", (list(docs),))
+
+
+@check
 def titles_outrank_passing_mentions():
     """Quality: a document whose title matches outranks one that only mentions the word (the resume case)"""
     import uuid

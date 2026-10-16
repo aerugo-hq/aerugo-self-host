@@ -54,3 +54,43 @@ export function communities(neighbors, teams, order, resolution = RESOLUTION, pa
   const id = new Map(ranked.map((l, rank) => [l, rank]));
   return { cluster: Uint16Array.from(label, (l) => id.get(l)), count: ranked.length };
 }
+
+// Colors that stay put (slice E3). A cluster's color comes from its anchor, the member whose id sorts first, which
+// doesn't change as the map grows or reloads; the biggest clusters choose first, and one whose color is taken moves to
+// the next free one, so neighbors rarely share a color and the same clusters always get the same colors.
+const fnv = (text) => { let x = 2166136261; for (let i = 0; i < text.length; i++) { x ^= text.charCodeAt(i); x = Math.imul(x, 16777619); } return x >>> 0; };
+export function stableColors(cluster, count, ids, colors = 10) {
+  const anchor = Array.from({ length: count }, () => null);
+  cluster.forEach((c, i) => { if (anchor[c] === null || ids[i] < anchor[c]) anchor[c] = ids[i]; });
+  const used = new Set();
+  return Uint8Array.from(anchor, (a) => {
+    if (used.size >= colors) used.clear(); // more clusters than colors: the colors go round again
+    let c = fnv(String(a)) % colors;
+    while (used.has(c)) c = (c + 1) % colors;
+    used.add(c);
+    return c;
+  });
+}
+
+// A cluster's name, from what's in it (slice E3): the words its pages' titles share most, or its one page's title.
+// Built in the browser from the nodes the map was given, so a name only ever comes from what the viewer may read.
+const STOP = new Set(["the", "and", "for", "with", "from", "into", "about", "your", "this", "that", "page", "pages", "notes", "draft", "how"]);
+export function clusterNames(cluster, count, titles) {
+  const words = Array.from({ length: count }, () => new Map());
+  const only = Array.from({ length: count }, () => []);
+  cluster.forEach((c, i) => {
+    only[c].push(titles[i]);
+    const seen = new Set();
+    for (const w of String(titles[i] || "").toLowerCase().match(/[a-z0-9_]{4,}/g) || []) {
+      if (STOP.has(w) || seen.has(w)) continue;
+      seen.add(w);
+      words[c].set(w, (words[c].get(w) || 0) + 1);
+    }
+  });
+  return words.map((counts, c) => {
+    if (only[c].length === 1) return String(only[c][0] || "One page");
+    const top = [...counts.entries()].filter(([, n]) => n > 1).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 2);
+    const cap = (w) => w.charAt(0).toUpperCase() + w.slice(1);
+    return top.length ? top.map(([w]) => cap(w)).join(" and ") : `${only[c].length} pages`;
+  });
+}

@@ -79,7 +79,8 @@ async def search(query: str, scope: str = "org", limit: int = 10) -> dict:
     if not 2 <= len(query) <= 200 or not 1 <= limit <= 50:
         raise ValueError("query must be 2-200 characters and limit 1-50")
     return await anyio.to_thread.run_sync(
-        lambda: _as_caller(raw, lambda caller: api.search(q=query, scope=scope, limit=limit, caller=caller)))
+        lambda: _as_caller(raw, lambda caller: api.search(q=query, scope=scope, limit=limit, rerank=True, source=None,
+                                                           container=None, caller=caller)))
 
 
 @mcp.tool()

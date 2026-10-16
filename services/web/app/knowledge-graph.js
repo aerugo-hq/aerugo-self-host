@@ -5,7 +5,7 @@
 // pinch, drag, keyboard focus, and filters that animate nodes out. Physics moves to a Web Worker past 2,000 nodes,
 // and drawing stops once the graph settles, restarting on interaction.
 import { createElement as h, useEffect, useMemo, useRef } from "react";
-import { communities } from "./graph-clusters.js";
+import { clusterNames, communities, stableColors } from "./graph-clusters.js";
 import { createPhysics, releaseTimes } from "./graph-physics.js";
 import { createGraphWorker } from "./graph-worker-client.js";
 import { TIERS, tierOf } from "./ui.js";
@@ -82,17 +82,23 @@ export function prepare(nodes, edges) {
   const teamNames = [...new Set(nodes.map((n) => n.workspaces[0] || ""))];
   const teams = nodes.map((n) => teamNames.indexOf(n.workspaces[0] || ""));
   const { cluster, count: clusterCount } = communities(neighbors, teams, order);
-  return { index, links, neighbors, degree, radii, order, tiers, teams, teamNames, extents, cluster, clusterCount, linkStyle,
+  const colorOf = stableColors(cluster, clusterCount, nodes.map((n) => String(n.id)), COLORS); // the same color on every load (E3)
+  const names = clusterNames(cluster, clusterCount, nodes.map((n) => n.title));
+  const sizes = Array.from({ length: clusterCount }, () => 0);
+  cluster.forEach((c) => { sizes[c] += 1; });
+  return { index, links, neighbors, degree, radii, order, tiers, teams, teamNames, extents, cluster, clusterCount, linkStyle, colorOf,
+           clusters: names.map((name, c) => ({ name, color: colorOf[c], size: sizes[c] })),
            tierIndex: Uint8Array.from(tiers, (t) => TIER_KEYS.indexOf(t)) };
 }
 
-export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSelect, onReady, marked, inset = 56 }) {
+export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSelect, onReady, onClusters, marked, inset = 56 }) {
   const wrap = useRef(null);
   const canvas = useRef(null);
   const tip = useRef(null);
   const live = useRef(null);
   const state = useRef(null);
   const graph = useMemo(() => prepare(nodes, edges), [nodes, edges]);
+  useEffect(() => { if (onClusters) onClusters(graph.clusters); }, [graph]); // the map's legend: names and colors (E3)
   const select = useRef(onSelect);
   select.current = onSelect;
   // Ringed nodes (Ask rings an answer's sources), and the room kept clear at the bottom (the map's replay bar).
@@ -201,7 +207,7 @@ export default function KnowledgeGraph({ nodes, edges, visible, selectedId, onSe
         if (!sc) continue;
         const alpha = hl < 0 ? 1 : fade(i === hl || near.has(i), 1);
         const step = Math.round(alpha * STEPS);
-        if (step) nodeBatches[(graph.cluster[i] % COLORS) * (STEPS + 1) + step].push(i, sc);
+        if (step) nodeBatches[graph.colorOf[graph.cluster[i]] * (STEPS + 1) + step].push(i, sc);
       }
       for (let key = 0; key < nodeBatches.length; key++) {
         const list = nodeBatches[key];

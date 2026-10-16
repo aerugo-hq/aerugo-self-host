@@ -146,16 +146,16 @@ baseline is already in place (only its golden-set part is left), so each source 
 ## 3. Experience: how people use it
 
 ### E1. Search by source
-- [ ] Filter by source (Confluence, Jira, Drive...) and by container, in search and in Ask
-- [ ] Each result shows its source and its container, by name
+- [x] Filter by source (Confluence, Jira, Drive...) and by container, in search and in Ask
+- [x] Each result shows its source and its container, by name
 
 ### E2. Knowledge health, and the review queue (K10)
-- [ ] A page per team: what's stale, contradicted, orphaned, or without an owner
-- [ ] A review queue: an owner confirms, updates, or retires each
+- [x] A page per team: what's stale, contradicted, orphaned, or without an owner
+- [x] A review queue: an owner confirms, updates, or retires each
 
 ### E3. The Map (K7)
-- [ ] Clusters keep their colors across reloads
-- [ ] Clusters are named from what's in them
+- [x] Clusters keep their colors across reloads
+- [x] Clusters are named from what's in them
 
 ## 4. Agents and integration (K12)
 
