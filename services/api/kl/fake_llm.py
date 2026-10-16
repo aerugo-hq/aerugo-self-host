@@ -888,6 +888,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"issues": issues, "isLast": True})
         parts = rest.split("/")
         if len(parts) == 3 and parts[:2] == ["attachment", "content"]:  # an attachment's bytes (Q7)
+            time.sleep(min(float(site.get("delay") or 0), 5))  # a slow site, when smoke asks: a sync then takes a while (C1)
             found = next((a for p in projects.values() for i in p.get("issues", []) for a in i.get("attachments", []) if a["id"] == parts[2]), None)
             return self._bytes(found["text"].encode()) if found else self._json(404, {})
         if len(parts) == 3 and parts[0] == "project" and parts[2] == "permissionscheme" and parts[1] in projects:
