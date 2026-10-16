@@ -87,3 +87,14 @@ such choice took the narrower, fail-closed option and is listed here, with its a
 7. **The fakes are proof of shape, not of each vendor:** each client was written from the vendor's API reference and
    checked against a fake of it, and Glue's request signing against AWS's own test vector. None has been run against
    a real Dataplex, Databricks, AWS, Purview, or DataHub yet.
+
+## S8. Faster permission changes
+
+1. **Microsoft Graph and Drive get no webhook.** Their notifications carry a shared token (`clientState`, a channel
+   token), not an HMAC signature, and invariant 13 accepts only signed, replay-protected deliveries; subscribing would
+   also mean Aerugo writing to each source. Their permission changes arrive with the readers refresh (every five
+   minutes by default). *Alternative:* accept their token in constant time, with Drive's message numbers for replays.
+2. **A readers refresh never adds an item,** and keeps an indexed item's old content even when its version changed:
+   only the next content sync reads bodies. It only narrows or keeps who reads what.
+3. **A webhook only ever queues a readers refresh of its own connection,** whatever the event says; each connection
+   has its own hook and secret, so one team's secret can't trigger another's refresh.

@@ -48,3 +48,5 @@ reads: the bot sets what's indexed, and each message keeps its channel's own rea
 - **Proven against a fake:** the client follows Slack's documentation (auth.test, conversations.list, .info,
   .members, .history, .replies, users.list, cursors, and rate limits), and smoke proves it against a fake that answers
   the same calls. Try it on a test workspace before relying on it.
+- **Faster permission changes:** a member who leaves a channel loses it within minutes (the readers refresh), or at
+  once with a webhook signed by the app's signing secret; see `permission-changes.md`.

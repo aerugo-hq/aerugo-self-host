@@ -25,6 +25,7 @@ from .vault import vault
 INGEST_DB = os.environ.get("KL_INGEST_DATABASE_URL", "postgresql://kl_ingest:ingest-dev-only@postgres:5432/kl")
 POLL_SECONDS = float(os.environ.get("KL_WORKER_POLL_SECONDS", "2"))
 RESYNC_MINUTES = float(os.environ.get("KL_RESYNC_MINUTES", "10"))      # freshness window per connection
+READERS_MINUTES = float(os.environ.get("KL_READERS_REFRESH_MINUTES", "5"))  # how stale a connection's readers may get (S8)
 OWNED_KINDS = {"jira", "confluence", "slack", "microsoft", "notion", "catalog"}  # kinds whose documents carry their connection (migration 0040)
 # A data catalog's client by its provider (S7), and the source its accounts are recorded under for identity matching
 # (Purview's people are Entra's, which the Entra directory records).
@@ -60,6 +61,23 @@ WHERE c.status = 'ready'
        THEN (c.config->>'every_minutes')::int ELSE %s END) * interval '1 minute')  -- its own cadence (ADR 0011), else the default
   AND NOT EXISTS (SELECT 1 FROM jobs j
                   WHERE j.kind IN ('connection.sync', 'connection.discover')
+                    AND j.status IN ('queued', 'running')
+                    AND j.payload->>'connection_id' = c.id::text)
+RETURNING payload->>'connection_id' AS connection_id
+"""
+
+# S8: a readers refresh for every ready connection whose readers are older than the window, between content syncs,
+# unless one of its jobs is already pending. GitHub's and directories' syncs are their readers (GitHub's webhooks and a
+# directory's own cadence keep them fresh), and a catalog's readers come with its daily listing.
+READERS_KINDS = ("google", "jira", "confluence", "slack", "microsoft", "notion")
+READERS_SQL = """
+INSERT INTO jobs (org_id, kind, payload)
+SELECT c.org_id, 'connection.refresh_readers', jsonb_build_object('connection_id', c.id::text, 'reason', 'schedule')
+FROM connections c
+WHERE c.status = 'ready' AND c.kind = ANY(%s) AND c.last_synced_at IS NOT NULL
+  AND greatest(c.readers_refreshed_at, c.last_synced_at) < now() - %s * interval '1 minute'
+  AND NOT EXISTS (SELECT 1 FROM jobs j
+                  WHERE j.kind IN ('connection.sync', 'connection.discover', 'connection.refresh_readers')
                     AND j.status IN ('queued', 'running')
                     AND j.payload->>'connection_id' = c.id::text)
 RETURNING payload->>'connection_id' AS connection_id
@@ -270,6 +288,45 @@ def handle_connection_sync(conn, job) -> dict:
         return {"skipped": "connection disabled"}
     containers = conn.execute("SELECT external_id, default_ref FROM connection_containers "
                               "WHERE connection_id = %s AND selected ORDER BY external_id", (cid,)).fetchall()
+    results = sync_containers(conn, c, containers)
+    retired = retire_unlisted(conn, c, source_kind_of(c), [ct["external_id"] for ct in containers]) \
+        if c["kind"] in OWNED_KINDS else 0  # a container it no longer reads keeps nothing (migration 0040)
+    embedded = embed_missing(conn)
+    bronze = materialize_bronze(conn)
+    linked = {**links.refresh(conn), "personal_data": privacy.scan(conn)}  # map links (N), personal data (I5)
+    with conn.transaction():
+        conn.execute("UPDATE connections SET last_synced_at = now(), readers_refreshed_at = now(), updated_at = now() WHERE id = %s", (cid,))
+        audit(conn, c["org_id"], "connection.sync", {"connection_id": str(cid), "repos": results, "retired": retired, "embedded": embedded,
+                                                     "bronze": bronze, **linked})
+    return {"repos": len(results), "files": sum(r["files"] for r in results), "embedded": embedded}
+
+
+def handle_connection_refresh_readers(conn, job) -> dict:
+    """S8: re-read only who may read a connection's items, between content syncs: each indexed item gets its current
+    readers, one nobody may read now leaves, and no body is read (a changed or new item waits for the content sync).
+    Queued on the readers cadence, and at once by a signed webhook."""
+    cid = job["payload"]["connection_id"]
+    c = conn.execute("SELECT id, org_id, workspace_id, kind, status, config, credential_ref FROM connections "
+                     "WHERE id = %s", (cid,)).fetchone()
+    if not c:
+        return {"skipped": "the connection was removed"}
+    if c["status"] == "disabled":
+        return {"skipped": "connection disabled"}
+    if c["kind"] not in READERS_KINDS:
+        return {"skipped": "its sync reads its readers"}
+    containers = conn.execute("SELECT external_id, default_ref FROM connection_containers "
+                              "WHERE connection_id = %s AND selected ORDER BY external_id", (cid,)).fetchall()
+    results = sync_containers(conn, {**c, "readers_only": True}, containers)
+    retired = retire_unlisted(conn, c, source_kind_of(c), [ct["external_id"] for ct in containers]) if c["kind"] in OWNED_KINDS else 0
+    with conn.transaction():
+        conn.execute("UPDATE connections SET readers_refreshed_at = now(), updated_at = now() WHERE id = %s", (cid,))
+        audit(conn, c["org_id"], "connection.refresh_readers", {"connection_id": str(cid), "reason": job["payload"].get("reason"),
+                                                                "containers": results, "retired": retired})
+    return {"containers": len(results), "removed": sum(r.get("removed", 0) for r in results)}
+
+
+def sync_containers(conn, c: dict, containers: list) -> list[dict]:
+    """Each selected container of a connection through its connector: a content sync, or (readers_only) S8's refresh."""
     if c["kind"] == "google":  # shared drives (slice F2)
         client = gdrive.client_for(c)
         results = [gdrive.sync_drive(conn, c, client, ct["external_id"]) for ct in containers]
@@ -299,16 +356,7 @@ def handle_connection_sync(conn, job) -> dict:
         results = [catalogs.sync_catalog(conn, c, client, ct["external_id"], provider, CATALOG_IDENTITIES[provider]) for ct in containers]
     else:
         raise RuntimeError(f"no connector for kind {c['kind']!r}")
-    retired = retire_unlisted(conn, c, source_kind_of(c), [ct["external_id"] for ct in containers]) \
-        if c["kind"] in OWNED_KINDS else 0  # a container it no longer reads keeps nothing (migration 0040)
-    embedded = embed_missing(conn)
-    bronze = materialize_bronze(conn)
-    linked = {**links.refresh(conn), "personal_data": privacy.scan(conn)}  # map links (N), personal data (I5)
-    with conn.transaction():
-        conn.execute("UPDATE connections SET last_synced_at = now(), updated_at = now() WHERE id = %s", (cid,))
-        audit(conn, c["org_id"], "connection.sync", {"connection_id": str(cid), "repos": results, "retired": retired, "embedded": embedded,
-                                                     "bronze": bronze, **linked})
-    return {"repos": len(results), "files": sum(r["files"] for r in results), "embedded": embedded}
+    return results
 
 
 # ------------------------------------------------------------------ curated knowledge (slice C2)
@@ -587,13 +635,17 @@ def handle_connection_retire(conn, job) -> dict:
     if p.get("credential_ref"):
         vault.destroy(p["credential_ref"])
         result["secrets"] = 1
+    if p.get("webhook_ref"):  # its webhook's secret (S8)
+        vault.destroy(p["webhook_ref"])
+        result["secrets"] += 1
     return result
 
 
 HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, "knowledge.seed": handle_knowledge_seed, "workspace.purge": handle_workspace_purge,
             "proposal.open_pr": lambda conn, job: curator.open_pr(conn, job["payload"]["proposal_id"]),
             "proposal.refresh": lambda conn, job: curator.refresh(conn, job["payload"]["proposal_id"]), "connection.discover": handle_connection_discover,
-            "connection.sync": handle_connection_sync, "embeddings.backfill": handle_embeddings_backfill,
+            "connection.sync": handle_connection_sync, "connection.refresh_readers": handle_connection_refresh_readers,
+            "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,
             "pipeline.push": handle_pipeline_push, "pipeline.retire": handle_pipeline_retire, "manifest.apply": handle_manifest_apply,
@@ -612,7 +664,7 @@ def finish(conn, job, error: str | None = None) -> None:
     elif job["attempts"] >= job["max_attempts"]:
         conn.execute("UPDATE jobs SET status = 'failed', last_error = %s, updated_at = now() WHERE id = %s",
                      (error, job["id"]))
-        if job["kind"] in ("connection.discover", "connection.sync"):
+        if job["kind"] in ("connection.discover", "connection.sync", "connection.refresh_readers"):
             conn.execute(CONNECTION_FAILED_SQL, (error, job["payload"].get("connection_id")))
     else:
         delay = min(300, 5 * 2 ** (job["attempts"] - 1))
@@ -665,6 +717,9 @@ def main() -> None:
                         scheduled = conn.execute(SCHEDULE_SQL, (RESYNC_MINUTES,)).fetchall()
                         if scheduled:
                             log.info("scheduled re-sync for %s connection(s)", len(scheduled))
+                        refreshing = conn.execute(READERS_SQL, (list(READERS_KINDS), READERS_MINUTES)).fetchall()
+                        if refreshing:
+                            log.info("scheduled a readers refresh for %s connection(s)", len(refreshing))
                         conn.execute(PROPOSALS_SQL).fetchall()
                         conn.execute(DUE_PURGES_SQL).fetchall()
                         try:

@@ -389,6 +389,12 @@ const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_
 const SCOPES = { jira: ["projects", "Projects", "EDP, PAY"], confluence: ["spaces", "Spaces", "PAY, ENG"], google: ["drives", "Shared drives", "Drive ids"],
                  slack: ["channels", "Channels", "C0123ABCD"], microsoft: ["sites", "Sites", "acme.sharepoint.com,<site id>,<web id>"],
                  github: ["repositories", "Repositories", "acme/payments-api"] };
+// The sources that sign their webhooks (S8), and what each one's admin does with the hook Aerugo gives.
+const HOOKS = {
+  jira: "In Jira, System, WebHooks: create one with this URL and secret, for issue, project, and permission changes. The secret is shown once.",
+  confluence: "In Confluence, Settings, Webhooks: create one with this URL and secret, for page, space, and permission changes. The secret is shown once.",
+  slack: "In your Slack app, Event Subscriptions: turn them on with this Request URL, and subscribe the bot to member_joined_channel, member_left_channel, and channel_left.",
+};
 const managedTitle = (m) => `Managed by ${toolName(m.by)}${m.workspace ? `, ${m.workspace}` : ""}: change it there. A change made here would be undone on its next apply.`;
 const every = (m) => (m ? (m % 1440 === 0 ? `Every ${m / 1440 === 1 ? "day" : `${m / 1440} days`}` : m % 60 === 0 ? `Every ${m / 60 === 1 ? "hour" : `${m / 60} hours`}` : `Every ${m} min`) : "Default");
 
@@ -412,6 +418,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [ms, setMs] = useState(blankM365); // the Microsoft 365 form (S5)
   const [nt, setNt] = useState(blankNotion); // the Notion form (S6)
   const [ct, setCt] = useState(blankCatalog); // the data catalog form (S7)
+  const [hook, setHook] = useState(null); // the webhook panel open under a row (S8): { name, signing, made }
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => { setItems(r.connections); setError(null); }).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [ws]);
   const say = (name, tone, text) => setNote((n) => ({ ...n, [name]: [tone, text] }));
@@ -424,6 +431,43 @@ function Connections({ ws, teams, orgAdmin }) {
       say(name, "bad", e.message);
     }
   }
+  async function makeHook(c) {
+    say(c.name, "idle", "Setting up the webhook…");
+    try {
+      const made = await kl(`workspaces/${enc(ws)}/connections/${enc(c.name)}/webhook`, { method: "POST",
+        body: { signing_secret: c.kind === "slack" ? hook.signing.trim() : null } });
+      setHook({ ...hook, signing: "", made });
+      say(c.name, "ok", "Webhook set");
+      load();
+    } catch (e) {
+      say(c.name, "bad", e.message);
+    }
+  }
+  async function removeHook(name) {
+    say(name, "idle", "Removing the webhook…");
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/${enc(name)}/webhook`, { method: "DELETE" });
+      setHook(null);
+      say(name, "ok", "Webhook removed");
+      load();
+    } catch (e) {
+      say(name, "bad", e.message);
+    }
+  }
+  const hookPanel = (c) => h("div", { className: "connector-form", role: "group", "aria-label": `Webhook for ${c.name}` },
+    h("p", { className: "connector-lede connector-wide" }, "A webhook tells Aerugo something changed, so permissions are read again at once instead of on the next refresh. It's a hint: Aerugo re-reads the source, and takes nothing from the message itself. ", HOOKS[c.kind]),
+    hook.made ? h("div", { className: "connector-wide" },
+      field("URL", h("input", { className: "input mono", readOnly: true, value: hook.made.url, onFocus: (e) => e.target.select() })),
+      hook.made.secret ? field("Secret", h("input", { className: "input mono", readOnly: true, value: hook.made.secret, onFocus: (e) => e.target.select() }),
+        "Copy it now: it isn't shown again. Setting the webhook up again makes a new one.") : null)
+      : c.kind === "slack" ? field("Signing secret", h("input", { className: "input mono", type: "password", value: hook.signing, autoComplete: "off",
+          onChange: (e) => setHook({ ...hook, signing: e.target.value }), placeholder: "From the app's Basic Information" }), "Kept in OpenBao and never shown again.")
+      : null,
+    h("div", { className: "actions connector-wide" },
+      hook.made ? null : h("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => makeHook(c),
+        disabled: c.kind === "slack" && hook.signing.trim().length < 16 }, c.webhook ? "Replace the secret" : "Set up the webhook"),
+      c.webhook ? h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => removeHook(c.name) }, "Remove the webhook") : null,
+      h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setHook(null) }, "Close")));
   async function setEnabled(name, enabled) {
     say(name, "idle", enabled ? "Resuming…" : "Pausing…");
     try {
@@ -959,10 +1003,12 @@ function Connections({ ws, teams, orgAdmin }) {
             h("td", null, note[c.name] ? h(Status, { tone: note[c.name][0] }, note[c.name][1])
               : h(Status, { tone: tone(c.status) }, c.status.charAt(0).toUpperCase() + c.status.slice(1))),
             h("td", { className: "hide-sm" }, every(c.every_minutes)),
-            h("td", { className: "num hide-sm", title: c.last_synced_at ? `Every sync re-reads each item's readers. Last: ${new Date(c.last_synced_at).toLocaleString()}` : "Not synced yet" },
-              c.last_synced_at ? ago(c.last_synced_at) : "Not yet"),
+            h("td", { className: "num hide-sm", title: c.readers_read_at ? `Every sync, and a readers refresh every few minutes between them${c.webhook ? " and on each webhook" : ""}, re-reads each item's readers. Last: ${new Date(c.readers_read_at).toLocaleString()}` : "Not synced yet" },
+              c.readers_read_at ? ago(c.readers_read_at) : "Not yet"),
             h("td", { className: "actions-cell" }, h("div", { className: "actions" },
               c.kind === "github" ? h("button", { type: "button", className: "btn btn-sm", onClick: () => showRepos(c.name) }, repos[c.name] ? "Hide repos" : "Repos") : null,
+              HOOKS[c.kind] ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": hook?.name === c.name,
+                onClick: () => setHook(hook?.name === c.name ? null : { name: c.name, signing: "", made: null }) }, c.webhook ? "Webhook on" : "Webhook") : null,
               h("button", { type: "button", className: "btn btn-sm", onClick: () => resync(c.name), disabled: c.status === "disabled" },
                 h(Icon, { name: "refresh", size: 14 }), "Re-sync"),
               c.managed_by ? null : [ // what Terraform manages changes there, not here
@@ -970,7 +1016,8 @@ function Connections({ ws, teams, orgAdmin }) {
                 h("button", { key: "pause", type: "button", className: "btn btn-sm btn-ghost", onClick: () => setEnabled(c.name, c.status === "disabled") }, c.status === "disabled" ? "Resume" : "Pause"),
                 h("button", { key: "remove", type: "button", className: "btn btn-sm btn-ghost", onClick: () => setConfirming(c.name), "aria-label": `Remove ${c.name}` }, "Remove")]))),
             repos[c.name] ? h("tr", { key: `${c.name}-repos` }, h("td", { colSpan: 5 }, repoList(c.name))) : null,
-            editing === c.name ? h("tr", { key: `${c.name}-edit` }, h("td", { colSpan: 5 }, editForm(c))) : null])))
+            editing === c.name ? h("tr", { key: `${c.name}-edit` }, h("td", { colSpan: 5 }, editForm(c))) : null,
+            hook?.name === c.name ? h("tr", { key: `${c.name}-hook` }, h("td", { colSpan: 5 }, hookPanel(c))) : null])))
         : items ? h(Empty, null, "No sources connected to this team yet. Connect one above.") : null,
     confirming ? h(Confirm, { title: `Remove the connection “${confirming}”?`, action: "Remove connection", onCancel: () => setConfirming(null),
                              onConfirm: () => remove(confirming) },

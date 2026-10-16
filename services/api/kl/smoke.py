@@ -3303,7 +3303,7 @@ def microsoft_365_files_carry_their_own_sharing():
 
 @check
 def a_paused_connection_stays_paused_when_its_jobs_finish():
-    """A pause that lands while a connection's discovery or sync is running stays: the job's end records its outcome (ready, or the error) without un-pausing it, and the API still says it's paused"""
+    """A pause that lands while a connection's discovery or sync is running stays: the job's end records its outcome (ready, or the error) without un-pausing it, and the API still says it's paused; and a source that signs nothing can't take a webhook (S8)"""
     from .worker import CONNECTION_FAILED_SQL, CONNECTION_READY_SQL
     name = f"paused-{secrets.token_hex(3)}"
     path = f"/v1/workspaces/payments/connections/{name}"
@@ -3321,8 +3321,162 @@ def a_paused_connection_stays_paused_when_its_jobs_finish():
             status, error = conn.execute("SELECT status, last_error FROM connections WHERE id = %s", (r.json()["id"],)).fetchone()
             assert status == "disabled" and error == "the source refused", f"a failed job un-paused it, or lost its error: {status} {error}"
         assert api("GET", path, "alice").json()["enabled"] is False, "the API says a paused connection is running"
+        assert api("POST", path + "/webhook", "alice", json={}).status_code == 422, "a source that signs nothing (Notion) took a webhook"
     finally:
         api("DELETE", path, "alice")
+
+
+@check
+def a_revoked_jira_grant_leaves_on_a_signed_webhook_and_on_the_refresh():
+    """S8, faster permission changes: a signed Jira webhook queues its connection's readers refresh at once, which takes a revoked reader's issue away without re-reading any content; the same delivery again queues nothing; an unsigned, wrongly signed, or unknown connection's delivery is the same 401; between content syncs, the readers refresh on its own cadence brings a re-granted reader back; a removed webhook takes nothing"""
+    import hashlib
+    import hmac
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    key = f"HOOK{tag}"
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    carol = {"accountId": f"557058:carol{tag.lower()}", "emailAddress": "carol@acme.test", "displayName": "Carol"}
+    issue = lambda text: {"key": f"{key}-1", "summary": f"Cutover plan {tag}", "description": text}
+    setup = lambda browsers, text: {"projects": {key: {"name": "Hooks", "company_wide": False, "browsers": browsers, "issues": [issue(text)]}}}
+    principal = lambda acct: f"ext:atlassian.{acct['accountId'].replace(':', '.')}"
+    links = {(f"user:{u}", "owner", f"identity:{principal(acct)[4:]}") for u, acct in (("alice", alice), ("carol", carol))}
+    name = f"hooks-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    body = {"name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key],
+            "every_minutes": 10080}  # a week: no content sync runs again during the check
+
+    def finds(user):
+        return f"jira-{key}-1" in {h["id"] for h in api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def until(test, seconds=150):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(2)
+        return test()
+
+    def deliver(hook, secret, delivery, payload=b'{"webhookEvent": "project_updated"}'):
+        signature = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest() if secret else ""
+        return httpx.post(f"{API}{hook}", content=payload, timeout=10, headers={
+            "Content-Type": "application/json", "X-Hub-Signature": signature, "X-Atlassian-Webhook-Identifier": delivery})
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, acct in (("alice", alice), ("carol", carol)):
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(acct), f"user:{u}"))
+    fga.write(writes=links)
+    try:
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=setup([alice, carol], f"Dual-run for 30 days {tag}."), timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        assert until(lambda: finds("carol")), "the issue never arrived"
+        made = api("POST", path + "/webhook", "alice", json={})
+        assert made.status_code == 201 and made.json()["secret"], f"{made.status_code} {made.text[:200]}"
+        hook, secret = "/v1/hooks/jira/" + made.json()["url"].rsplit("/v1/hooks/jira/", 1)[1], made.json()["secret"]
+        assert hook == f"/v1/hooks/jira/{cid}" and api("GET", path, "alice").json()["webhook"] is True, "the hook isn't the connection's own"
+        assert api("POST", path + "/webhook", "alice", json={"signing_secret": "x" * 20}).status_code == 422, "Jira took a Slack secret"
+        refusals = {"an unsigned delivery": deliver(hook, None, f"d0-{tag}"),
+                    "a wrongly signed delivery": deliver(hook, "not-the-secret", f"d0-{tag}"),
+                    "a delivery for an unknown connection": deliver(f"/v1/hooks/jira/{uuid.uuid4()}", secret, f"d0-{tag}"),
+                    "a Jira connection's delivery on Slack's hook": deliver(f"/v1/hooks/slack/{cid}", secret, f"d0-{tag}")}
+        for problem, got in refusals.items():
+            assert got.status_code == 401 and got.json() == {"detail": "invalid signature"}, f"{problem} wasn't refused alike: {got.status_code} {got.text[:100]}"
+
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=setup([alice], f"Rewritten later {tag}."), timeout=10).status_code == 200  # carol revoked
+        got = deliver(hook, secret, f"d1-{tag}")
+        assert got.status_code == 202 and got.json() == {"duplicate": False, "queued": 1}, f"{got.status_code} {got.text[:200]}"
+        assert deliver(hook, secret, f"d1-{tag}").json()["duplicate"] is True, "a replayed delivery was taken again"
+        assert until(lambda: not finds("carol"), 90), "a revoked reader kept the issue after a signed webhook"
+        assert finds("alice"), "a reader still granted lost the issue"
+        page = api("GET", f"/v1/documents/jira-{key}-1/content", "alice").text
+        assert "Dual-run for 30 days" in page and "Rewritten later" not in page, "the readers refresh re-read the issue's content"
+        read = api("GET", path, "alice").json()
+        assert read["readers_read_at"] > read["last_synced_at"], f"the refresh didn't say when it read readers: {read}"
+
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=setup([alice, carol], f"Rewritten later {tag}."), timeout=10).status_code == 200
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # its readers last read an hour ago: the refresh is due
+            conn.execute("UPDATE kl.connections SET readers_refreshed_at = now() - interval '1 hour', "
+                         "last_synced_at = now() - interval '1 hour' WHERE id = %s", (cid,))
+        assert until(lambda: finds("carol"), 180), "the readers refresh never ran on its own cadence"
+        assert api("DELETE", path + "/webhook", "alice").status_code == 204
+        assert deliver(hook, secret, f"d2-{tag}").status_code == 401, "a removed webhook still took deliveries"
+    finally:
+        api("DELETE", path, "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:atlassian.%{tag.lower()}",))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def slack_hooks_are_signed_fresh_and_taken_once():
+    """S8, Slack's Events API: a delivery signed with the app's signing secret over its timestamp and body, within five minutes, queues the connection's readers refresh, which takes a member removed from the channel off it; Slack's address check is answered only when signed; an unsigned delivery, an old one, and the same event again are refused or ignored; a Slack hook takes the app's signing secret, never one Aerugo makes"""
+    import hashlib
+    import hmac
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    uid = {u: f"U{u.upper()}{tag}" for u in ("alice", "carol")}
+    person = lambda u: {"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}}
+    channel = f"CHOOK{tag}"
+    state = lambda members: {"users": [person(u) for u in uid], "channels": {channel: {
+        "name": f"hooks-{tag.lower()}", "private": True, "members": [uid[m] for m in members], "messages": [
+            {"ts": "1760000001.000001", "user": uid["alice"], "text": f"Hook rehearsal {tag}"}]}}}
+    principal = lambda u: f"ext:slack.{uid[u]}"
+    links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in uid}
+    name = f"slack-hooks-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    signing = secrets.token_hex(16)
+    doc = f"slack-{channel}-2025-10-09"
+
+    def finds(user):
+        return doc in {h["id"] for h in api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def until(test, seconds=150):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(2)
+        return test()
+
+    def deliver(hook, payload: dict, secret=signing, stamp=None):
+        raw, stamp = json.dumps(payload).encode(), str(int(stamp or time.time()))
+        signature = "v0=" + hmac.new(secret.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256).hexdigest()
+        return httpx.post(f"{API}{hook}", content=raw, timeout=10, headers={
+            "Content-Type": "application/json", "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u in uid:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
+    fga.write(writes=links)
+    try:
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(["alice", "carol"]), timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel],
+            "history_days": 3650, "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: finds("carol")), "the channel never arrived"
+        assert api("POST", path + "/webhook", "alice", json={}).status_code == 422, "a Slack hook took a secret Aerugo made"
+        made = api("POST", path + "/webhook", "alice", json={"signing_secret": signing})
+        assert made.status_code == 201 and made.json()["secret"] is None, "a Slack signing secret was echoed back"
+        hook = f"/v1/hooks/slack/{r.json()['id']}"
+        check = {"type": "url_verification", "challenge": f"challenge-{tag}"}
+        assert deliver(hook, check).json() == {"challenge": f"challenge-{tag}"}, "Slack's signed address check wasn't answered"
+        assert deliver(hook, check, secret="not-the-signing-secret").status_code == 401, "an unsigned address check was answered"
+        event = {"type": "event_callback", "event_id": f"Ev{tag}1", "event": {"type": "member_left_channel", "channel": channel}}
+        assert deliver(hook, event, stamp=time.time() - 600).status_code == 401, "a delivery ten minutes old was taken"
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(["alice"]), timeout=10).status_code == 200  # carol left the channel
+        got = deliver(hook, event)
+        assert got.status_code == 202 and got.json()["queued"] == 1, f"{got.status_code} {got.text[:200]}"
+        assert deliver(hook, event).json()["duplicate"] is True, "the same event was taken twice"
+        assert until(lambda: not finds("carol"), 90), "a member who left kept the channel after a signed event"
+        assert finds("alice"), "a member still in the channel lost it"
+    finally:
+        api("DELETE", path, "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:slack.U%{tag}",))
 
 
 @check
