@@ -357,7 +357,7 @@ def sync_containers(conn, c: dict, containers: list) -> list[dict]:
     containers = shutdown.each(containers)  # a worker asked to stop stops between containers (C1)
     if c["kind"] == "google":  # shared drives (slice F2)
         client = gdrive.client_for(c)
-        results = [gdrive.sync_drive(conn, c, client, ct["external_id"]) for ct in containers]
+        results = [gdrive.sync_drive(conn, c, client, ct["external_id"], since=ct.get("since")) for ct in containers]
     elif c["kind"] == "github":
         connector = GitHubConnector(load_app(c["credential_ref"]), int(c["config"]["installation_id"]))
         results = [sync_repo(conn, c, connector, ct) for ct in containers]

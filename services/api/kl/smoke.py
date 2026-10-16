@@ -3895,6 +3895,51 @@ def a_microsoft_365_sync_follows_graphs_delta():
 
 
 @check
+def a_drive_sync_follows_its_changes_feed():
+    """Incremental syncs (H6): after its first full read, a shared drive is read from its changes feed, so a changed file comes in, a new one too, and one removed at the source leaves at once; its reconcile, once a day, lists the drive in full again"""
+    tag = secrets.token_hex(3)
+    key = httpx.post(f"{FAKE_GOOGLE}/service-account", json={"email": f"inc-{tag}@acme-dev.iam.gserviceaccount.com"}, timeout=30).json()
+    drive, name = f"0AINC{tag}", f"driveinc-{tag}"
+    file = lambda i, version: {"id": f"inc{i}{tag}", "name": f"Note {i} {tag}.txt", "mimeType": "text/plain", "md5Checksum": version,
+                               "text": f"Note {i} {tag}, {version}.", "permissions": [{"type": "user", "role": "reader", "emailAddress": "alice@acme.test"}]}
+
+    def drive_holds(*files) -> None:
+        assert httpx.post(f"{FAKE_GOOGLE}/files", json={"drive": drive, "name": f"Inc {tag}", "files": list(files)}, timeout=10).status_code == 200
+
+    def indexed() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, source_version FROM kl.documents WHERE source_kind = 'gdrive' "
+                                     "AND container_ref = %s", (drive,)).fetchall())
+
+    def reads() -> list:
+        return [c for c in httpx.get(f"{FAKE_GOOGLE}/changes-calls", timeout=10).json() if c["drive"] == drive]
+
+    try:
+        drive_holds(file(1, "v1"), file(2, "v1"))
+        r = api("POST", "/v1/workspaces/payments/connections/google", "alice", json={
+            "name": name, "service_account_key": json.dumps(key), "domain": "acme.test", "api_base": FAKE_GOOGLE, "every_minutes": 10080,
+            "drives": [drive]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        assert set(indexed()) == {f"gd-inc1{tag}", f"gd-inc2{tag}"}, f"the first, full read: {indexed()}"
+        assert [c["call"] for c in reads()] == ["changes/startPageToken"], f"the full read didn't take the feed's token first: {reads()}"
+
+        drive_holds(file(1, "v2"), file(3, "v1"))  # 1 changed; 2 removed at the source; 3 new
+        scheduled_sync(name)
+        got = indexed()
+        assert reads()[-1]["call"] == "changes" and reads()[-1]["token"] is not None, f"the second sync listed the drive again: {reads()}"
+        assert set(got) == {f"gd-inc1{tag}", f"gd-inc3{tag}"} and got[f"gd-inc1{tag}"] == "v2", \
+            f"the feed's changes, its removal included, didn't carry over: {got}"
+
+        scheduled_sync(name, reconcile=True)
+        assert reads()[-1]["call"] == "changes/startPageToken", f"the reconcile read from the feed instead of in full: {reads()}"
+        assert set(indexed()) == {f"gd-inc1{tag}", f"gd-inc3{tag}"}, f"the reconcile changed what's there: {indexed()}"
+        print("      the second sync read the changes feed: 1 changed, 3 new, 2 gone at once; the reconcile listed it in full")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+
+
+@check
 def decisions_are_their_own_items_latest_first():
     """Q5, decisions: a Jira comment that records a decision, and an issue's resolution, become decisions with who made them and when; listed latest first, each says what it replaced; a comment that decides nothing isn't one; someone who can't read the issue gets none of them"""
     from .authz import fga

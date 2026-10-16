@@ -62,6 +62,10 @@ def ci_token(request: dict) -> str:
 # and the Drive v3 calls the connector makes, so smoke can prove sync and permissions without Google.
 DRIVES: dict[str, dict] = {}  # drive id -> {"name": ..., "files": {file id: the file, with its text}}
 DRIVE_REFRESH, DRIVE_TOKEN = "smoke-refresh", "fake-drive-token"
+# A shared drive's changes feed (H6): kept by comparing each POST /google/files with the last ({drive: {"seq", "changed":
+# {file id: seq}, "gone": {file id: seq}, "last": {file id: file}}}); GET /google/changes-calls lists the feed's reads.
+DRIVE_CHANGES: dict = {}
+DRIVE_CALLS: list = []
 GOOGLE = os.environ.get("KL_FAKE_GOOGLE", "http://fake-llm:8080/google")  # the issuer of its sign-in ID tokens (slice F2b)
 SIGNIN_CODES: dict[str, dict] = {}  # code -> who signed in; smoke sets these through POST /google/signin
 # A fake Jira Cloud (ADR 0011): projects, issues, and who may see each, which smoke sets through POST /jira/setup, and the
@@ -324,6 +328,8 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        if self.path == "/google/changes-calls":  # the changes feed's reads, and from which token (H6)
+            return self._json(200, DRIVE_CALLS)
         if self.path == "/microsoft/deltas":  # the delta calls made, and from which token (H6)
             return self._json(200, DELTA_CALLS)
         if self.path == "/throttle":
@@ -644,6 +650,16 @@ class Handler(BaseHTTPRequestHandler):
         q, rest = {k: v[0] for k, v in parse_qs(url.query).items()}, url.path[len("/google/drive/v3/"):]
         if rest == "drives":
             return self._json(200, {"drives": [{"id": d, "name": v["name"]} for d, v in DRIVES.items()]})
+        if rest in ("changes/startPageToken", "changes"):  # a shared drive's changes feed (H6)
+            state = DRIVE_CHANGES.get(q.get("driveId", ""), {"seq": 0, "changed": {}, "gone": {}})
+            DRIVE_CALLS.append({"drive": q.get("driveId"), "call": rest, "token": q.get("pageToken")})
+            if rest == "changes/startPageToken":
+                return self._json(200, {"startPageToken": str(state["seq"])})
+            after, files = int(q.get("pageToken") or 0), DRIVES.get(q.get("driveId", ""), {"files": {}})["files"]
+            changed = [{"fileId": fid, "removed": False, "file": {k: v for k, v in files[fid].items() if k != "text"}}
+                       for fid, at in state["changed"].items() if at > after and fid in files]
+            removed = [{"fileId": fid, "removed": True} for fid, at in state["gone"].items() if at > after]
+            return self._json(200, {"changes": changed + removed, "newStartPageToken": str(state["seq"])})
         if rest == "files":
             query = q.get("q", "")
             if "sharedWithMe = true" in query:  # folders shared with the service account
@@ -1089,6 +1105,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/google/files":  # smoke sets a shared drive's files (and who each is shared with)
             request = self._body()
             DRIVES[request["drive"]] = {"name": request.get("name", request["drive"]), "files": {f["id"]: f for f in request["files"]}}
+            state = DRIVE_CHANGES.setdefault(request["drive"], {"seq": 0, "changed": {}, "gone": {}, "last": {}})
+            now = DRIVES[request["drive"]]["files"]
+            for fid, f in now.items():
+                if state["last"].get(fid) != f:
+                    state["seq"] += 1
+                    state["changed"][fid] = state["seq"]
+            for fid in set(state["last"]) - set(now):
+                state["seq"] += 1
+                state["gone"][fid] = state["seq"]
+            state["last"] = dict(now)
             return self._json(200, {})
         if path == "/mode":
             body = self._body()
