@@ -1,0 +1,2 @@
+# Test tooling (M4): installed only in the test image, from requirements-test.lock (make lock), never in production.
+pytest>=8.3,<9

@@ -359,7 +359,7 @@ services:
     working_dir: /src
     volumes:
       - ./services/api:/src
-    command: ["sh", "-c", "pip install -q --root-user-action=ignore uv && uv pip compile --generate-hashes --python-version 3.12 -o requirements.lock requirements.txt"]
+    command: ["sh", "-c", "pip install -q --root-user-action=ignore uv && uv pip compile --generate-hashes --python-version 3.12 -o requirements.lock requirements.txt && uv pip compile --generate-hashes --python-version 3.12 -c requirements.lock -o requirements-test.lock requirements-test.txt"]   # the test image's, at the same versions
 
   lock-web:
     image: node:22-alpine
