@@ -812,13 +812,35 @@ first: no header at all on the old code) and `test_the_app_runs_under_its_conten
 every violation while alice signs in and moves through the map, search, documents, Ask, and home (it caught the
 chevron before the fix). Proof at de7d9b6: `make e2e` 34 passed. Smoke, the golden set, and the scenario: CI's run on
 the pull request (no API, worker, or database code changed). Not built: a report endpoint for violations
-(`report-to`), and a policy for the API's own responses (JSON, never rendered as a page).
+(`report-to`), and a policy for the API's own responses (JSON, never rendered as a page). CI on pull request 29:
+unit 51 passed, smoke 167 passed, 17 skipped, 0 failed, no leak and no regression in either evaluation set.
+M3 (several API processes). The API image starts Uvicorn with `KL_API_WORKERS` processes (2 by default; compose passes
+it, and smoke reads it), so one busy process never queues every request. Each keeps its own pool, now 10 connections by
+default (`KL_DB_POOL_MAX`; two processes hold the 20 one held before), and the budget against Postgres's
+`max_connections` (100) is written beside the setting in `config.py`: the API's processes, the MCP server's 10, each web
+server's 10, the worker's few, OpenFGA's datastore, and room for provisioning, smoke, and an operator. Each process
+names its connections for itself (`application_name` `kl-api:<pid>`). Found while building: Uvicorn's supervisor
+replaces a worker that misses its health check (5 seconds by default), and loading the embedding model on a worker's
+first search held the interpreter long enough to miss it, so the worker was killed with requests in flight ("Child
+process died", and a search lost to a dropped connection). Each process now loads the model at startup, in the app's
+lifespan, before it serves, and the check allows 30 seconds (`--timeout-worker-healthcheck`). A load slower than that at
+startup gets the worker started again, losing no request since it isn't serving yet: on this machine's slow Docker it
+happened once, at the fresh stack's start, and no worker died in the hours of smoke and browser tests after. Smoke:
+`the_api_serves_from_several_processes` (a few bursts of 40 searches, until each process's connections show), and H1's
+check now counts every process's pool. Red first: on the old code no connection was named per process; with workers but
+a lazy model, a burst lost a search to a killed worker; with the warm-up, two processes answered all 40 and none died.
+Proof: CI on pull request 30 (at eab5a92): unit 51 passed; smoke 168 passed, 17 skipped, 0 failed (two API processes
+answered the burst; H1's check kept 16 connections); the golden set and the scenario with no leak and no regression.
+Locally, `make unit` 51 passed and `make e2e` 34 passed against the two processes; the local smoke run isn't a fair test
+on this machine's Docker Desktop today (Keycloak hung on its first start and was restarted; OpenFGA hit its request
+deadlines; syncs ran past their waits): 150 passed and 7 failed, every failure a timeout, none in what M3 changed. Not
+built: sizing the processes from the CPU count (a setting, for now); several API replicas in Kubernetes (each replica
+runs its processes; the budget then multiplies).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4 and M1 are done; next, the other mediums (M3, M5 to M10), then the lows; then deployment (E in the build plan),
-then Q.
+M4, M1, and M3 are done; next, M5 to M10, then the lows; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

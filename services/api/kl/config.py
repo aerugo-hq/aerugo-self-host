@@ -7,13 +7,15 @@ def _env(name: str, default: str = "") -> str:
 
 
 DATABASE_URL = _env("KL_DATABASE_URL", "postgresql://kl_app:app-dev-only@postgres:5432/kl")
-# The process's pool of database connections (H1). Size it so every process's maximum, added up, stays under Postgres's
-# max_connections (100 by default): the API's and the MCP server's pools, the worker's two connections, and OpenFGA's.
+# Each process's pool of database connections (H1). Every process's maximum, added up, stays under Postgres's
+# max_connections (100 by default). The budget (M3): the API's KL_API_WORKERS processes (2) at 10 each, the MCP server's
+# 10, each web server's 10 (KL_WEB_DB_POOL_MAX), the worker's few, OpenFGA's datastore, and room for provisioning, smoke,
+# and an operator. More API processes, or more replicas, means a smaller pool each, or a larger max_connections.
 DB_POOL_MIN = int(_env("KL_DB_POOL_MIN", "1"))
-DB_POOL_MAX = int(_env("KL_DB_POOL_MAX", "20"))
+DB_POOL_MAX = int(_env("KL_DB_POOL_MAX", "10"))
 DB_POOL_TIMEOUT = float(_env("KL_DB_POOL_TIMEOUT", "10"))  # seconds a request waits for a connection before a 503
-SERVICE_NAME = _env("OTEL_SERVICE_NAME", "kl-api")
-CHANGE_FEED_DAYS = int(_env("KL_CHANGE_FEED_DAYS", "90"))  # how far back the change feed reaches (P3)  # what its connections are called in pg_stat_activity
+SERVICE_NAME = _env("OTEL_SERVICE_NAME", "kl-api")  # what its connections are called in pg_stat_activity, with its pid
+CHANGE_FEED_DAYS = int(_env("KL_CHANGE_FEED_DAYS", "90"))  # how far back the change feed reaches (P3)
 ORG_SLUG = _env("KL_ORG_SLUG", "acme")
 OPENFGA_URL = _env("KL_OPENFGA_URL", "http://openfga:8080").rstrip("/")
 OPENFGA_STORE = _env("KL_OPENFGA_STORE", "kl-dev")
