@@ -6,13 +6,27 @@ import { API_URL, SESSION_COOKIE, WEB_URL, accessToken } from "../../../lib/sess
 export const dynamic = "force-dynamic";
 const MAX_UPLOAD = 51 * 1024 * 1024; // the API takes exports up to 50 MB; a form adds a little
 
+// M8: a write must come from the app's own pages. Browsers send Origin with every request that isn't a GET; when one
+// doesn't (an older browser, an extension that strips it), its Referer must name the app instead (the app's
+// Referrer-Policy sends it on its own requests), and a request with neither is refused. The session cookie's
+// SameSite=Lax already keeps it off most cross-site writes; this closes the rest.
+function fromTheApp(request) {
+  const own = new URL(WEB_URL).origin;
+  const origin = request.headers.get("origin");
+  if (origin) return origin === own;
+  try {
+    return new URL(request.headers.get("referer") ?? "").origin === own;
+  } catch {
+    return false; // no Referer, or one that isn't an address
+  }
+}
+
 async function forward(request, { params }) {
   const { path = [] } = await params;
   if (!path.length || path.some((p) => p === "" || p === "." || p === "..")) {
     return NextResponse.json({ detail: "bad path" }, { status: 400 });
   }
-  const origin = request.headers.get("origin");
-  if (request.method !== "GET" && origin && origin !== new URL(WEB_URL).origin) {
+  if (request.method !== "GET" && !fromTheApp(request)) {
     return NextResponse.json({ detail: "cross-site request refused" }, { status: 403 });
   }
   let token;

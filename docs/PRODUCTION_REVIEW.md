@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** M8 (`m8-referer-check`): a write through the API proxy without an `Origin` must
+carry the app's own `Referer`; one with neither is refused.
+
 **Done and verified, 2026-10-17:** M7 (`m7-job-time-limits`): every job kind has a time limit (changeable per
 deployment); at it, the lease settles the job as a failed attempt and ends the worker held by it, which is restarted.
 
