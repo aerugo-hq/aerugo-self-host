@@ -5,7 +5,7 @@ import zipfile
 
 from playwright.sync_api import expect
 
-from conftest import WEB, sign_in
+from conftest import WEB, WEB_B, sign_in
 
 # The seed runbook, by its id: readable by the payments group only. Found by id, not title, because a copy synced from
 # GitHub can share its title (and alice, linked to GitHub, may read that copy too). A result opens in the reader.
@@ -207,6 +207,13 @@ def test_olivia_sets_up_and_removes_google_sign_in(page):
     google.get_by_role("button", name="Remove").click()
     page.get_by_role("alertdialog").get_by_role("button", name="Remove sign-in").click()
     expect(google).to_contain_text("Not set up")
+
+
+def test_a_session_outlives_the_web_server_it_began_on(page):
+    sign_in(page, "alice")  # on the first web server
+    elsewhere = page.request.get(f"{WEB_B}/api/whoami")  # the same browser's cookie, at a second one (H3)
+    assert elsewhere.status == 200 and elsewhere.json()["username"] == "alice", \
+        f"a second web server didn't know the session: {elsewhere.status}"
 
 
 def test_connected_accounts_offers_linking(page):

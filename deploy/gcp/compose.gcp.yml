@@ -91,6 +91,7 @@ services:
       KL_SEED_KNOWLEDGE_DIR: ""   # no demo content
       KL_DEV_IDENTITIES: "0"      # no dev person exists here: every dev link is removed, never made
       KL_DEV_GITHUB_LOGIN: ""
+      KL_WEB_PASSWORD: ${KL_WEB_PASSWORD:?the web role's password, from Secret Manager}   # never the dev default
     volumes:
       - ./deploy/gcp/authz:/app/authz:ro   # the model, and production seed tuples (prepare.py): the first admin, no demo people
 
@@ -117,6 +118,9 @@ services:
     environment:
       KL_WEB_URL: https://app.${KL_DOMAIN}
       KL_OIDC_PUBLIC_ISSUER: https://auth.${KL_DOMAIN}/realms/acme
+      # H3: the sessions' role and key from Secret Manager; a missing one stops the deploy, never falls back to dev's
+      KL_WEB_DATABASE_URL: postgresql://kl_web:${KL_WEB_PASSWORD:?the web role's password}@postgres:5432/kl
+      KL_WEB_SESSION_KEY: ${KL_WEB_SESSION_KEY:?the web session key, from Secret Manager}
 
 volumes:
   caddy-data:

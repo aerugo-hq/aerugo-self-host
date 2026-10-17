@@ -82,6 +82,9 @@ spec:
             - name: KL_OWNER_DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: owner-database-url}
+            - name: KL_WEB_PASSWORD   # H3: provisioning gives the kl_web role this password
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: web-password}
             - name: KL_ORG_SLUG
               value: acme
             - name: KL_DEV_GITHUB_LOGIN
@@ -334,6 +337,12 @@ spec:
               value: http://keycloak:8080/realms/acme
             - name: KL_OIDC_CLIENT_ID
               value: kl-web
+            - name: KL_WEB_DATABASE_URL   # H3: sessions in Postgres, as kl_web
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: web-database-url}
+            - name: KL_WEB_SESSION_KEY    # H3: their tokens encrypted with this
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: web-session-key}
             - name: NEXT_TELEMETRY_DISABLED
               value: "1"
           ports:

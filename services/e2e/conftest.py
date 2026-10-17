@@ -16,7 +16,9 @@ import pytest
 WEB = "http://localhost:3000"
 KEYCLOAK_PORT = int(os.environ.get("KL_KEYCLOAK_PORT", "8081"))
 PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "olivia")}
+WEB_B = "http://localhost:3001"  # a second web server beside the first (H3): a session must live in neither alone
 FORWARDS = {3000: (os.environ.get("KL_E2E_WEB", "web"), 3000),
+            3001: (os.environ.get("KL_E2E_WEB_B", "web-b"), 3000),
             KEYCLOAK_PORT: (os.environ.get("KL_E2E_KEYCLOAK", "keycloak"), 8080)}
 
 
