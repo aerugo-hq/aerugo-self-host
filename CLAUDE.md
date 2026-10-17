@@ -795,12 +795,30 @@ smoke's first token requests found Keycloak unreachable (ConnectError), and S2's
 the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 100%, MRR 0.92, no
 leaks, no regression. CI's run on the pull request is the full clean proof. Not built: unit tests for the remaining
 parsers (spreadsheets, PDFs, OCR, Notion, Slack's threads) and the readers of the catalogs and Notion; smoke covers
-them against the fakes.
+them against the fakes. CI on pull request 28: unit 51 passed, smoke 167 passed, 17 skipped, 0 failed.
+M1 (a Content Security Policy, and HSTS). The web app's middleware (`services/web/middleware.js`) gives every page a
+fresh nonce and a policy: scripts only the app's own (Next.js stamps the nonce on what it renders, the layout already
+renders per request, and `'strict-dynamic'` lets those scripts load the rest), so an injected `<script>` or inline
+handler never runs; frames only the reader's video players (`www.youtube-nocookie.com`, `player.vimeo.com`,
+`www.loom.com`, as `markdown.js` builds them); workers, fonts, and connections only the app's own; images and media
+from the app and https (the reader shows only https images); no plugins (`object-src 'none'`), no foreign base or form
+targets, and nothing may frame the app (`frame-ancestors 'none'`, beside the existing `X-Frame-Options`). Styles keep
+`'unsafe-inline'`: React's style attributes need it, and a style runs no script. The API proxy, sign-in routes, and
+static files carry no script of their own and skip the middleware. The select boxes' chevron was a `data:` image,
+which the policy refuses: it's a file now (`public/chevron-down.svg`). HSTS is set where TLS ends, at Caddy
+(`deploy/gcp/Caddyfile`): a year, subdomains included, on every public address; the local stack and kind serve plain
+http and send none. Browser tests: `test_every_page_carries_a_content_security_policy_with_a_fresh_nonce` (red
+first: no header at all on the old code) and `test_the_app_runs_under_its_content_security_policy`, which collects
+every violation while alice signs in and moves through the map, search, documents, Ask, and home (it caught the
+chevron before the fix). Proof at de7d9b6: `make e2e` 34 passed. Smoke, the golden set, and the scenario: CI's run on
+the pull request (no API, worker, or database code changed). Not built: a report endpoint for violations
+(`report-to`), and a policy for the API's own responses (JSON, never rendered as a page).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4 are done; next, the other mediums (M1, M3, M5 to M10), then the lows; then deployment (E in the build plan), then Q.
+M4 and M1 are done; next, the other mediums (M3, M5 to M10), then the lows; then deployment (E in the build plan),
+then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
