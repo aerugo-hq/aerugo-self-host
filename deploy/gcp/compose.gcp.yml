@@ -32,6 +32,9 @@ x-prod-env: &prod-env
   KL_GCP_SECRET_PROJECTS: ${KL_GCP_PROJECT}
   KL_GCP_SECRETS_BASE: https://secretmanager.googleapis.com
   KL_GCP_METADATA_BASE: http://metadata.google.internal
+  # M6: the services sign in to OpenBao with the VM's identity (deploy.sh sets the method up); no OpenBao token is stored.
+  KL_OPENBAO_TOKEN: ""
+  KL_OPENBAO_AUTH_PATH: gcp
 
 services:
   caddy:
@@ -66,6 +69,8 @@ services:
     entrypoint: ["bao", "server", "-config=/openbao/config/prod.hcl"]
     environment:
       KL_DEV_TOKEN: ""   # no dev root token here: the root token lives only in Secret Manager (aerugo-openbao-init)
+    healthcheck:   # unsealed (no services' token exists here to check with: they sign in, M6)
+      test: ["CMD-SHELL", "BAO_ADDR=http://127.0.0.1:8200 bao status >/dev/null"]
     volumes:
       - ./deploy/gcp/openbao/prod.hcl:/openbao/config/prod.hcl:ro
 
@@ -92,6 +97,9 @@ services:
       KL_DEV_IDENTITIES: "0"      # no dev person exists here: every dev link is removed, never made
       KL_DEV_GITHUB_LOGIN: ""
       KL_WEB_PASSWORD: ${KL_WEB_PASSWORD:?the web role's password, from Secret Manager}   # never the dev default
+      KL_OPENBAO_TOKEN: ""          # M6: provisioning signs in to OpenBao with the VM's identity, as the services do
+      KL_OPENBAO_AUTH_PATH: gcp
+      KL_GCP_METADATA_BASE: http://metadata.google.internal
     volumes:
       - ./deploy/gcp/authz:/app/authz:ro   # the model, and production seed tuples (prepare.py): the first admin, no demo people
 
