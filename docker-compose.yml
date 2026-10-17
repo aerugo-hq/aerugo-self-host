@@ -144,6 +144,7 @@ services:
     <<: *api-build
     environment: &api-env
       KL_DATABASE_URL: postgresql://kl_app:${KL_APP_PASSWORD:-app-dev-only}@postgres:5432/kl
+      KL_API_WORKERS: ${KL_API_WORKERS:-2}   # M3: the API's processes, each with its own pool (only the API reads it)
       KL_ORG_SLUG: acme
       KL_OPENFGA_URL: http://openfga:8080
       KL_OPENFGA_STORE: kl-dev

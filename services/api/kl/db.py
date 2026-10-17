@@ -4,6 +4,7 @@
 Connections come from one pool per process (H1), so a request borrows one instead of opening its own. A connection
 goes back clean: its RLS context ended with its transaction, and RESET ALL clears anything set for the whole session.
 Each role's time limits (migration 0052) bound what one query or one open transaction can hold."""
+import os
 import threading
 from contextlib import contextmanager
 from functools import lru_cache
@@ -30,7 +31,8 @@ def new_pool(max_size: int = config.DB_POOL_MAX) -> ConnectionPool:
     dead ones) and cleaned when it comes back."""
     return ConnectionPool(config.DATABASE_URL, min_size=min(config.DB_POOL_MIN, max_size), max_size=max_size,
                           timeout=config.DB_POOL_TIMEOUT, check=ConnectionPool.check_connection, reset=_clean, open=True,
-                          kwargs={"row_factory": dict_row, "connect_timeout": 5, "application_name": config.SERVICE_NAME})
+                          kwargs={"row_factory": dict_row, "connect_timeout": 5,
+                                  "application_name": f"{config.SERVICE_NAME}:{os.getpid()}"})  # one name per process (M3)
 
 
 def connect(timeout: float | None = None):
