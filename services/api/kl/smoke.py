@@ -3532,7 +3532,7 @@ with psycopg.connect(worker.INGEST_DB, row_factory=dict_row, autocommit=True) as
 
 @check
 def a_stopped_or_killed_worker_never_strands_a_sync():
-    """Jobs (C1): a worker stopped mid-sync (SIGTERM, as a deploy does) puts its job back at once, its attempt not counted; one killed mid-sync (SIGKILL, out of memory) stops renewing its lease, so the stack's worker takes the job over; either way the connection syncs to completion"""
+    """Jobs (C1, M7): a worker stopped mid-sync (SIGTERM, as a deploy does) puts its job back at once, its attempt not counted; one killed mid-sync (SIGKILL, out of memory) stops renewing its lease, so the stack's worker takes the job over; a sync past its kind's time limit fails that attempt and ends its worker, which it would otherwise hold; each time the connection syncs to completion"""
     import signal
     import subprocess
     import tempfile
@@ -3562,12 +3562,12 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
             assert time.monotonic() < deadline, what
             time.sleep(0.5)
 
-    def second_worker(cid: str, log) -> tuple[int, subprocess.Popen]:
+    def second_worker(cid: str, log, limits: str = "") -> tuple[int, subprocess.Popen]:
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # the job, as a worker's claim leaves it
             jid = conn.execute("INSERT INTO kl.jobs (org_id, kind, payload, status, attempts, locked_at, lease_until) "
                                "VALUES (%s, 'connection.sync', %s, 'running', 1, now(), now() + interval '6 seconds') RETURNING id",
                                (org, json.dumps({"connection_id": cid, "reason": "smoke"}))).fetchone()[0]
-        env = {**os.environ, "KL_JOB_LEASE_SECONDS": "6", "PYTHONUNBUFFERED": "1"}
+        env = {**os.environ, "KL_JOB_LEASE_SECONDS": "6", "KL_JOB_LIMITS": limits, "PYTHONUNBUFFERED": "1"}
         return jid, subprocess.Popen([sys.executable, "-c", SECOND_WORKER, org, str(jid)], env=env, stdout=log, stderr=log)
 
     def tail(log) -> str:
@@ -3625,7 +3625,29 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
             done = job(jid)
             assert done["status"] == "done" and done["attempts"] == 2, f"the takeover didn't run the job once more: {done}"
             assert indexed() == 20, f"after the kill, the sync didn't complete: {indexed()} of 20 issues"
-        print(f"      stopped at {stopped_at} of 12 issues and put back; killed at {killed_at} of 20 and taken over; both synced to the end")
+
+        # Overran (M7): a sync slower than its kind's limit (here 0.1 minutes) holds its worker. The lease settles the
+        # job as a failed attempt and ends the process; the job runs again and finishes.
+        with tempfile.TemporaryFile() as log:
+            setup(30, delay=0.5)
+            jid, proc = second_worker(cid, log, limits="connection.sync=0.1")
+            started = time.monotonic()
+            try:
+                proc.wait(timeout=40)
+            except subprocess.TimeoutExpired:
+                raise AssertionError(f"a sync past its time limit still held its worker after 40 seconds:\n{tail(log)}")
+            ended, overran = time.monotonic() - started, job(jid)
+            # Exit 3 and a failed attempt are the overrun: a sync that finished first would have settled its job as done.
+            assert proc.returncode == 3, f"the worker didn't end for the overrun (worker.OVERRAN_EXIT), it exited {proc.returncode}:\n{tail(log)}"
+            assert overran["status"] == "queued" and overran["attempts"] == 1 and "time limit" in (overran["last_error"] or ""), \
+                f"the overrun wasn't recorded as a failed attempt: {overran}"
+            setup(30)
+            wait(lambda: job(jid)["status"] in ("done", "failed"), 120, f"the overrun job never ran again: {job(jid)}")
+            done = job(jid)
+            assert done["status"] == "done" and done["attempts"] == 2, f"the overrun job didn't finish on its next attempt: {done}"
+            assert indexed() == 30, f"after the overrun, the sync didn't complete: {indexed()} of 30 issues"
+        print(f"      stopped at {stopped_at} of 12 issues and put back; killed at {killed_at} of 20 and taken over; "
+              f"past its limit, its worker ended {ended:.0f}s after it started; all synced to the end")
     finally:
         if proc and proc.poll() is None:
             proc.kill()

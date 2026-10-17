@@ -4,6 +4,7 @@ Runs as kl_ingest inside this cell's single org. The org context is set once per
 row-level security scopes every query, and a bug can't reach another org's rows."""
 import hashlib
 import logging
+import math
 import os
 import signal
 import threading
@@ -42,6 +43,13 @@ SCHEDULER_SECONDS = float(os.environ.get("KL_SCHEDULER_SECONDS", "60"))  # how o
 FULL_SYNC_HOURS = float(os.environ.get("KL_FULL_SYNC_HOURS", "24"))  # how often a sync reads everything again (H6)
 
 LEASE_SECONDS = float(os.environ.get("KL_JOB_LEASE_SECONDS", "120"))  # how long a job outlives a dead worker (C1)
+# M7: how long each kind of job may run, in minutes; any other kind, DEFAULT_LIMIT_MINUTES. A retried sync skips what
+# it already indexed (each item's content hash), so a first sync longer than its limit still gets through over its
+# attempts. KL_JOB_LIMITS changes any of them ("connection.sync=480,import.apply=180").
+DEFAULT_LIMIT_MINUTES = 30.0
+LIMIT_MINUTES = {"connection.sync": 240.0, "connection.discover": 60.0, "embeddings.backfill": 240.0, "knowledge.seed": 60.0,
+                 "workspace.purge": 120.0, "import.apply": 120.0, "retention.apply": 60.0}
+OVERRAN_EXIT = 3  # the worker's exit status when a job ran past its limit
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("kl.worker")
@@ -695,6 +703,26 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "import.apply": handle_import_apply, "import.retire": handle_import_retire}
 RETENTION_SQL = ("INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'retention.apply' WHERE NOT EXISTS "
                  "(SELECT 1 FROM jobs WHERE kind = 'retention.apply' AND created_at > now() - interval '1 hour')")
+
+
+def job_limits(setting: str) -> dict[str, float]:
+    """Each kind's time limit in minutes: LIMIT_MINUTES, changed by KL_JOB_LIMITS (kind=minutes, comma separated). A
+    kind the worker doesn't run, or a limit that isn't a number above zero, is refused, stopping the worker at its start,
+    so a typo never leaves a job without the limit someone meant."""
+    limits = dict(LIMIT_MINUTES)
+    for pair in filter(None, (p.strip() for p in setting.split(","))):
+        kind, _, minutes = (part.strip() for part in pair.partition("="))
+        try:
+            limit = float(minutes)
+        except ValueError:
+            limit = math.nan
+        if kind not in HANDLERS or not (math.isfinite(limit) and limit > 0):
+            raise ValueError(f"KL_JOB_LIMITS: {pair!r} isn't a job kind and a number of minutes above zero")
+        limits[kind] = limit
+    return limits
+
+
+LIMITS = job_limits(os.environ.get("KL_JOB_LIMITS", ""))
 HEARTBEAT_SQL = ("INSERT INTO heartbeats (org_id, service) VALUES (kl.current_org(), 'worker') "
                  "ON CONFLICT (org_id, service) DO UPDATE SET seen_at = now()")
 
@@ -722,13 +750,15 @@ def finish(conn, job, error: str | None = None) -> bool:
 
 
 class Lease:
-    """A claimed job's lease (C1), renewed every third of LEASE_SECONDS from a connection of its own for as long as this
-    process lives. A worker that's killed stops renewing, and the reaper puts the job back once the lease runs out.
-    ponytail: it renews however long the job takes, so a job that hangs keeps its lease; a per-kind time limit that
-    stops renewing is M7."""
+    """A claimed job's lease (C1), renewed every third of LEASE_SECONDS from a connection of its own while the job runs,
+    up to its kind's time limit (M7). A worker that's killed stops renewing, and the reaper puts the job back once the
+    lease runs out. A job still running at its limit is stuck where no safe point reaches (a call that never returns, a
+    listing that never ends), and a stuck call can't be stopped from another thread: the lease settles the job as a
+    failed attempt and ends the worker's process, which every deployment starts again."""
 
     def __init__(self, job: dict) -> None:
         self.job, self.done = job, threading.Event()
+        self.limit = LIMITS.get(job["kind"], DEFAULT_LIMIT_MINUTES)
         self.thread = threading.Thread(target=self._renew, name=f"lease-{job['id']}", daemon=True)
 
     def __enter__(self) -> "Lease":
@@ -739,13 +769,22 @@ class Lease:
         self.done.set()
         self.thread.join(timeout=5)
 
+    def _connect(self) -> psycopg.Connection:
+        conn = psycopg.connect(INGEST_DB, autocommit=True)
+        conn.execute("SELECT set_config('kl.org_id', %s, false)", (str(self.job["org_id"]),))
+        conn.execute("SET lock_timeout = '10s'")  # never wait long on a row the stuck job holds
+        return conn
+
     def _renew(self) -> None:  # the claim set the first lease, so a short job never opens a connection here
         job, conn = self.job, None
-        while not self.done.wait(LEASE_SECONDS / 3):
+        deadline = time.monotonic() + self.limit * 60
+        while not self.done.wait(min(LEASE_SECONDS / 3, max(0.0, deadline - time.monotonic()))):
+            if time.monotonic() >= deadline:
+                self._overran(conn)
+                break
             try:
                 if conn is None:
-                    conn = psycopg.connect(INGEST_DB, autocommit=True)
-                    conn.execute("SELECT set_config('kl.org_id', %s, false)", (str(job["org_id"]),))
+                    conn = self._connect()
                 if not conn.execute(RENEW_SQL, (LEASE_SECONDS, job["id"], job["attempts"])).rowcount and not self.done.is_set():
                     log.info("job %s is no longer this worker's; its lease isn't renewed", job["id"])
                     break
@@ -756,6 +795,19 @@ class Lease:
                 conn = None
         if conn is not None:
             conn.close()
+
+    def _overran(self, conn: psycopg.Connection | None) -> None:
+        """Past its limit: settle the job as a failed attempt (fenced, so one already settled or taken over is left as
+        it is), then end the process. If the database won't answer, the lease runs out and the reaper settles it."""
+        job = self.job
+        log.error("job %s %s ran past its time limit of %g minutes; ending the worker it holds", job["id"], job["kind"], self.limit)
+        try:
+            finish(conn or self._connect(), job, f"ran past its time limit of {self.limit:g} minutes (KL_JOB_LIMITS changes it)")
+        except psycopg.Error as e:
+            log.warning("job %s: not settled (%s); its lease will run out", job["id"], type(e).__name__)
+        if not self.done.is_set():  # it finished while being settled: nothing holds the worker
+            logging.shutdown()
+            os._exit(OVERRAN_EXIT)
 
 
 def run(conn, job) -> None:

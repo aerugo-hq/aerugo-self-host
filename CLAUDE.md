@@ -848,12 +848,45 @@ answer (the receiver waited for a body that never came); green after, and the th
 (unsigned GitHub deliveries, Slack's Events API, Jira's) still pass. Proof: the check and the webhook checks locally;
 the whole loop is CI's run on the pull request (this machine's Docker Desktop is too slow today for a fair local
 smoke run, as M3's record says). Not built: a rate limit on the receivers (a delivery that passes the size cap is
-refused only by its signature, so a flood of small unsigned ones costs a secret lookup each).
+refused only by its signature, so a flood of small unsigned ones costs a secret lookup each). CI on pull request 31:
+unit 51 passed; smoke 169 passed, 17 skipped, 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario
+Recall@10 100%, MRR 0.92 over 12 cases; no leak and no regression.
+M7 (a time limit per job kind). A job that hung (a call that never returns, a listing that never ends) kept its
+lease, renewed for as long as its worker lived, and held that worker for good. Each kind now has a limit
+(`worker.LIMIT_MINUTES`: a sync and an embeddings backfill 240 minutes, a team's purge and an import 120, discovery,
+seeding, and retention 60, any other kind 30), and `KL_JOB_LIMITS` changes any of them per deployment
+(`connection.sync=480`, in minutes; compose passes it, `.env.example` documents it). A setting that names an unknown
+kind, or a limit that isn't a number above zero, stops the worker at its start. The lease enforces it: at the limit
+`worker.Lease` stops renewing, settles the job as a failed attempt through `finish` (fenced by the claim, so a job
+already settled or taken over is left alone; a 10-second lock timeout, so a row the stuck job holds can't stall it),
+and ends the worker's process (exit 3), because a call stuck in the main thread can't be stopped from another; every
+deployment starts the worker again (compose and the VM restart it, Kubernetes too). If the database won't answer, the
+lease runs out and the reaper settles the job as before. The attempt counts, so a job that hangs every time fails
+after `max_attempts` and marks its connection; a retried sync skips what it already indexed (each item's content
+hash), so a first sync longer than its limit still gets through over its attempts. The incidents runbook says what
+the error means and how to raise a limit. Considered and not built: stopping at a safe point (`shutdown.each`) once a
+job passes its limit, which would spare the restart for a job that's slow but moving; the hard stop covers every case,
+and the restart costs seconds. Smoke: `a_stopped_or_killed_worker_never_strands_a_sync` gains a third phase, a sync
+slower than a 0.1-minute limit. Unit: `tests/test_jobs.py` (the defaults, a deployment's changes, the refused
+settings). Red first, the new tests against the old worker: the unit tests failed (3 of 3, no limits), and the smoke
+phase failed (the sync still held its worker after 40 seconds). Green: 54 unit tests passed; the check passed, stopped
+at 3 of 12 issues and put back, killed at 13 of 20 and taken over, past its limit with its worker ended, each synced
+to the end, the overrun on its second attempt. CI's first run found a flaw in the check: it also required fewer than
+30 issues indexed at the overrun, and on CI's faster machine all 30 were in within the limit while the sync was still
+fetching attachments; the overrun itself is the exit status and the failed attempt (a sync that finished first would
+have settled its job as done), so that guard is gone. On the rebuilt stack (the stack's own worker on M7 too),
+the check passed again, the overrunning worker ending 7 seconds after it started (a 6-second limit); `make unit` 54
+passed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario Recall@10 100%, MRR 0.92 over 12 cases, no leak,
+no regression. `make smoke` there: 166 passed, 15 skipped, 5 failed, none in jobs or the worker, each from what earlier
+runs left on that long-lived stack (an alias and an OpenFGA tuple from interrupted checks, Microsoft identities
+already linked) or the Slack check's own race (its documents appear before its first sync records `last_synced_at`);
+CI's run on a fresh stack is the full proof. Not run: the browser tests and the provider's tests (nothing they use
+changed).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, and M5 are done; next, M6 to M10, then the lows; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, and M7 are done; next, M6, M8 to M10, then the lows; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
