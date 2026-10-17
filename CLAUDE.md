@@ -714,7 +714,7 @@ cursor its vendor no longer accepts (Graph answers an expired delta link with a 
 so the incremental sync fails every attempt, the connection goes to `error`, and the scheduler and the readers refresh
 pick only `ready` connections, so its permissions stop being refreshed until an admin acts. It's visible (the error,
 alerts), but it's C1's failure class. Proposed next, before H3, as H6b: on such an answer, drop the cursor and read
-the container in full, with a fake that expires a cursor and a smoke check. (2) The queue doesn't keep one
+the container in full, with a fake that expires a cursor and a smoke check (done: H6b, below). (2) The queue doesn't keep one
 connection's jobs apart: `CLAIM_SQL` takes any queued job, so with more than one worker a readers refresh (queued by a
 directory or a webhook) can run beside a content sync of the same connection, though H2's per-connection cap assumes
 they never overlap. One worker today; M3 and a second worker make it real; a per-connection advisory lock in the claim
@@ -728,11 +728,29 @@ which joins them under row-level security); rate counters can lose a moment's co
 stacked item's red-first proof from when it was built isn't reproduced. (7) Names collide: the review's C1 and P1 to
 P3 share names with `docs/ENTERPRISE_PLAN.md`'s C1 (Teams capture) and P1 to P3 (the packs), items in this file's
 build order; records call the review's "the review's C1" wherever it could be confused.
+H6b (expired cursors, the Phase 0 report's first risk). Only two sources hold a cursor a vendor can expire: Graph's
+delta link and Drive's changes token (Jira, Confluence, and Slack sync from a timestamp). Microsoft 365
+(`sync_library`): a 410 on a saved delta link (Graph's resyncRequired) is read as no link, so the whole library is read,
+which also reconciles it. Drive (`sync_drive`): a 400 that names `pageToken`, or a 410 (`gdrive.token_refused`), is
+read the same way. Any other error still fails the sync, so an outage is never read as an expired cursor; each
+fallback is logged. The fakes expire a cursor on request (`POST /microsoft/expire`, `/google/expire`), answering as the
+vendors document; the answers' exact shapes come from that documentation, not from a real tenant (risk 4).
+`docs/connectors/permission-changes.md` now says what H6 changed (each sync reads what changed, and everything once a
+day), that an expired cursor is read in full, and that a directory's group change queues the readers refresh. Smoke:
+`an_expired_cursor_is_read_in_full_and_the_connection_keeps_syncing`, which expires both cursors while one file is
+unshared, one deleted, and one added. Red first: on the old code, Microsoft 365's sync failed on the 410; with only its
+fix, Drive's failed on the 400; with both, each synced on its first attempt, the connection stayed `ready`, its
+container counted as reconciled, the unshared and deleted files left, and the new one came in. Proof on a fresh stack
+with CI's settings (`COMPOSE_ENV_FILES=.env.example`, an empty folder over `/run/kl-secrets`, a project of its own),
+at 60bff37: `make smoke` 167 passed, 16 skipped (optional), 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5
+1.0, no regression; `make eval-scenario` Recall@10 100%, MRR 0.92 over 12 cases, no leaks, no regression (the same
+two cases swapped places as in Phase 0's run, so the swap is stable; MRR unchanged, the baseline kept). Not run: the
+browser tests and the provider's tests (H6b touches neither the web app nor the API they call).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
-findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, and H4 are done; next,
-H3 with M2; then the mediums, M4 first; then deployment (E in the build plan), then Q.
+findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, and H6b are done;
+next, H3 with M2; then the mediums, M4 first; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
