@@ -532,7 +532,8 @@ def handle_retention_apply(conn, job) -> dict:
     with conn.transaction():
         counts = conn.execute("SELECT kl.apply_retention() AS c").fetchone()["c"] or {}
         pruned = conn.execute("SELECT kl.prune_changes(%s) AS n", (config.CHANGE_FEED_DAYS,)).fetchone()["n"]  # P3
-    return {**counts, "tuples": len(tuples), "changes_pruned": pruned}
+        ended = conn.execute("SELECT kl.sweep_web_sessions() AS n").fetchone()["n"]  # H3: web sessions that have ended
+    return {**counts, "tuples": len(tuples), "changes_pruned": pruned, "web_sessions_swept": ended}
 
 
 def handle_pipeline_push(conn, job) -> dict:

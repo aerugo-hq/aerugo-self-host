@@ -4,6 +4,8 @@
   "enabled": true,
   "sslRequired": "none",
   "accessTokenLifespan": 900,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
   "groups": [
     {
       "name": "payments"

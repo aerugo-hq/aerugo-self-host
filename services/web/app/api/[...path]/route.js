@@ -15,7 +15,13 @@ async function forward(request, { params }) {
   if (request.method !== "GET" && origin && origin !== new URL(WEB_URL).origin) {
     return NextResponse.json({ detail: "cross-site request refused" }, { status: 403 });
   }
-  const token = await accessToken(request.cookies.get(SESSION_COOKIE)?.value);
+  let token;
+  try {
+    token = await accessToken(request.cookies.get(SESSION_COOKIE)?.value);
+  } catch (e) {  // the sessions' database or the identity provider didn't answer: not a sign-out, try again shortly
+    console.error(`session lookup failed: ${e.message}`);
+    return NextResponse.json({ detail: "sign-in is unavailable right now" }, { status: 503, headers: { "Retry-After": "5" } });
+  }
   if (!token) return NextResponse.json({ detail: "not signed in" }, { status: 401 });
   const init = { method: request.method, cache: "no-store", headers: { Authorization: `Bearer ${token}` } };
   if (request.method !== "GET") {

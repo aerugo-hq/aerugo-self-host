@@ -29,7 +29,7 @@ locals {
   hosts = ["app", "api", "auth", "mcp"]
   # Every credential the stack needs, generated here and kept in Secret Manager; the VM reads them at each deploy.
   generated = ["owner-password", "app-password", "ingest-password", "fga-password", "keycloak-db-password",
-  "keycloak-admin-password", "openbao-token", "backup-cipher", "terraform-client-secret"]
+  "keycloak-admin-password", "openbao-token", "backup-cipher", "terraform-client-secret", "web-password", "web-session-key"]
   vm = "serviceAccount:${google_service_account.vm.email}"
 }
 
