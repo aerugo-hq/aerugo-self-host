@@ -216,6 +216,18 @@ def test_a_session_outlives_the_web_server_it_began_on(page):
         f"a second web server didn't know the session: {elsewhere.status}"
 
 
+def test_a_write_must_come_from_the_apps_own_pages(page):
+    sign_in(page, "alice")
+
+    def refused(headers: dict) -> bool:  # M8: the proxy refused it as cross-site, before it reached the API
+        r = page.request.post(f"{WEB}/api/whoami", headers=headers, data="{}")
+        return r.status == 403 and "cross-site" in r.text()
+    assert not refused({"Origin": WEB}) and not refused({"Referer": f"{WEB}/#/home"}), "the app's own write was refused"
+    assert refused({"Origin": "https://attacker.example"}), "a write from another site went through"
+    assert refused({"Referer": "https://attacker.example/page"}), "a write without an Origin, from another site's page, went through"
+    assert refused({}), "a write with neither an Origin nor a Referer went through"
+
+
 def test_every_page_carries_a_content_security_policy_with_a_fresh_nonce(page):
     policies = [page.request.get(f"{WEB}/").headers.get("content-security-policy", "") for _ in range(2)]  # M1
     nonces = [re.search(r"'nonce-([A-Za-z0-9+/=]+)'", p) for p in policies]
