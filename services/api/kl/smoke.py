@@ -3596,6 +3596,26 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
 
 
 @check
+def the_api_serves_from_several_processes():
+    """Processes (M3): the API runs several worker processes (KL_API_WORKERS, two by default), each with its own pool, so one busy process never queues every request; each process names its connections for itself"""
+    import concurrent.futures
+    want = int(os.environ.get("KL_API_WORKERS", "2"))
+    processes: set = set()
+    for _ in range(5):  # the kernel hands each new connection to whichever process is waiting: a few bursts reach them all
+        with concurrent.futures.ThreadPoolExecutor(10) as pool:
+            codes = list(pool.map(lambda u: api("GET", "/v1/search", u, params={"q": "incident", "limit": 3}).status_code,
+                                  ["alice", "bob"] * 20))
+        assert codes == [200] * 40, f"a burst of searches failed: {codes}"
+        with psycopg.connect(OWNER_DB) as conn:
+            processes = {r[0] for r in conn.execute("SELECT DISTINCT application_name FROM pg_stat_activity "
+                                                    "WHERE usename = 'kl_app' AND application_name LIKE 'kl-api:%'")}
+        if len(processes) >= min(want, 2):
+            break
+    assert want >= 2 and len(processes) >= 2, f"the API answered from {len(processes)} process(es), not {want}: {sorted(processes)}"
+    print(f"      {len(processes)} API processes answered a burst of 40 searches, each from its own pool")
+
+
+@check
 def the_api_pools_its_connections_and_every_role_has_time_limits():
     """Connections (H1): the API keeps a pool of database connections instead of opening one per call; a connection back in the pool carries nothing of the request that used it, not even a session-wide setting; and each role has its time limits (short for the API, longer for the worker), so a runaway query or a stuck transaction can't hold a connection forever"""
     import concurrent.futures
@@ -3604,10 +3624,11 @@ def the_api_pools_its_connections_and_every_role_has_time_limits():
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
         codes = list(pool.map(lambda u: api("GET", "/v1/search", u, params={"q": "incident", "limit": 3}).status_code, users))
     assert codes == [200] * len(users), f"a burst of searches failed: {codes}"
+    most = int(os.environ.get("KL_API_WORKERS", "2")) * db.config.DB_POOL_MAX  # every process's pool, full (M3)
     with psycopg.connect(OWNER_DB) as conn:
-        kept = conn.execute("SELECT count(*) FROM pg_stat_activity WHERE usename = 'kl_app' AND application_name = 'kl-api' "
+        kept = conn.execute("SELECT count(*) FROM pg_stat_activity WHERE usename = 'kl_app' AND application_name LIKE 'kl-api:%' "
                             "AND state = 'idle'").fetchone()[0]
-    assert 1 <= kept <= 20, f"the API should keep between 1 and its pool's 20 connections after a burst, not {kept}"
+    assert 1 <= kept <= most, f"the API should keep between 1 and its pools' {most} connections after a burst, not {kept}"
 
     pool = db.new_pool(max_size=1)  # the API's own pool, made to hand the same connection back
     try:

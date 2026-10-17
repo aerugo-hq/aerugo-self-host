@@ -30,4 +30,6 @@ FROM base AS runtime
 RUN rm -f kl/smoke.py kl/fake_llm.py kl/eval.py kl/golden.yaml kl/golden_mine.py kl/drill.py
 USER app
 EXPOSE 8000
-CMD ["uvicorn", "kl.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# M3: several processes (KL_API_WORKERS, 2 by default), each with its own pool: one busy process never queues them all.
+# A worker gets 30 seconds to answer its health check before it's replaced (Uvicorn's default is 5): busy isn't dead.
+CMD ["sh", "-c", "exec uvicorn kl.main:app --host 0.0.0.0 --port 8000 --workers \"${KL_API_WORKERS:-2}\" --timeout-worker-healthcheck 30"]
