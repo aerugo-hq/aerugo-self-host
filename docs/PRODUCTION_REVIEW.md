@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** M1 (`m1-csp-hsts`): a Content Security Policy with a fresh nonce on every page,
+frames only from the reader's video players; HSTS at Caddy on every public address.
+
 **Done and verified, 2026-10-17:** M4 (`m4-unit-tests`): 51 unit tests (each connector's readers, the parsers, the
 claim checker), run first in CI, shown to catch the bugs they guard.
 

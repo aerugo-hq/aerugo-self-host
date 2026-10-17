@@ -4,20 +4,29 @@
 	email {$ACME_EMAIL}
 }
 
+# M1: browsers keep to HTTPS for a year once they've seen any of these addresses, so nothing can downgrade them.
+(hsts) {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}
+
 app.{$KL_DOMAIN} {
+	import hsts
 	encode zstd gzip
 	reverse_proxy web:3000
 }
 
 api.{$KL_DOMAIN} {
+	import hsts
 	reverse_proxy api:8000
 }
 
 mcp.{$KL_DOMAIN} {
+	import hsts
 	reverse_proxy mcp:8090
 }
 
 auth.{$KL_DOMAIN} {
+	import hsts
 	@admin path /admin /admin/*
 	respond @admin 404
 	reverse_proxy keycloak:8080
