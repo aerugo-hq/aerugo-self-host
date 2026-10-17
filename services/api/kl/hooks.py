@@ -36,6 +36,20 @@ ATLASSIAN_DELIVERY = re.compile(r"^[A-Za-z0-9-]{1,100}$")
 SLACK_EVENT = re.compile(r"^Ev[A-Za-z0-9]{1,40}$")
 
 
+async def capped_body(request: Request, limit: int) -> bytes | None:
+    """A delivery's body, read only up to `limit` (M5): None as soon as it's known to be larger, from the length its
+    headers declare or, streamed, from what has arrived, so an oversized one never costs more than `limit` to refuse."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            return None
+    return bytes(body)
+
+
 def hook_secret(kind: str, connection_id: str) -> tuple[str, str] | None:
     """The org and the secret of a connection's hook, if it has one and isn't paused; None otherwise, or on any error."""
     try:
@@ -90,8 +104,8 @@ def refused(reason: str):
 async def hook(kind: str, connection_id: str, request: Request,
                x_hub_signature: str = Header(default=""), x_atlassian_webhook_identifier: str = Header(default=""),
                x_slack_signature: str = Header(default=""), x_slack_request_timestamp: str = Header(default="")):
-    body = await request.body()
-    if len(body) > MAX_BODY:
+    body = await capped_body(request, MAX_BODY)
+    if body is None:
         telemetry.webhook_rejected("too_large")
         raise HTTPException(413, "payload too large")
     if kind not in HOOK_KINDS or not CONNECTION.fullmatch(connection_id):

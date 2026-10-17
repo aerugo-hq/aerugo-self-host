@@ -318,6 +318,46 @@ def identity_links_are_per_user():
 
 
 @check
+def webhook_receivers_refuse_an_oversized_body_before_reading_it():
+    """Webhooks (M5): a delivery larger than its receiver takes is refused with 413 as soon as that's known, never read whole first: one whose headers say 50 MB is refused at its headers, and one that streams on past the limit is cut off there, without waiting for its end"""
+    import select
+    import socket
+    from urllib.parse import urlsplit
+    host, port = urlsplit(API).hostname, urlsplit(API).port or 80
+
+    def answer(conn: socket.socket, wait: float) -> str:
+        if not select.select([conn], [], [], wait)[0]:
+            return "no answer"
+        line = conn.recv(64).split(b"\r\n", 1)[0].decode(errors="replace")
+        return line.split(" ")[1] if line.startswith("HTTP/") else f"closed: {line!r}"
+
+    def declared(path: str) -> str:  # says 50 MB, sends one byte
+        with socket.create_connection((host, port), timeout=30) as conn:
+            conn.sendall(f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+                         f"Content-Length: 52428800\r\n\r\n{{".encode())
+            return answer(conn, 10)
+
+    def streamed(path: str, size: int) -> str:  # chunked, past the limit, and never ended
+        with socket.create_connection((host, port), timeout=30) as conn:
+            conn.sendall(f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n"
+                         f"Transfer-Encoding: chunked\r\n\r\n".encode())
+            chunk = b"10000\r\n" + b"x" * 65536 + b"\r\n"
+            try:
+                for _ in range(size // 65536):
+                    if select.select([conn], [], [], 0)[0]:
+                        break  # it answered already
+                    conn.sendall(chunk)
+            except OSError:
+                pass  # it closed the connection on us: its answer is still there to read
+            return answer(conn, 10)
+
+    for path, limit in ((f"/v1/hooks/jira/{uuid.uuid4()}", 1024 * 1024), ("/v1/webhooks/github", 5 * 1024 * 1024)):
+        assert (got := declared(path)) == "413", f"{path}: a body that says it's 50 MB wasn't refused at its headers: {got}"
+        assert (got := streamed(path, limit + 1024 * 1024)) == "413", f"{path}: a body streaming past the limit wasn't cut off: {got}"
+    print("      both receivers refused a body declared at 50 MB at its headers, and cut off one streaming past their limit")
+
+
+@check
 def webhooks_reject_unsigned():
     """Webhooks: unsigned and wrongly signed GitHub deliveries are rejected"""
     body = json.dumps({"zen": "Keep it logically awesome."}).encode()

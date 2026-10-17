@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from . import config, telemetry
 from .db import resolve_org_id, scoped
 from .github import APP_REF
+from .hooks import capped_body
 from .policy import audit
 from .vault import vault
 
@@ -111,8 +112,8 @@ async def github_webhook(request: Request,
                          x_github_event: str = Header(default=""),
                          x_github_delivery: str = Header(default=""),
                          x_hub_signature_256: str = Header(default="")):
-    body = await request.body()
-    if len(body) > MAX_BODY:
+    body = await capped_body(request, MAX_BODY)
+    if body is None:
         telemetry.webhook_rejected("too_large")
         raise HTTPException(413, "payload too large")
     if not verify_signature(await run_in_threadpool(webhook_secret), body, x_hub_signature_256):
