@@ -2,7 +2,7 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
 httpx>=0.27
-psycopg[binary]>=3.2
+psycopg[binary]>=3.3.6
 psycopg-pool>=3.2,<4  # H1: one pool of connections per process, from psycopg's own maintainers
 pyjwt[crypto]>=2.9
 fastembed>=0.4
