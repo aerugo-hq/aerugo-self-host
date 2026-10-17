@@ -8,6 +8,7 @@ import jwt
 
 from . import config
 from .vault import vault
+from . import source_http
 
 API = "https://api.github.com"
 HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
@@ -16,6 +17,11 @@ APP_REF = f"openbao://secret/kl/{config.ORG_SLUG}/connectors/github-app"
 # The curator App opens compiler proposals as PRs. It's the only writer, installed only on knowledge repos.
 CURATOR_REF = f"openbao://secret/kl/{config.ORG_SLUG}/connectors/curator-app"
 
+
+
+def github_throttled(r: httpx.Response) -> bool:
+    """GitHub's limits: a 403 with no requests left (its secondary limits answer 429, with Retry-After)."""
+    return r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0"
 
 class GitHubNotConfigured(RuntimeError):
     pass
@@ -36,7 +42,7 @@ class GitHubApp:
     def installations(self) -> list[dict]:
         found, page = [], 1
         while True:
-            r = httpx.get(f"{API}/app/installations", headers=self._app_headers(),
+            r = source_http.get(f"{API}/app/installations", headers=self._app_headers(),
                           params={"per_page": 100, "page": page}, timeout=20)
             r.raise_for_status()
             batch = r.json()
@@ -49,7 +55,7 @@ class GitHubApp:
         cached = self._tokens.get(installation_id)
         if cached and cached[1] - time.time() > 300:
             return cached[0]
-        r = httpx.post(f"{API}/app/installations/{installation_id}/access_tokens",
+        r = source_http.post(f"{API}/app/installations/{installation_id}/access_tokens",
                        headers=self._app_headers(), timeout=20)
         r.raise_for_status()
         body = r.json()
@@ -59,21 +65,21 @@ class GitHubApp:
 
     def get(self, installation_id: int, path: str, **params) -> httpx.Response:
         headers = {**HEADERS, "Authorization": f"Bearer {self.installation_token(installation_id)}"}
-        r = httpx.get(f"{API}{path}", headers=headers, params=params, timeout=30)
+        r = source_http.get(f"{API}{path}", headers=headers, params=params, timeout=30, throttled=github_throttled)
         r.raise_for_status()
         return r
 
     def call(self, installation_id: int, method: str, path: str, allow: tuple = (), **kwargs) -> httpx.Response:
         """Any REST call as the installation. Raises on errors except the status codes in allow."""
         headers = {**HEADERS, "Authorization": f"Bearer {self.installation_token(installation_id)}"}
-        r = httpx.request(method, f"{API}{path}", headers=headers, timeout=30, **kwargs)
+        r = source_http.send(method, f"{API}{path}", headers=headers, timeout=30, throttled=github_throttled, **kwargs)
         if r.status_code not in allow:
             r.raise_for_status()
         return r
 
     def repo_installation(self, full_name: str) -> int:
         """This App's installation on one repo, or GitHubNotConfigured if it isn't installed there."""
-        r = httpx.get(f"{API}/repos/{full_name}/installation", headers=self._app_headers(), timeout=20)
+        r = source_http.get(f"{API}/repos/{full_name}/installation", headers=self._app_headers(), timeout=20)
         if r.status_code == 404:
             raise GitHubNotConfigured(f"the App isn't installed on {full_name}")
         r.raise_for_status()

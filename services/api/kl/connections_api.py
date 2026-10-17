@@ -107,7 +107,7 @@ def create_google_connection(ws: str, body: GoogleConnectionIn, caller: Caller =
     except ValueError as e:
         raise HTTPException(422, str(e))
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
@@ -116,8 +116,8 @@ def create_google_connection(ws: str, body: GoogleConnectionIn, caller: Caller =
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
         ref = (body.credential_ref if body.credential_ref
-               else vault.put(f"kl/connections/{cid}", {"service_account": account}) if account  # its email and key only
-               else vault.put(f"kl/connections/{cid}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token}))
+               else put(f"kl/connections/{cid}", {"service_account": account}) if account  # its email and key only
+               else put(f"kl/connections/{cid}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token}))
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'google', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -201,7 +201,7 @@ def create_jira_connection(ws: str, body: JiraConnectionIn, caller: Caller = Dep
     if body.projects and not all(jira.PROJECT.fullmatch(p) for p in body.projects):
         raise HTTPException(422, "project keys are letters and digits, starting with a letter, like EDP")
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
@@ -209,7 +209,7 @@ def create_jira_connection(ws: str, body: JiraConnectionIn, caller: Caller = Dep
                         (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", {"email": body.email, "api_token": body.api_token})
+        ref = body.credential_ref or put(f"kl/connections/{cid}", {"email": body.email, "api_token": body.api_token})
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'jira', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -265,7 +265,7 @@ def create_confluence_connection(ws: str, body: ConfluenceConnectionIn, caller: 
     if problem:
         raise HTTPException(422, problem)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
@@ -273,7 +273,7 @@ def create_confluence_connection(ws: str, body: ConfluenceConnectionIn, caller: 
                         (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", {"email": body.email, "api_token": body.api_token})
+        ref = body.credential_ref or put(f"kl/connections/{cid}", {"email": body.email, "api_token": body.api_token})
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'confluence', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -322,14 +322,14 @@ def create_slack_connection(ws: str, body: SlackConnectionIn, caller: Caller = D
     if body.credential_ref and not team_secret(ws, body.credential_ref):
         raise HTTPException(422, ref_rule(ws))
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
         if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", {"bot_token": body.bot_token})
+        ref = body.credential_ref or put(f"kl/connections/{cid}", {"bot_token": body.bot_token})
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'slack', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -370,14 +370,14 @@ def create_notion_connection(ws: str, body: NotionConnectionIn, caller: Caller =
     if body.credential_ref and not team_secret(ws, body.credential_ref):
         raise HTTPException(422, ref_rule(ws))
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
         if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", {"token": body.token})
+        ref = body.credential_ref or put(f"kl/connections/{cid}", {"token": body.token})
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'notion', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -427,14 +427,14 @@ def create_microsoft_connection(ws: str, body: MicrosoftConnectionIn, caller: Ca
     if body.credential_ref and not team_secret(ws, body.credential_ref):
         raise HTTPException(422, ref_rule(ws))
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
         if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", secret)
+        ref = body.credential_ref or put(f"kl/connections/{cid}", secret)
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'microsoft', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -555,14 +555,14 @@ def create_catalog_connection(ws: str, body: CatalogConnectionIn, caller: Caller
         require_org_admin(caller)
     cfg, secret = catalog_settings(ws, body)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
         if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = vault.put(f"kl/connections/{cid}", secret) if secret else body.credential_ref
+        ref = put(f"kl/connections/{cid}", secret) if secret else body.credential_ref
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'catalog', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -625,14 +625,14 @@ def create_directory_connection(ws: str, body: DirectoryConnectionIn, caller: Ca
     if body.credential_ref and not team_secret(ws, body.credential_ref):
         raise HTTPException(422, ref_rule(ws))
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
         ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not ws_row:
             raise HTTPException(404, "workspace not found")
         if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
             raise HTTPException(409, "a connection with that name already exists in this workspace")
         cid = uuid.uuid4()
-        ref = body.credential_ref or vault.put(f"kl/connections/{cid}", secret)
+        ref = body.credential_ref or put(f"kl/connections/{cid}", secret)
         row = conn.execute(
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'directory', %s, %s, %s, %s) RETURNING id, name, kind, status""",
@@ -716,10 +716,11 @@ def create_webhook(ws: str, name: str, body: WebhookIn, request: Request, caller
         if (c["kind"] == "slack") != bool(body.signing_secret):
             raise HTTPException(422, "Slack signs with its app's signing secret: give it; Jira and Confluence take the one Aerugo makes")
         secret = body.signing_secret or secrets.token_urlsafe(32)
-        ref = vault.put(f"kl/connections/{c['id']}/webhook", {"secret": secret})
+        path = f"kl/connections/{c['id']}/webhook"
         conn.execute("UPDATE connections SET config = config || jsonb_build_object('webhook_ref', %s::text), updated_at = now() "
-                     "WHERE id = %s", (ref, c["id"]))
+                     "WHERE id = %s", (vault.ref(path), c["id"]))
         audit(conn, org_id, caller.username, "connection.webhook.set", [ws], {"name": name, "kind": c["kind"]})
+        vault.put(path, {"secret": secret})  # last, so only the commit can fail after it (H5)
     return {"url": f"{str(request.base_url).rstrip('/')}/v1/hooks/{c['kind']}/{c['id']}",
             "secret": None if body.signing_secret else secret}
 
@@ -881,6 +882,7 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = owned_connection(conn, ws, name)
+        new_secret = None  # written last, so only the commit can fail after it (H5)
         provider = (c["config"] or {}).get("provider")
         unity_secret = body.client_secret if c["kind"] == "catalog" else None  # Unity Catalog's service principal
         rotating = c["kind"] != "catalog" and (body.client_secret is not None or body.refresh_token is not None)
@@ -948,7 +950,7 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
                 raise HTTPException(422, "admin_email must be an admin's address in one of the company's domains (KL_ORG_EMAIL_DOMAINS)")
             changed.append("admin_email")
         if rotating:  # a new version of its secret; the connection reads the new one from now on
-            ref = vault.put(f"kl/connections/{c['id']}", {"client_secret": body.client_secret, "refresh_token": body.refresh_token})
+            ref, new_secret = vault.ref(f"kl/connections/{c['id']}"), {"client_secret": body.client_secret, "refresh_token": body.refresh_token}
             changed.append("credentials")
         if body.api_token or body.email or body.service_account_key or body.certificate or body.bot_token or body.token \
                 or unity_secret:  # a new secret for one Aerugo stored
@@ -988,7 +990,7 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
                 secret = {"api_token": body.api_token}
             else:
                 raise HTTPException(422, "a Jira connection takes an email and API token; Okta, an API token")
-            ref = vault.put(f"kl/connections/{c['id']}", secret)
+            ref, new_secret = vault.ref(f"kl/connections/{c['id']}"), secret
             changed.append("credentials")
         if body.enabled is False and status != "disabled":
             status = "disabled"
@@ -1003,6 +1005,8 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
                          (org_id, Jsonb({"connection_id": str(c["id"])})))
         note_managed(conn, org_id, "connection", f"{ws}/{name}", managed, caller.username)
         audit(conn, org_id, caller.username, "connection.update", [ws], {"name": name, "changed": changed})
+        if new_secret is not None:
+            vault.put(f"kl/connections/{c['id']}", new_secret)
     return {"name": name, "kind": c["kind"], "status": status, "changed": changed}
 
 

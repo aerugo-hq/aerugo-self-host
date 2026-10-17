@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,7 +24,12 @@ RERANKS: list[dict] = []
 ALERTS: list[dict] = []  # what the app's alert webhook posted (slice P); never reset, alerts arrive late
 ANSWER = "According to the sources, page the on-call first [1]."
 UNFAITHFUL = "The CFO approves every refund personally [1]."  # nothing in any source says this
-MODE = {"answer": ANSWER}
+MODE = {"answer": ANSWER, "delay": 0.0}
+# H2: any source's fake can be throttled. POST /throttle {"prefix", "count", "status", "retry_after"} answers the next
+# `count` calls whose path starts with prefix with status (429 or 503), and Retry-After when given; GET /throttle says
+# how many it answered so. Smoke proves a sync survives it.
+THROTTLE = {"prefix": "", "left": 0, "status": 429, "retry_after": None, "answered": 0}
+THROTTLE_LOCK = threading.Lock()  # delay: seconds each answer and rerank takes, when smoke asks (H5)
 STOP = {"according", "sources", "source", "first", "that", "this", "with", "from", "they", "their", "there",
         "what", "when", "which", "about", "should", "would"}
 ISSUER = os.environ.get("KL_FAKE_OIDC_ISSUER", "http://fake-llm:8080/oidc")
@@ -56,6 +62,10 @@ def ci_token(request: dict) -> str:
 # and the Drive v3 calls the connector makes, so smoke can prove sync and permissions without Google.
 DRIVES: dict[str, dict] = {}  # drive id -> {"name": ..., "files": {file id: the file, with its text}}
 DRIVE_REFRESH, DRIVE_TOKEN = "smoke-refresh", "fake-drive-token"
+# A shared drive's changes feed (H6): kept by comparing each POST /google/files with the last ({drive: {"seq", "changed":
+# {file id: seq}, "gone": {file id: seq}, "last": {file id: file}}}); GET /google/changes-calls lists the feed's reads.
+DRIVE_CHANGES: dict = {}
+DRIVE_CALLS: list = []
 GOOGLE = os.environ.get("KL_FAKE_GOOGLE", "http://fake-llm:8080/google")  # the issuer of its sign-in ID tokens (slice F2b)
 SIGNIN_CODES: dict[str, dict] = {}  # code -> who signed in; smoke sets these through POST /google/signin
 # A fake Jira Cloud (ADR 0011): projects, issues, and who may see each, which smoke sets through POST /jira/setup, and the
@@ -101,6 +111,11 @@ GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsew
 # libraries holding folders and files, each file with its permissions and text; set through POST /microsoft/sites. A
 # file's content is a redirect to a download address, which smoke can point at another host (bad_download).
 GRAPH_TOKEN = "fake-graph-token"
+# Graph's delta (H6): each library's changes, kept by comparing each POST /microsoft/sites with the last ({library:
+# {"seq", "changed": {item id: seq}, "gone": {item id: seq}, "last": {item id: item}}}); a delta with ?token=N answers
+# what changed after N, deletions as {"id", "deleted": {}}. GET /microsoft/deltas lists the delta calls made.
+DELTA: dict = {}
+DELTA_CALLS: list = []
 GRAPH_REQUESTS: list = []
 # A fake Slack Web API (S4): a workspace, its people, and channels with members and messages (threads with their
 # replies), which smoke sets through POST /slack/setup. Like Slack it answers 200 with ok: false for a bad token, pages
@@ -296,7 +311,35 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self) -> dict:
         return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
 
+    def _throttled(self) -> bool:
+        """Answer this call as throttled, when smoke asked for that (H2)."""
+        with THROTTLE_LOCK:
+            if THROTTLE["left"] <= 0 or not THROTTLE["prefix"] or not self.path.startswith(THROTTLE["prefix"]):
+                return False
+            THROTTLE["left"] -= 1
+            THROTTLE["answered"] += 1
+            status, after = THROTTLE["status"], THROTTLE["retry_after"]
+        self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+        self.send_response(status)
+        if after is not None:
+            self.send_header("Retry-After", str(after))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
+
     def do_GET(self):
+        if self.path == "/confluence/listings":  # each page and blog post listing, and its order (H6)
+            return self._json(200, CONFLUENCE.get("listings", []))
+        if self.path == "/slack/history-calls":  # each channel history read, and from when (H6)
+            return self._json(200, SLACK.get("history_calls", []))
+        if self.path == "/google/changes-calls":  # the changes feed's reads, and from which token (H6)
+            return self._json(200, DRIVE_CALLS)
+        if self.path == "/microsoft/deltas":  # the delta calls made, and from which token (H6)
+            return self._json(200, DELTA_CALLS)
+        if self.path == "/throttle":
+            return self._json(200, {"answered": THROTTLE["answered"], "left": THROTTLE["left"]})
+        if self._throttled():
+            return None
         if self.path == "/requests":
             return self._json(200, REQUESTS)
         if self.path == "/reranks":
@@ -337,6 +380,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
             return self._json(200, ci_jwks())
         site = self.path.split("/")[1]
+        if site in JIRA_SITES and self.path == f"/{site}/searches":  # the JQL each search asked for since its setup (H6)
+            return self._json(200, JIRA_SITES[site].get("searches", []))
         if site in JIRA_SITES and self.path.startswith(f"/{site}/rest/api/3/"):
             return self._jira(urlparse(self.path), JIRA_SITES[site])
         if self.path.startswith("/confluence/wiki/download/attachments/"):  # an attachment's bytes (Q7)
@@ -609,6 +654,16 @@ class Handler(BaseHTTPRequestHandler):
         q, rest = {k: v[0] for k, v in parse_qs(url.query).items()}, url.path[len("/google/drive/v3/"):]
         if rest == "drives":
             return self._json(200, {"drives": [{"id": d, "name": v["name"]} for d, v in DRIVES.items()]})
+        if rest in ("changes/startPageToken", "changes"):  # a shared drive's changes feed (H6)
+            state = DRIVE_CHANGES.get(q.get("driveId", ""), {"seq": 0, "changed": {}, "gone": {}})
+            DRIVE_CALLS.append({"drive": q.get("driveId"), "call": rest, "token": q.get("pageToken")})
+            if rest == "changes/startPageToken":
+                return self._json(200, {"startPageToken": str(state["seq"])})
+            after, files = int(q.get("pageToken") or 0), DRIVES.get(q.get("driveId", ""), {"files": {}})["files"]
+            changed = [{"fileId": fid, "removed": False, "file": {k: v for k, v in files[fid].items() if k != "text"}}
+                       for fid, at in state["changed"].items() if at > after and fid in files]
+            removed = [{"fileId": fid, "removed": True} for fid, at in state["gone"].items() if at > after]
+            return self._json(200, {"changes": changed + removed, "newStartPageToken": str(state["seq"])})
         if rest == "files":
             query = q.get("q", "")
             if "sharedWithMe = true" in query:  # folders shared with the service account
@@ -645,17 +700,26 @@ class Handler(BaseHTTPRequestHandler):
         read = lambda kind, who: {"principal": {"type": kind, "id": who}, "operation": {"key": "read", "targetType": "space"}}
         if rest == "rest/api/user/current":
             return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
+        if len(parts) == 4 and parts[:3] == ["api", "v2", "pages"] and parts[3] in content:  # one page, its body left out
+            c = content[parts[3]]
+            return self._json(200, {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"),
+                                    "version": {"number": c.get("version", 1), "createdAt": c.get("modified", "2026-01-01T00:00:00.000Z")}})
         if rest == "api/v2/spaces":
             keys = set(q["keys"].split(",")) if q.get("keys") else None
             return self._json(200, {"results": [{"id": str(s["id"]), "key": k, "name": s["name"]} for k, s in spaces.items()
                                                 if keys is None or k in keys], "_links": {}})
         if len(parts) == 5 and parts[:3] == ["api", "v2", "spaces"] and parts[3] in by_id:
             key, s = by_id[parts[3]]
-            if parts[4] in ("pages", "blogposts"):
+            if parts[4] in ("pages", "blogposts"):  # newest-modified first when asked (H6), and each listing recorded
+                CONFLUENCE.setdefault("listings", []).append({"space": key, "kind": parts[4], "sort": q.get("sort")})
+                listed = s.get(parts[4], [])
+                if q.get("sort") == "-modified-date":
+                    listed = sorted(listed, key=lambda c: c.get("modified", "2026-01-01T00:00:00.000Z"), reverse=True)
                 return self._json(200, {"results": [
-                    {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"), "version": {"number": c.get("version", 1)},
+                    {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"),
+                     "version": {"number": c.get("version", 1), "createdAt": c.get("modified", "2026-01-01T00:00:00.000Z")},
                      "body": {"storage": {"value": c.get("body", "")}}, "_links": {"webui": f"/spaces/{key}/pages/{c['id']}"}}
-                    for c in s.get(parts[4], [])], "_links": {}})
+                    for c in listed], "_links": {}})
             if parts[4] == "permissions":
                 grants = [read("user", a) for a in s.get("users", [])] + [read("group", g) for g in s.get("groups", [])]
                 return self._json(200, {"results": grants + ([read("anonymous", None)] if s.get("anonymous") else []), "_links": {}})
@@ -767,6 +831,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             oldest = float(q.get("oldest") or 0)
+            if q.get("cursor") is None:
+                SLACK.setdefault("history_calls", []).append({"channel": q.get("channel"), "oldest": oldest})  # H6
             top = sorted((m for m in channel.get("messages", []) if float(m["ts"]) > oldest), key=lambda m: -float(m["ts"]))
             return page("messages", [{k: v for k, v in m.items() if k != "replies"} for m in top], has_more=False)
         if method == "conversations.replies":
@@ -788,12 +854,14 @@ class Handler(BaseHTTPRequestHandler):
         rest = url.path[len("/microsoft/v1.0/"):]
         start = int(q.get("$skiptoken") or 0)
 
-        def page(items):
+        def page(items, delta_link=None):
             body = {"value": items[start:start + ADMIN_PAGE]}
             if start + ADMIN_PAGE < len(items):
                 host = "http://elsewhere.test/v1.0" if GRAPH["next_elsewhere"] else f"{MICROSOFT}/v1.0"
                 from urllib.parse import urlencode  # Graph's next link keeps the request's own query, $count included
                 body["@odata.nextLink"] = f"{host}/{rest}?{urlencode({**q, '$skiptoken': start + ADMIN_PAGE}, safe='$,')}"
+            elif delta_link:  # the last page of a delta says where the next one starts (H6)
+                body["@odata.deltaLink"] = delta_link
             return self._json(200, body)
         parts = rest.split("/")
         if parts[0] == "sites" and len(parts) in (2, 3):  # a site, and its libraries: only to an app it's granted to
@@ -810,10 +878,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(403, {"error": {"code": "accessDenied", "message": "Access denied"}})
             drive = found[1]
             if parts[2:] == ["root", "delta"]:
-                return page([{"id": "root", "name": "root", "root": {}, "folder": {}}] + drive["items"])
+                state = DELTA.get(parts[1], {"seq": 0, "changed": {}, "gone": {}})
+                token = q.get("token")
+                if start == 0:
+                    DELTA_CALLS.append({"drive": parts[1], "token": token})
+                if token is None:  # from the start: everything now
+                    listed = [{"id": "root", "name": "root", "root": {}, "folder": {}}] + drive["items"]
+                else:
+                    listed = ([i for i in drive["items"] if state["changed"].get(i["id"], 0) > int(token)]
+                              + [{"id": iid, "deleted": {}} for iid, at in state["gone"].items() if at > int(token)])
+                return page(listed, f"{MICROSOFT}/v1.0/drives/{parts[1]}/root/delta?token={state['seq']}")
             item = next((i for i in drive["items"] if len(parts) >= 4 and i["id"] == parts[3]), None)
             if item is None:
                 return self._json(404, {"error": {"code": "itemNotFound"}})
+            if len(parts) == 4:  # an item itself, as a delta's changed file asks for the folders above it
+                return self._json(200, {k: v for k, v in item.items() if k not in ("text", "permissions")})
             if parts[4:] == ["permissions"]:
                 return page(item.get("permissions", []))
             if parts[4:] == ["content"]:
@@ -873,8 +952,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
         if rest == "project/search":
             return self._json(200, {"values": [{"id": k, "key": k, "name": p["name"]} for k, p in projects.items()], "isLast": True})
-        if rest == "search/jql":
-            key = q.get("jql", "").split("=", 1)[-1].split(" ORDER", 1)[0].strip()
+        if rest == "search/jql":  # project = KEY, and when a sync asks for changes only (H6), AND updated >= -Nm
+            from datetime import datetime, timedelta, timezone
+            jql = q.get("jql", "")
+            site.setdefault("searches", []).append(jql)
+            key = (re.search(r"project = (\S+)", jql) or [None, ""])[1]
+            within = re.search(r"updated >= -(\d+)m", jql)
+            recent = lambda i: not within or datetime.strptime(i.get("updated", "2026-10-01T10:00:00.000+0000"), "%Y-%m-%dT%H:%M:%S.%f%z") \
+                >= datetime.now(timezone.utc) - timedelta(minutes=int(within[1]))
             issues = [{"id": i["key"], "key": i["key"], "fields": {
                 "summary": i["summary"], "description": doc(i.get("description", "")), "updated": i.get("updated", "2026-10-01T10:00:00.000+0000"),
                 "security": i.get("security"), "issuetype": {"name": "Task"}, "status": {"name": "To Do"}, "labels": [],
@@ -884,7 +969,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "content": f"http://{self.headers.get('Host')}/{url.path.split('/')[1]}/rest/api/3/attachment/content/{a['id']}"} for a in i.get("attachments", [])],
                 "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": c.get("created", "2026-10-01T10:00:00.000+0000"),
                                           "body": doc(c["body"])} for c in i.get("comments", [])]}}}
-                for i in projects.get(key, {}).get("issues", [])]
+                for i in projects.get(key, {}).get("issues", []) if recent(i)]
             return self._json(200, {"issues": issues, "isLast": True})
         parts = rest.split("/")
         if len(parts) == 3 and parts[:2] == ["attachment", "content"]:  # an attachment's bytes (Q7)
@@ -910,12 +995,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/requests":  # a clean slate: both logs, and honest answers again
             REQUESTS.clear()
             RERANKS.clear()
-            MODE["answer"] = ANSWER
+            MODE["answer"], MODE["delay"] = ANSWER, 0.0
             return self._json(200, {})
         self._json(404, {})
 
     def do_POST(self):
         path = self.path.rstrip("/")
+        if path == "/throttle":
+            body = self._body()
+            with THROTTLE_LOCK:
+                THROTTLE.update({"prefix": str(body.get("prefix") or ""), "left": int(body.get("count") or 0), "answered": 0,
+                                 "status": int(body.get("status") or 429), "retry_after": body.get("retry_after")})
+            return self._json(200, {})
+        if self._throttled():
+            return None
         if path == "/alerts":  # the test webhook: the app posts alerts here when an org admin points it here
             ALERTS.append(self._body())
             return self._json(200, {})
@@ -979,12 +1072,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._notion("POST", urlparse(self.path), self._body())
         if path == "/slack/setup":  # smoke sets the fake Slack workspace's people and channels
             body = self._body()
-            SLACK.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle"))})
+            SLACK.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle")),
+                          "history_calls": SLACK.get("history_calls", [])})
             return self._json(200, {})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))
         if path == "/microsoft/sites":  # smoke sets SharePoint's sites, which apps each is granted to, and their files
             GRAPH["sites"] = self._body()["sites"]
+            for site in GRAPH["sites"].values():
+                for did, d in site["drives"].items():
+                    state = DELTA.setdefault(did, {"seq": 0, "changed": {}, "gone": {}, "last": {}})
+                    now = {i["id"]: i for i in d["items"]}
+                    for iid, item in now.items():
+                        if state["last"].get(iid) != item:
+                            state["seq"] += 1
+                            state["changed"][iid] = state["seq"]
+                    for iid in set(state["last"]) - set(now):
+                        state["seq"] += 1
+                        state["gone"][iid] = state["seq"]
+                    state["last"] = now
             return self._json(200, {})
         if path == "/microsoft/setup":  # smoke sets the tenant's users, deleted users, and groups
             body = self._body()
@@ -1004,8 +1110,9 @@ class Handler(BaseHTTPRequestHandler):
             OKTA["users"] = self._body()["users"]
             return self._json(200, {})
         if path == "/confluence/setup":  # smoke sets the fake Confluence's spaces, pages, groups, and people
+            listings = CONFLUENCE.get("listings", [])
             CONFLUENCE.clear()
-            CONFLUENCE.update({"spaces": {}, "groups": {}, "users": {}, **self._body()})
+            CONFLUENCE.update({"spaces": {}, "groups": {}, "users": {}, **self._body(), "listings": listings})
             return self._json(200, {})
         if path in ("/jira/setup", "/jira-b/setup"):  # smoke sets a fake Jira site's projects, issues, and who may see each
             site = JIRA_SITES[path.split("/")[1]]
@@ -1015,11 +1122,24 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/google/files":  # smoke sets a shared drive's files (and who each is shared with)
             request = self._body()
             DRIVES[request["drive"]] = {"name": request.get("name", request["drive"]), "files": {f["id"]: f for f in request["files"]}}
+            state = DRIVE_CHANGES.setdefault(request["drive"], {"seq": 0, "changed": {}, "gone": {}, "last": {}})
+            now = DRIVES[request["drive"]]["files"]
+            for fid, f in now.items():
+                if state["last"].get(fid) != f:
+                    state["seq"] += 1
+                    state["changed"][fid] = state["seq"]
+            for fid in set(state["last"]) - set(now):
+                state["seq"] += 1
+                state["gone"][fid] = state["seq"]
+            state["last"] = dict(now)
             return self._json(200, {})
         if path == "/mode":
-            MODE["answer"] = UNFAITHFUL if self._body().get("answer") == "unfaithful" else ANSWER
+            body = self._body()
+            MODE["answer"] = UNFAITHFUL if body.get("answer") == "unfaithful" else ANSWER
+            MODE["delay"] = min(float(body.get("delay") or 0), 10)
             return self._json(200, {})
         if path == "/v1/rerank":
+            time.sleep(MODE["delay"])
             request = self._body()
             RERANKS.append(request)
             asked = words(request.get("query", ""))
@@ -1034,6 +1154,7 @@ class Handler(BaseHTTPRequestHandler):
                                                                     {"start": 75.0, "text": "Next, we fail over at noon on Friday."}]})
         if path != "/v1/chat/completions":
             return self._json(404, {})
+        time.sleep(MODE["delay"])
         request = self._body()
         last = (request.get("messages") or [{}])[-1].get("content")
         if isinstance(last, list) and any(p.get("type") == "image_url" for p in last):  # a vision model (Q8)

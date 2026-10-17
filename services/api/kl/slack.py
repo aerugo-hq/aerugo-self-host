@@ -16,8 +16,8 @@ a deletion, a message Slack's retention removed, or a day that fell out of the w
 Direct messages are never read."""
 import hashlib
 import html
-import random
 import re
+import os
 import time
 from datetime import datetime, timezone
 
@@ -28,6 +28,7 @@ from .connectors import Container, Health
 from .principals import is_valid
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
+from . import source_http
 
 SLACK_API = "https://slack.com/api"
 CHANNEL = re.compile(r"^[CG][A-Z0-9]{2,20}$")
@@ -37,8 +38,11 @@ SKIPPED = {"channel_join", "channel_leave", "channel_topic", "channel_purpose", 
            "channel_unarchive", "pinned_item", "unpinned_item", "group_join", "group_leave", "bot_add", "bot_remove"}
 MAX_PAGES = 1000
 MAX_MESSAGES = 50000  # per channel per sync: past this the sync fails, rather than reading the rest as deleted
-RETRIES = 5
 HISTORY_DAYS = 365
+# An incremental sync (H6) re-reads the channel from the UTC midnight before the earlier of its last sync and this many
+# days ago, so recent edits, deletions, and thread replies carry over every time; older days wait for the daily
+# reconcile, which reads the whole history window.
+RECENT_DAYS = int(os.environ.get("KL_SLACK_RECENT_DAYS", "7"))
 
 
 class SlackError(RuntimeError):
@@ -69,19 +73,12 @@ class SlackClient:
         self._users: dict | None = None
 
     def _call(self, method: str, **params) -> dict:
-        attempt = 0
-        while True:
-            r = httpx.get(f"{self.base}/{method}", params=params, headers=self.headers, timeout=30)
-            if r.status_code == 429 and attempt < RETRIES:  # Slack's rate limits name how long to wait
-                wait = r.headers.get("Retry-After")
-                time.sleep(float(wait) if wait and wait.isdigit() else 2 ** attempt + random.random())
-                attempt += 1
-                continue
-            r.raise_for_status()
-            body = r.json()
-            if not body.get("ok"):
-                raise SlackError(str(body.get("error") or "not ok")[:100])
-            return body
+        r = source_http.get(f"{self.base}/{method}", params=params, headers=self.headers, timeout=30)  # its limits, waited out (H2)
+        r.raise_for_status()
+        body = r.json()
+        if not body.get("ok"):
+            raise SlackError(str(body.get("error") or "not ok")[:100])
+        return body
 
     def _pages(self, method: str, key: str, **params) -> list:
         out, cursor = [], None
@@ -204,8 +201,18 @@ def items_for(client: SlackClient, channel_id: str, name: str, acl: list[str], n
     return items
 
 
-def sync_channel(conn, connection: dict, client: SlackClient, channel_id: str) -> dict:
+def since_time(cursor: str | None) -> float | None:
+    """A cursor's time as a timestamp, or None for no cursor, or one that isn't an ISO time with its zone."""
+    try:
+        then = datetime.fromisoformat(cursor) if cursor else None
+    except ValueError:
+        return None
+    return then.timestamp() if then is not None and then.tzinfo is not None else None
+
+
+def sync_channel(conn, connection: dict, client: SlackClient, channel_id: str, since: str | None = None) -> dict:
     cfg = connection["config"] or {}
+    started = datetime.now(timezone.utc).isoformat()
     team, users, info = client.team(), client.users(), client.channel(channel_id)
     if not info.get("is_member"):  # the bot was removed: the channel isn't Aerugo's to read any more
         return sync_container(conn, connection, channel_id, "slack", [])
@@ -215,6 +222,9 @@ def sync_channel(conn, connection: dict, client: SlackClient, channel_id: str) -
               if u["team"] == team["id"] and not u["gone"] and not u["bot"] and u["email"]}
     if people:
         record_identities(conn, connection["org_id"], "slack", people)
-    oldest = time.time() - 86400 * int(cfg.get("history_days") or HISTORY_DAYS)
+    window = time.time() - 86400 * int(cfg.get("history_days") or HISTORY_DAYS)
+    last = since_time(since)
+    recent = None if last is None else min(last - 600, time.time() - 86400 * RECENT_DAYS) // 86400 * 86400  # a whole day
+    oldest = window if recent is None or recent <= window else recent
     items = items_for(client, channel_id, f"#{info.get('name') or channel_id}", acl, names, team["url"], oldest)
-    return sync_container(conn, connection, channel_id, "slack", items)
+    return sync_container(conn, connection, channel_id, "slack", items, complete=oldest == window, cursor=started)

@@ -32,13 +32,20 @@ def viewer_tuples(key: str, acl: list[str]) -> set:
 
 
 def sync_container(conn, connection: dict, container: str, source_kind: str, items: list[Item],
-                   classification: str = "internal") -> dict:
+                   classification: str = "internal", complete: bool = True, cursor: str | None = None,
+                   removed: tuple[str, ...] | list[str] = ()) -> dict:
     """A connection's documents are its own (migration 0040): container refs and keys are unique per site, not per org,
     so another connection's same-named container or same key is never read, updated, or deleted here.
 
     With `readers_only` on the connection (S8's readers refresh), no body is read: an item already indexed gets its
     current readers (whatever its version), one nobody may read now, or gone from the source, leaves, and a new item
-    waits for the next content sync."""
+    waits for the next content sync.
+
+    `complete` says the items are all the container holds (a full read): only then does what isn't listed leave, and
+    the container counts as reconciled. An incremental sync (H6) lists only what changed since the container's cursor,
+    so it adds and updates, and leaves deletions to the next full read, except the keys a source says are gone
+    (`removed`, as Graph's delta does). `cursor` is where the next one starts, in the connector's own terms; a readers
+    refresh moves neither."""
     org_id, team = connection["org_id"], team_for(connection, container)
     readers_only = bool(connection.get("readers_only"))
     existing = {r["external_key"]: r for r in conn.execute(
@@ -92,13 +99,15 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
         have = {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": f"document:{item.key}"})}
         writes |= want - have
         deletes |= have - want
-    gone = [(k, r["id"]) for k, r in existing.items() if k not in keep]  # deleted, or no longer readable by anyone
+    gone = [(k, r["id"]) for k, r in existing.items() if (k not in keep if complete else k in set(removed))]  # deleted, or readable by no one
     with conn.transaction():
         if gone:
             conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([doc for _, doc in gone],))
         leave_former_teams(conn, connection, container, team)  # a container routed to another team moves there
-        conn.execute("UPDATE connection_containers SET cursor = now()::text WHERE connection_id = %s AND external_id = %s",
-                     (connection["id"], container))
+        if not readers_only:  # a readers refresh reads no content, so it neither moves the cursor nor reconciles
+            conn.execute("UPDATE connection_containers SET cursor = COALESCE(%s, now()::text), "
+                         "reconciled_at = CASE WHEN %s THEN now() ELSE reconciled_at END WHERE connection_id = %s AND external_id = %s",
+                         (cursor, complete, connection["id"], container))
     for key, _ in gone:
         deletes |= {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": f"document:{key}"})}
     if writes or deletes:

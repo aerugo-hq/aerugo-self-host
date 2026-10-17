@@ -15,6 +15,7 @@ from .catalogs import Entry, owners_of
 from .connectors import Container, Health
 from .principals import is_valid
 from .vault import vault
+from . import source_http
 
 PLATFORM = re.compile(r"^[a-z0-9_-]{1,64}$")
 URN = re.compile(r"^urn:li:dataset:\(urn:li:dataPlatform:([a-z0-9_-]{1,64}),([^,()]{1,500}),([A-Z]{1,20})\)$")
@@ -48,7 +49,7 @@ class DataHubClient:
         self.platforms = [p for p in platforms if PLATFORM.fullmatch(p)]
 
     def _query(self, variables: dict) -> dict:
-        r = httpx.post(f"{self.base}/api/graphql", json={"query": QUERY, "variables": variables}, timeout=60,
+        r = source_http.post(f"{self.base}/api/graphql", json={"query": QUERY, "variables": variables}, timeout=60,
                        headers={"Authorization": f"Bearer {self._token}"})
         r.raise_for_status()
         body = r.json()
