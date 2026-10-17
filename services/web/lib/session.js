@@ -11,6 +11,8 @@ import { tx } from "./db.js";
 const env = (name, fallback) => process.env[name] || fallback;
 export const WEB_URL = env("KL_WEB_URL", "http://localhost:3000");
 export const API_URL = env("KL_API_URL", "http://api:8000");
+// M9: how long this server waits for the API, above the API's own 90 seconds for a model, which Ask may wait on.
+export const API_TIMEOUT_MS = 1000 * (Number(env("KL_WEB_API_TIMEOUT_SECONDS", "180")) || 180);
 const PUBLIC_ISSUER = env("KL_OIDC_PUBLIC_ISSUER", "http://localhost:8081/realms/acme"); // where browsers go
 const INTERNAL_ISSUER = env("KL_OIDC_INTERNAL_ISSUER", "http://keycloak:8080/realms/acme"); // what this server calls
 const CLIENT_ID = env("KL_OIDC_CLIENT_ID", "kl-web");

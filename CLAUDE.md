@@ -896,12 +896,34 @@ pass; another site's `Origin`, another site's `Referer` without an `Origin`, and
 the old proxy the app's own writes passed and another site's `Origin` was refused, but a write carrying only another
 site's `Referer` went through. Green: `make e2e` 35 passed. Smoke, the golden set, and the scenario: CI's run on the
 pull request (no API, worker, or database code changed). Not built: refusing a GET without the app's `Origin` (reads
-are audited, and a cross-site link can make one; it reveals nothing to the linking site).
+are audited, and a cross-site link can make one; it reveals nothing to the linking site). CI on pull request 33: unit
+54 passed; smoke 169 passed, 17 skipped, 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario
+Recall@10 100%, MRR 0.92 over 12 cases; no leak and no regression.
+M9 (the web server's calls to the API, and uploads). The API proxy waited on the API with no limit of its own, and
+held every request body whole before sending it on: an import up to 51 MB in memory, and a chunked one of any size,
+since only a declared length was checked. Every call the web server makes to the API (the proxy's, and the GitHub
+and Google linking callbacks') now has `KL_WEB_API_TIMEOUT_SECONDS` (`API_TIMEOUT_MS` in `lib/session.js`; 180 by
+default, above the API's own 90 seconds for a model, which Ask may wait on), body included. A request's body streams
+through (`duplex: "half"`), counted on the way and cut off past `MAX_UPLOAD` whether or not its length was declared;
+a declared length over it is still refused at once. A call that runs out of time answers 504, one cut off 413, one
+that can't reach the API 502, where before an error went unhandled. Answers are still read whole (JSON, bounded by the
+API). A third web server, `web-c`, joins the e2e profile (`make e2e` builds it): it gives the API a millisecond, so
+its answers show what a slow API looks like; the conftest forwards it at port 3002. Browser tests:
+`test_an_api_that_doesnt_answer_in_time_gets_a_504_not_a_hung_request` and
+`test_an_upload_past_the_limit_is_cut_off_without_being_held_whole` (a 60 MB form whose length is never declared,
+over a raw connection; the proxy's own 413, not the API's). Red first, on the old proxy: `web-c` answered 200 (no
+limit), and the 60 MB upload was held whole and sent on, refused only by the API ("the export is over 50 MB"). A
+first version of the upload test sent junk instead of a form, which the API's parser refuses at its first bytes, so
+it couldn't tell the two proxies apart; it now sends a well-formed form whose file grows past the limit. Green: `make
+e2e` 37 passed (once, `test_a_team_scope_follows_you_everywhere` missed its click under load and passed alone and in
+the full run after). Smoke and both evaluation sets: CI's run on the pull request (no API, worker, or database code
+changed). Not built: streaming answers back to the browser (they're small JSON; the OKF export isn't fetched through
+the proxy).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, and M8 are done; next, M6, M9, and M10, then the lows; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, and M9 are done; next, M6 and M10, then the lows; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

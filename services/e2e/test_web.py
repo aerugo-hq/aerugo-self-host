@@ -1,11 +1,13 @@
 """Browser tests (slice D5): the web app, used as people use it, and always within their permissions."""
+import http.client
+import json
 import re
 import uuid
 import zipfile
 
 from playwright.sync_api import expect
 
-from conftest import WEB, WEB_B, sign_in
+from conftest import WEB, WEB_B, WEB_C, sign_in
 
 # The seed runbook, by its id: readable by the payments group only. Found by id, not title, because a copy synced from
 # GitHub can share its title (and alice, linked to GitHub, may read that copy too). A result opens in the reader.
@@ -226,6 +228,38 @@ def test_a_write_must_come_from_the_apps_own_pages(page):
     assert refused({"Origin": "https://attacker.example"}), "a write from another site went through"
     assert refused({"Referer": "https://attacker.example/page"}), "a write without an Origin, from another site's page, went through"
     assert refused({}), "a write with neither an Origin nor a Referer went through"
+
+
+def test_an_api_that_doesnt_answer_in_time_gets_a_504_not_a_hung_request(page):
+    sign_in(page, "alice")
+    late = page.request.get(f"{WEB_C}/api/whoami")  # M9: a web server that gives the API a millisecond
+    assert late.status == 504 and "in time" in late.json()["detail"], f"{late.status} {late.text()[:200]}"
+
+
+def test_an_upload_past_the_limit_is_cut_off_without_being_held_whole(page):
+    sign_in(page, "alice")
+    session = next(c["value"] for c in page.context.cookies() if c["name"] == "kl_session")
+    conn = http.client.HTTPConnection("localhost", 3000, timeout=120)  # M9: 60 MB, its length never declared
+    conn.putrequest("POST", "/api/workspaces/payments/imports")
+    for name, value in (("Cookie", f"kl_session={session}"), ("Origin", WEB), ("Transfer-Encoding", "chunked"),
+                        ("Content-Type", "multipart/form-data; boundary=x")):
+        conn.putheader(name, value)
+    conn.endheaders()
+    # A well-formed form whose file grows past the limit, so the API would read it to its end before refusing it.
+    fields = b"".join(b'--x\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n' % pair
+                      for pair in ((b"name", b"m9-oversized"), (b"readers", b"group:payments")))
+    parts = [fields + b'--x\r\nContent-Disposition: form-data; name="file"; filename="export.zip"\r\n'
+                      b"Content-Type: application/zip\r\n\r\n"] + [b"0" * (1 << 20)] * 60 + [b"\r\n--x--\r\n"]
+    try:
+        for part in parts:
+            conn.send(b"%x\r\n%s\r\n" % (len(part), part))
+        conn.send(b"0\r\n\r\n")
+    except OSError:
+        pass  # cut off mid-upload; the answer says why
+    answer = conn.getresponse()
+    detail = json.loads(answer.read() or b"{}").get("detail")
+    # The proxy's own refusal, not the API's (which would mean the whole upload was held here first and sent on).
+    assert answer.status == 413 and detail == "the file is over 50 MB", f"{answer.status} {detail}"
 
 
 def test_every_page_carries_a_content_security_policy_with_a_fresh_nonce(page):

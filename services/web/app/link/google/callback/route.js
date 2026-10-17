@@ -1,7 +1,7 @@
 // Google sends the browser back here after someone signs in to prove their Google identity (slice F2b). The code
 // goes straight from this server to the API, which exchanges and verifies it; no browser JavaScript ever sees it.
 import { NextResponse } from "next/server";
-import { API_URL, SESSION_COOKIE, WEB_URL, accessToken } from "../../../../lib/session.js";
+import { API_TIMEOUT_MS, API_URL, SESSION_COOKIE, WEB_URL, accessToken } from "../../../../lib/session.js";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +12,7 @@ export async function GET(request) {
   let outcome;
   try {
     const r = await fetch(`${API_URL}/v1/identities/google/complete`, {
-      method: "POST", cache: "no-store",
+      method: "POST", cache: "no-store", signal: AbortSignal.timeout(API_TIMEOUT_MS),
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ code: q.get("code") || "", state: q.get("state") || "" }),
     });
