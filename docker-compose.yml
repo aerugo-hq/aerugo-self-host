@@ -124,6 +124,7 @@ services:
       KL_OPENBAO_URL: http://openbao:8200
       KL_OPENBAO_TOKEN: ${OPENBAO_SERVICES_TOKEN:-dev-services-token}   # G1: never root
       KL_OWNER_DATABASE_URL: postgresql://kl_owner:${KL_OWNER_PASSWORD:-owner-dev-only}@postgres:5432/kl
+      KL_WEB_PASSWORD: ${KL_WEB_PASSWORD:-web-dev-only}   # H3: provisioning sets the kl_web role's password from it
       KL_ORG_SLUG: acme
       KL_DEV_GITHUB_LOGIN: ${KL_DEV_GITHUB_LOGIN:-}
       KL_SEED_KNOWLEDGE_DIR: /seed-knowledge   # dev only: provision enqueues indexing of the sandbox bundles
@@ -247,6 +248,7 @@ services:
       KL_APP_DATABASE_URL: postgresql://kl_app:${KL_APP_PASSWORD:-app-dev-only}@postgres:5432/kl
       KL_OWNER_DATABASE_URL: postgresql://kl_owner:${KL_OWNER_PASSWORD:-owner-dev-only}@postgres:5432/kl
       KL_INGEST_DATABASE_URL: postgresql://kl_ingest:${KL_INGEST_PASSWORD:-ingest-dev-only}@postgres:5432/kl
+      KL_WEB_DATABASE_URL: postgresql://kl_web:${KL_WEB_PASSWORD:-web-dev-only}@postgres:5432/kl
       KL_SMOKE_PROVIDER: ${KL_SMOKE_PROVIDER:-}
       KL_SMOKE_MODEL: ${KL_SMOKE_MODEL:-}
       KL_SMOKE_BASE_URL: ${KL_SMOKE_BASE_URL:-}
@@ -291,7 +293,7 @@ services:
 
   # The web app (slice D2), in its own profile so `make up` and `make smoke` never depend on its build.
   # Start it with `make web`. It signs users in with PKCE and keeps their tokens server-side.
-  web:
+  web: &web
     build: ./services/web
     profiles: ["web"]
     environment:
@@ -300,12 +302,21 @@ services:
       KL_OIDC_PUBLIC_ISSUER: http://localhost:${KL_KEYCLOAK_PORT:-8081}/realms/acme
       KL_OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/acme
       KL_OIDC_CLIENT_ID: kl-web
+      # H3: sessions live in Postgres (as kl_web, which reaches only them), their tokens encrypted with this key
+      KL_WEB_DATABASE_URL: postgresql://kl_web:${KL_WEB_PASSWORD:-web-dev-only}@postgres:5432/kl
+      KL_WEB_SESSION_KEY: ${KL_WEB_SESSION_KEY:-web-session-key-dev-only-never-anywhere-else}
       NEXT_TELEMETRY_DISABLED: "1"
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:
       api:
         condition: service_started
+
+  # A second web server, for the browser tests only (H3): a session begun on one must work on the other.
+  web-b:
+    <<: *web
+    profiles: ["e2e"]
+    ports: []
 
   e2e:   # browser tests (slice D5): `make e2e` runs Chromium through the web app as people use it
     build: ./services/e2e
@@ -317,6 +328,8 @@ services:
       - ./services/e2e/results:/results   # screenshots and traces of failures
     depends_on:
       web:
+        condition: service_started
+      web-b:
         condition: service_started
       keycloak:
         condition: service_started

@@ -2418,33 +2418,50 @@ def github_checks_leave_the_seed_alone():
     assert not brought_in(), f"documents from {repos} stayed after their connection was removed"
 
 
+# The web app, when `make web` runs it (optional checks). Not KL_WEB_URL: that's the API's public address for the app,
+# which smoke inherits (localhost:3000, nothing inside this container), so the web checks used to skip even with it up.
+WEB = os.environ.get("KL_SMOKE_WEB_URL", "http://web:3000")
+
+
+def web_up() -> bool:
+    try:
+        httpx.get(f"{WEB}/auth/login", timeout=5)
+        return True
+    except httpx.HTTPError:
+        return False
+
+
+def web_sign_in(browser: httpx.Client, user: str) -> httpx.Response:
+    """Sign in to the web app as a browser without JavaScript does, following redirects by hand; the callback's answer."""
+    import html
+    from urllib.parse import parse_qs, urlsplit
+    public_web = "http://localhost:3000"
+    public_kc, internal_kc = ISSUER.split("/realms/")[0], TOKEN_URL.split("/realms/")[0]
+    auth = browser.get(f"{WEB}/auth/login").headers["location"]
+    q = parse_qs(urlsplit(auth).query)
+    assert q.get("code_challenge_method") == ["S256"] and q.get("client_id") == ["kl-web"] and q.get("code_challenge"), auth
+    # Keycloak hands out localhost:8081 URLs (its public name); inside the network it's keycloak:8080.
+    page = browser.get(auth.replace(public_kc, internal_kc))
+    form = re.search(r"<form[^>]*kc-form-login[^>]*>", page.text)
+    assert form, f"no Keycloak login form (status {page.status_code})"
+    action = html.unescape(re.search(r'action="([^"]+)"', form.group(0)).group(1))
+    back = browser.post(action.replace(public_kc, internal_kc), data={"username": user, "password": PASSWORDS[user], "credentialId": ""})
+    callback = back.headers.get("location", "")
+    assert callback.startswith(f"{public_web}/auth/callback?"), f"Keycloak sent the browser to {callback[:120]!r}"
+    landed = browser.get(callback.replace(public_web, WEB))
+    assert landed.is_redirect, f"callback: {landed.status_code} {landed.text[:200]}"
+    return landed
+
+
 @check
 def web_signin_keeps_tokens_server_side():
     """Optional: the web app signs alice in with PKCE, keeps her tokens server-side, and serves her map within her permissions"""
-    import html
-    from urllib.parse import parse_qs, urlsplit
-    web, public_web = os.environ.get("KL_WEB_URL", "http://web:3000"), "http://localhost:3000"
-    try:
-        httpx.get(f"{web}/auth/login", timeout=5)
-    except httpx.HTTPError:
+    web = WEB
+    if not web_up():
         return SKIP  # run `make web`
     assert httpx.get(f"{web}/api/graph", timeout=10).status_code == 401, "the proxy served an anonymous request"
-    public_kc, internal_kc = ISSUER.split("/realms/")[0], TOKEN_URL.split("/realms/")[0]
     with httpx.Client(timeout=30) as browser:  # a browser without JavaScript; redirects are followed by hand
-        auth = browser.get(f"{web}/auth/login").headers["location"]
-        q = parse_qs(urlsplit(auth).query)
-        assert q.get("code_challenge_method") == ["S256"] and q.get("client_id") == ["kl-web"] and q.get("code_challenge"), auth
-        # Keycloak hands out localhost:8081 URLs (its public name); inside the network it's keycloak:8080.
-        page = browser.get(auth.replace(public_kc, internal_kc))
-        form = re.search(r"<form[^>]*kc-form-login[^>]*>", page.text)
-        assert form, f"no Keycloak login form (status {page.status_code})"
-        action = html.unescape(re.search(r'action="([^"]+)"', form.group(0)).group(1))
-        back = browser.post(action.replace(public_kc, internal_kc),
-                            data={"username": "alice", "password": PASSWORDS["alice"], "credentialId": ""})
-        callback = back.headers.get("location", "")
-        assert callback.startswith(f"{public_web}/auth/callback?"), f"Keycloak sent the browser to {callback[:120]!r}"
-        landed = browser.get(callback.replace(public_web, web))
-        assert landed.is_redirect, f"callback: {landed.status_code} {landed.text[:200]}"
+        landed = web_sign_in(browser, "alice")
         seen = landed.text + " ".join(landed.headers.values())
         # Keycloak's own SSO cookies (on Keycloak's domain) are JWTs by design. The app's cookies must never be:
         # the session cookie is an opaque random id, and nothing the app sends the browser holds a token.
@@ -2460,6 +2477,65 @@ def web_signin_keeps_tokens_server_side():
                               json={"question": PAGE_QUESTION, "model": "payments/smoke-fake"})
         assert forged.status_code == 403, "a cross-site POST went through"
     print("      alice signed in with PKCE; the browser holds only an opaque session cookie; her map matches her permissions")
+
+
+@check
+def web_sessions_live_in_postgres_and_refresh_once():
+    """Optional: web sessions live in Postgres, not one web server's memory (H3): a row holds a hash of the session cookie, never the cookie, and the tokens only encrypted; the web's database role reaches nothing else; a session idle past its limit is refused; an expired access token is refreshed once however many requests arrive together, with Keycloak rotating refresh tokens, and the session keeps working (M2); signing out removes the session"""
+    from concurrent.futures import ThreadPoolExecutor
+    if not web_up():
+        return SKIP  # run `make web`
+    jwt_shape = re.compile(rb"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.")
+    whoami = lambda sid: httpx.get(f"{WEB}/api/whoami", cookies={"kl_session": sid}, timeout=30).status_code
+
+    def session(sid: str) -> dict | None:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return conn.execute("SELECT * FROM kl.web_sessions WHERE id_hash = %s", (hashlib.sha256(sid.encode()).digest(),)).fetchone()
+
+    def signed_in() -> str:
+        with httpx.Client(timeout=30) as browser:
+            web_sign_in(browser, "alice")
+            return browser.cookies["kl_session"]
+
+    sid = signed_in()
+    row = session(sid)
+    assert row and row["username"] == "alice", "the session isn't in Postgres"
+    stored = b" ".join(bytes(v) if isinstance(v, (bytes, memoryview)) else str(v).encode() for v in row.values())
+    assert sid.encode() not in stored and not jwt_shape.search(stored), "the session row holds the cookie or a readable token"
+    with psycopg.connect(os.environ["KL_WEB_DATABASE_URL"]) as conn:
+        try:
+            conn.execute("SELECT 1 FROM kl.documents LIMIT 1")
+            raise AssertionError("the web's database role can read documents")
+        except psycopg.errors.InsufficientPrivilege:
+            pass
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # the access token runs out
+        conn.execute("UPDATE kl.web_sessions SET access_expires_at = now() - interval '1 minute' WHERE id_hash = %s", (row["id_hash"],))
+    with ThreadPoolExecutor(6) as pool:
+        codes = list(pool.map(lambda _: whoami(sid), range(6)))
+    after = session(sid)
+    assert codes == [200] * 6, f"requests that arrived together while the token was refreshed: {codes}"
+    assert after and bytes(after["refresh_token"]) != bytes(row["refresh_token"]), "the session wasn't refreshed, or was lost"
+    assert whoami(sid) == 200, "the session stopped working after its refresh"
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # idle past its limit
+        conn.execute("UPDATE kl.web_sessions SET idle_expires_at = now() - interval '1 second' WHERE id_hash = %s", (row["id_hash"],))
+    assert whoami(sid) == 401 and session(sid) is None, "a session idle past its limit still worked, or was kept"
+
+    sid = signed_in()
+    assert httpx.get(f"{WEB}/auth/logout", cookies={"kl_session": sid}, timeout=30).is_redirect
+    assert session(sid) is None and whoami(sid) == 401, "signing out left the session behind"
+
+    ended = secrets.token_bytes(32)  # a session that ended while no web server was asked: the worker sweeps it
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        conn.execute("INSERT INTO kl.web_sessions (id_hash, org_id, username, access_token, refresh_token, access_expires_at, "
+                     "idle_expires_at, expires_at) VALUES (%s, %s, 'alice', %s, %s, now(), now() - interval '1 minute', "
+                     "now() + interval '1 hour')", (ended, acme_org_id(), b"\x01", b"\x01"))
+    run_job("retention.apply")
+    with psycopg.connect(OWNER_DB) as conn:
+        assert not conn.execute("SELECT 1 FROM kl.web_sessions WHERE id_hash = %s", (ended,)).fetchone(), "the worker kept an ended session"
+    print("      the session lived in Postgres as a hash and ciphertext; 6 requests on an expired token refreshed it once; "
+          "idle and signed-out sessions were refused and gone, and the worker swept an ended one")
 
 
 # ------------------------------------------------------------------ telemetry (slice G)

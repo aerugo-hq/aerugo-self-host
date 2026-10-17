@@ -116,6 +116,10 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** H3 with M2 (`h3-m2-web-sessions`): web sessions in Postgres (a hash of the
+cookie, tokens encrypted, a role that reaches nothing else, idle and absolute lifetimes, swept by the worker), shared
+by every web server; one refresh per session at a time, with Keycloak rotating refresh tokens.
+
 **Done and verified, 2026-10-17:** H6b (`h6b-expired-cursors`, the Phase 0 report's first risk): a cursor Graph or
 Drive no longer accepts is read in full at once, instead of failing every attempt until the connection stopped.
 

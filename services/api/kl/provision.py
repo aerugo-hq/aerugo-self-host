@@ -1,6 +1,6 @@
 """Bootstrap, run on every `make up`; each step is idempotent:
   1. make sure OpenBao has the KV v2 mount the API uses
-  2. apply pending database migrations (kl/migrations)
+  2. apply pending database migrations (kl/migrations), and give the web server's role its password (H3)
   3. load the GitHub App credentials from .secrets/ into OpenBao (dev OpenBao is in-memory)
   4. create the OpenFGA store, model, and seed tuples, or upgrade the model if authz/model.json changed
   5. link dev users to source identities (alice = KL_DEV_GITHUB_LOGIN, bob = octocat)"""
@@ -181,9 +181,24 @@ def ensure_embedding_models() -> None:
             conn.execute("INSERT INTO kl.jobs (org_id, kind) VALUES (%s, 'knowledge.seed')", (org_id,))
 
 
+def ensure_web_role() -> None:
+    """The web server's database role (H3, migration 0055) gets its password from KL_WEB_PASSWORD, on every run, so a
+    rotated password takes effect at the next deploy. Unset, the role keeps none and the web server can't connect:
+    no one can sign in, which is the failure we want."""
+    from psycopg import sql
+    password = os.environ.get("KL_WEB_PASSWORD", "")
+    if not password:
+        print("provision: KL_WEB_PASSWORD is unset: the web server can't reach its sessions")
+        return
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        conn.execute(sql.SQL("ALTER ROLE kl_web PASSWORD {}").format(sql.Literal(password)))
+    print("provision: the web server's database role is ready")
+
+
 def main() -> None:
     ensure_kv_mount()
     print("provision: migrations applied:", apply_pending() or "none pending")
+    ensure_web_role()
     import_github_app()
     import_github_app("curator-app")
     ensure_embedding_models()
