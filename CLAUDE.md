@@ -682,9 +682,9 @@ it now waits until the section is offered, every assertion kept. Still open: thr
 takes over a second (1.2 and 1.6 seconds among six calls), while the API answers it directly in about 100 ms (twenty
 calls, 87 to 165 ms) and each of its steps inside the stack takes about 100 ms in all; the web app is unchanged here.
 Proof for P1 to P3, H1, H5, H4, H2, and H6, on a fresh stack with CI's settings (the example `.env`, an empty
-`.secrets/`), at c88b69c: `make smoke` 166 passed, 16 skipped (the optional GitHub, model, web sign-in, and telemetry
+`.secrets/`), at 1e56fcd: `make smoke` 166 passed, 16 skipped (the optional GitHub, model, web sign-in, and telemetry
 checks), 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0 (claims threshold 1.0 over 9 labeled claims), no
-regression; `make eval-scenario` Recall@10 100%, MRR 0.92 over 12 cases, no leaks, no regression. At f41e0b7 (the
+regression; `make eval-scenario` Recall@10 100%, MRR 0.92 over 12 cases, no leaks, no regression. At 7ea91e4 (the
 browser test's fix): `make e2e` 31 passed. `make sdk-test` 5 and 4 passed; the provider's build, vet, and unit tests
 passed, and its acceptance tests 12 passed (the route's skips without a real GitHub connection). The scenario's gate
 said "BETTER" (impact-cross-team first at #1, up from #2), but migration-plan moved from #1 to #2 at the same time, MRR
@@ -692,7 +692,7 @@ unchanged at 0.9167, so the baseline wasn't recorded again: the gate reports a c
 one that ranks worse (it fails only on a case that finds less, or on MRR). Red first: S5's check and P3's failed at the
 stack's tip before the two fixes (smoke 164 passed, 16 skipped, 2 failed), and pass after. Not reproduced: each item's
 own red-first proof from when it was built (its commits record none). These landed as one pull request, by decision,
-rather than one per item. CI on pull request 24: clients and smoke passed; merged as 62f1004.
+rather than one per item. CI on pull request 24: clients and smoke passed; merged as 88ce0fc.
 **Phase 0 report, 2026-10-17.**
 *Proven*, each on a fresh stack with CI's settings and recorded above with its checks. C1 (pull request 23): smoke 155
 passed, 31 browser tests, 12 provider acceptance tests. P1 to P3, H1, H5, H4, H2, and H6 (pull request 24): smoke 166
@@ -742,7 +742,7 @@ unshared, one deleted, and one added. Red first: on the old code, Microsoft 365'
 fix, Drive's failed on the 400; with both, each synced on its first attempt, the connection stayed `ready`, its
 container counted as reconciled, the unshared and deleted files left, and the new one came in. Proof on a fresh stack
 with CI's settings (`COMPOSE_ENV_FILES=.env.example`, an empty folder over `/run/kl-secrets`, a project of its own),
-at 60bff37: `make smoke` 167 passed, 16 skipped (optional), 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5
+at 46c1658: `make smoke` 167 passed, 16 skipped (optional), 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5
 1.0, no regression; `make eval-scenario` Recall@10 100%, MRR 0.92 over 12 cases, no leaks, no regression (the same
 two cases swapped places as in Phase 0's run, so the swap is stable; MRR unchanged, the baseline kept). Not run: the
 browser tests and the provider's tests (H6b touches neither the web app nor the API they call).
