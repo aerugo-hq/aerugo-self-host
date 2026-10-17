@@ -15,6 +15,7 @@ sharing decides its readers, failing closed:
 A file nobody may read isn't indexed; one larger than MAX_BYTES is indexed by its name only. Content is downloaded
 from the address Graph redirects to only when that's the tenant's own SharePoint host (or the dev fake)."""
 import hashlib
+import logging
 import re
 
 import httpx
@@ -26,6 +27,8 @@ from .principals import is_valid
 from .sync_items import Item, record_identities, sync_container
 from .vault import vault
 from . import source_http
+
+log = logging.getLogger("kl.microsoft365")
 
 SITE = re.compile(r"^[a-z0-9-]+\.sharepoint\.com,[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12},"
                   r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")  # hostname,site collection id,web id
@@ -179,10 +182,18 @@ def readers(permissions: list[dict], groups: dict[str, list[str]], seen: dict[st
 
 def sync_library(conn, connection: dict, client: M365Client, drive: str, since: str | None = None) -> dict:
     """A library: all of it, or (from the delta link the last sync ended with, H6) only what changed since, a deleted
-    file leaving at once, since Graph names it."""
+    file leaving at once, since Graph names it. A link Graph has expired (410, resyncRequired) is read as no link: the
+    whole library, which also reconciles it (H6b), so an expired link never fails the sync until the connection stops."""
     groups, seen, items = entra_groups(conn), {}, []
-    files, deleted, link = client.files(drive, since)
     incremental = bool(since) and since.startswith(f"{client.base}/v1.0/drives/{drive}/")
+    try:
+        files, deleted, link = client.files(drive, since)
+    except httpx.HTTPStatusError as e:
+        if not (incremental and e.response.status_code == 410):
+            raise
+        log.info("Graph expired library %s's delta link; reading it in full", drive)
+        incremental = False
+        files, deleted, link = client.files(drive)
     key = lambda item: f"m365-{hashlib.sha256(drive.encode()).hexdigest()[:10]}-{item}"
     for f in files:
         if not supported(f.get("name") or ""):

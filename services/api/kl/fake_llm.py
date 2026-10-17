@@ -64,6 +64,7 @@ DRIVES: dict[str, dict] = {}  # drive id -> {"name": ..., "files": {file id: the
 DRIVE_REFRESH, DRIVE_TOKEN = "smoke-refresh", "fake-drive-token"
 # A shared drive's changes feed (H6): kept by comparing each POST /google/files with the last ({drive: {"seq", "changed":
 # {file id: seq}, "gone": {file id: seq}, "last": {file id: file}}}); GET /google/changes-calls lists the feed's reads.
+# POST /google/expire {"drive"} makes Drive refuse every token handed out so far, as it does a stale one (H6b).
 DRIVE_CHANGES: dict = {}
 DRIVE_CALLS: list = []
 GOOGLE = os.environ.get("KL_FAKE_GOOGLE", "http://fake-llm:8080/google")  # the issuer of its sign-in ID tokens (slice F2b)
@@ -114,6 +115,7 @@ GRAPH_TOKEN = "fake-graph-token"
 # Graph's delta (H6): each library's changes, kept by comparing each POST /microsoft/sites with the last ({library:
 # {"seq", "changed": {item id: seq}, "gone": {item id: seq}, "last": {item id: item}}}); a delta with ?token=N answers
 # what changed after N, deletions as {"id", "deleted": {}}. GET /microsoft/deltas lists the delta calls made.
+# POST /microsoft/expire {"drive"} expires every delta link handed out so far: Graph's 410 resyncRequired (H6b).
 DELTA: dict = {}
 DELTA_CALLS: list = []
 GRAPH_REQUESTS: list = []
@@ -660,6 +662,10 @@ class Handler(BaseHTTPRequestHandler):
             if rest == "changes/startPageToken":
                 return self._json(200, {"startPageToken": str(state["seq"])})
             after, files = int(q.get("pageToken") or 0), DRIVES.get(q.get("driveId", ""), {"files": {}})["files"]
+            if after <= state.get("expired_to", -1):  # as Drive answers a token it no longer accepts (H6b)
+                return self._json(400, {"error": {"code": 400, "message": "Invalid Value", "errors": [
+                    {"domain": "global", "reason": "invalid", "message": "Invalid Value", "locationType": "parameter",
+                     "location": "pageToken"}]}})
             changed = [{"fileId": fid, "removed": False, "file": {k: v for k, v in files[fid].items() if k != "text"}}
                        for fid, at in state["changed"].items() if at > after and fid in files]
             removed = [{"fileId": fid, "removed": True} for fid, at in state["gone"].items() if at > after]
@@ -882,6 +888,9 @@ class Handler(BaseHTTPRequestHandler):
                 token = q.get("token")
                 if start == 0:
                     DELTA_CALLS.append({"drive": parts[1], "token": token})
+                if token is not None and int(token) <= state.get("expired_to", -1):  # as Graph answers an expired link (H6b)
+                    return self._json(410, {"error": {"code": "resyncRequired", "message": "Resync required. Replace any "
+                                                      "local items with the server's version and start over."}})
                 if token is None:  # from the start: everything now
                     listed = [{"id": "root", "name": "root", "root": {}, "folder": {}}] + drive["items"]
                 else:
@@ -1091,6 +1100,14 @@ class Handler(BaseHTTPRequestHandler):
                         state["seq"] += 1
                         state["gone"][iid] = state["seq"]
                     state["last"] = now
+            return self._json(200, {})
+        if path == "/microsoft/expire":  # H6b: every delta link a library has handed out so far is expired
+            state = DELTA.setdefault(self._body()["drive"], {"seq": 0, "changed": {}, "gone": {}, "last": {}})
+            state["expired_to"] = state["seq"]
+            return self._json(200, {})
+        if path == "/google/expire":  # H6b: every changes token a shared drive has handed out so far is refused
+            state = DRIVE_CHANGES.setdefault(self._body()["drive"], {"seq": 0, "changed": {}, "gone": {}, "last": {}})
+            state["expired_to"] = state["seq"]
             return self._json(200, {})
         if path == "/microsoft/setup":  # smoke sets the tenant's users, deleted users, and groups
             body = self._body()

@@ -14,6 +14,7 @@ own permissions decide its readers, and fail closed:
 A file left with no reader isn't indexed, and a file gone from the drive is removed with everything derived from it.
 The connector talks only to the Google API addresses on KL_GOOGLE_API_BASES.
 """
+import logging
 import re
 import time
 
@@ -30,6 +31,7 @@ from .sync_items import record_identities
 from .vault import vault
 from . import source_http
 
+log = logging.getLogger("kl.gdrive")
 GOOGLE_API = "https://www.googleapis.com"
 GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
 EXPORTS = {  # Google's own formats, exported as files the extractor reads
@@ -254,6 +256,20 @@ def directory_groups(conn) -> dict[str, list[str]]:
     return {r["group_email"]: r["members"] for r in conn.execute(GROUPS_SQL).fetchall()}
 
 
+def token_refused(r: httpx.Response) -> bool:
+    """Drive's answer to a changes token it no longer accepts (H6b): a 400 that names `pageToken`, or a 410. Any other
+    error is the sync's to fail on, so an outage is never read as an expired token."""
+    if r.status_code == 410:
+        return True
+    if r.status_code != 400:
+        return False
+    try:
+        errors = (r.json().get("error") or {}).get("errors") or []
+    except ValueError:  # not JSON, so not that answer
+        return False
+    return any(isinstance(e, dict) and e.get("location") == "pageToken" for e in errors)
+
+
 def viewer_tuples(key: str, acl: list[str]) -> set:
     return {(f"identity:{p[4:]}#owner" if p.startswith("ext:") else f"{p}#member", "viewer", f"document:{key}") for p in acl}
 
@@ -269,8 +285,14 @@ def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str, since
     groups = directory_groups(conn)  # read every sync: a member taken out of a group loses the file on the next one
     incremental = bool(since and TOKEN.fullmatch(since)) and not drive_id.startswith(FOLDER_PREFIX) and not readers_only
     if incremental:
-        files, removed, cursor = client.changes(drive_id, since)
-    else:
+        try:
+            files, removed, cursor = client.changes(drive_id, since)
+        except httpx.HTTPStatusError as e:  # a token Drive no longer accepts: the whole drive, which reconciles it (H6b)
+            if not token_refused(e.response):
+                raise
+            log.info("Drive refused shared drive %s's changes token; reading it in full", drive_id)
+            incremental = False
+    if not incremental:
         cursor = None if drive_id.startswith(FOLDER_PREFIX) or readers_only else client.start_token(drive_id)
         files, removed = client.files(drive_id), []
     existing = {r["external_key"]: r for r in conn.execute(

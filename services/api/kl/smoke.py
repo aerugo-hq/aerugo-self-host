@@ -3948,6 +3948,93 @@ def a_drive_sync_follows_its_changes_feed():
 
 
 @check
+def an_expired_cursor_is_read_in_full_and_the_connection_keeps_syncing():
+    """Expired cursors (H6b): when Graph expires a library's delta link (410 resyncRequired), or Drive stops accepting a shared drive's changes token (400 on pageToken), the next sync reads that container in full on its first attempt instead of failing until the connection stops, so a file whose sharing was removed meanwhile leaves, a deleted one too, and a new one comes in"""
+    tag = secrets.token_hex(3)
+    alice = "alice@acme.test"
+
+    def sync_once(name: str, container: str) -> dict:
+        """One scheduled sync, done on its first attempt: a failure is reported at once, not waited out through retries."""
+        with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
+            job = conn.execute("INSERT INTO kl.jobs (org_id, kind, payload) SELECT org_id, 'connection.sync', "
+                               "jsonb_build_object('connection_id', id::text, 'reason', 'schedule') FROM kl.connections "
+                               "WHERE name = %s RETURNING id", (name,)).fetchone()["id"]
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+                row = conn.execute("SELECT j.status, j.attempts, j.last_error, c.status AS connection, cc.reconciled_at > now() - "
+                                   "interval '2 minutes' AS reconciled FROM kl.jobs j JOIN kl.connections c ON c.name = %s "
+                                   "JOIN kl.connection_containers cc ON cc.connection_id = c.id AND cc.external_id = %s WHERE j.id = %s",
+                                   (name, container, job)).fetchone()
+            assert not row["last_error"], f"{name}: the sync failed on an expired cursor: {row['last_error'][:200]}"
+            if row["status"] == "done":
+                return row
+            time.sleep(1)
+        raise AssertionError(f"{name}: the sync never finished")
+
+    def keys(source: str, like: str) -> set:
+        with psycopg.connect(OWNER_DB) as conn:
+            return {r[0] for r in conn.execute("SELECT external_key FROM kl.documents WHERE source_kind = %s AND external_key LIKE %s",
+                                               (source, like))}
+
+    # Microsoft 365: a library, its delta link expired between syncs
+    tenant = str(uuid.uuid4())
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    site, library, m365 = f"acme.sharepoint.com,{uuid.uuid4()},{uuid.uuid4()}", f"b!EXP{tag}{secrets.token_hex(6)}", f"m365exp-{tag}"
+    shared = lambda *emails: [{"roles": ["read"], "grantedToV2": {"user": {"id": e, "email": e}}} for e in emails]
+    note = lambda i, readers: {"id": f"X{i}{tag}", "name": f"Note {i} {tag}.txt", "file": {"mimeType": "text/plain"}, "size": 64,
+                               "cTag": "v1", "parentReference": {"id": "root"}, "text": f"Note {i} {tag}.", "permissions": readers}
+
+    def library_holds(*files) -> None:
+        assert httpx.post(f"{FAKE_MICROSOFT}/sites", json={"sites": {site: {"name": f"Exp {tag}", "granted": [app["client_id"]],
+                          "drives": {library: {"name": "Documents", "items": list(files)}}}}}, timeout=10).status_code == 200
+
+    # Drive: a shared drive, its changes token refused between syncs
+    key = httpx.post(f"{FAKE_GOOGLE}/service-account", json={"email": f"exp-{tag}@acme-dev.iam.gserviceaccount.com"}, timeout=30).json()
+    drive, gdrive = f"0AEXP{tag}", f"driveexp-{tag}"
+    doc = lambda i, readers: {"id": f"exp{i}{tag}", "name": f"Note {i} {tag}.txt", "mimeType": "text/plain", "md5Checksum": "v1",
+                              "text": f"Note {i} {tag}.", "permissions": [{"type": "user", "role": "reader", "emailAddress": e} for e in readers]}
+
+    def drive_holds(*files) -> None:
+        assert httpx.post(f"{FAKE_GOOGLE}/files", json={"drive": drive, "name": f"Exp {tag}", "files": list(files)}, timeout=10).status_code == 200
+
+    try:
+        library_holds(note(1, shared(alice)), note(2, shared(alice)))
+        r = api("POST", "/v1/workspaces/payments/connections/microsoft", "alice", json={
+            "name": m365, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "sites": [site], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        drive_holds(doc(1, [alice]), doc(2, [alice]))
+        r = api("POST", "/v1/workspaces/payments/connections/google", "alice", json={
+            "name": gdrive, "service_account_key": json.dumps(key), "domain": "acme.test", "api_base": FAKE_GOOGLE, "every_minutes": 10080,
+            "drives": [drive]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(m365)
+        wait_synced(gdrive)
+        assert len(keys("microsoft", f"%-X_{tag}")) == 2 and keys("gdrive", f"gd-exp_{tag}") == {f"gd-exp1{tag}", f"gd-exp2{tag}"}, \
+            "the first, full reads"
+
+        # meanwhile: 1 unshared (nobody may read it now), 2 deleted, 3 new; and each cursor expires
+        library_holds(note(1, []), note(3, shared(alice)))
+        assert httpx.post(f"{FAKE_MICROSOFT}/expire", json={"drive": library}, timeout=10).status_code == 200
+        drive_holds(doc(1, []), doc(3, [alice]))
+        assert httpx.post(f"{FAKE_GOOGLE}/expire", json={"drive": drive}, timeout=10).status_code == 200
+
+        for name, container in ((m365, library), (gdrive, drive)):
+            row = sync_once(name, container)
+            assert row["attempts"] == 1 and row["connection"] == "ready" and row["reconciled"], \
+                f"{name}: not read in full on its first attempt, the connection still syncing: {row}"
+        assert {k.rsplit("-", 1)[1] for k in keys("microsoft", f"%-X_{tag}")} == {f"X3{tag}"}, \
+            f"Microsoft 365 kept an unshared or deleted file, or missed the new one: {keys('microsoft', f'%-X_{tag}')}"
+        assert keys("gdrive", f"gd-exp_{tag}") == {f"gd-exp3{tag}"}, \
+            f"Drive kept an unshared or deleted file, or missed the new one: {keys('gdrive', f'gd-exp_{tag}')}"
+        print("      both expired cursors were read in full on the first attempt: 1 unshared and 2 deleted left, 3 came in")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{m365}", "alice")
+        api("DELETE", f"/v1/workspaces/payments/connections/{gdrive}", "alice")
+
+
+@check
 def a_slack_sync_rereads_its_recent_days_until_its_reconcile():
     """Incremental syncs (H6): after its first full read, a Slack channel's sync re-reads only its recent days, so today's new message comes in while an edit to a message weeks old waits; its reconcile, once a day, reads the whole history window, and the edit comes in"""
     from datetime import timezone as tz
