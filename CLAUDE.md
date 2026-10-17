@@ -881,12 +881,27 @@ no regression. `make smoke` there: 166 passed, 15 skipped, 5 failed, none in job
 runs left on that long-lived stack (an alias and an OpenFGA tuple from interrupted checks, Microsoft identities
 already linked) or the Slack check's own race (its documents appear before its first sync records `last_synced_at`);
 CI's run on a fresh stack is the full proof. Not run: the browser tests and the provider's tests (nothing they use
-changed).
+changed). CI on pull request 32, after the check's fix: unit 54 passed; smoke 169 passed, 17 skipped, 0 failed (the
+overrunning worker ended 7 seconds after it started); the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario
+Recall@10 100%, MRR 0.92 over 12 cases; no leak and no regression.
+M8 (the cross-site check without an Origin). The web app's API proxy refused a write whose `Origin` named another
+site, but let one with no `Origin` through. `fromTheApp` in `app/api/[...path]/route.js`: a request that isn't a GET
+must carry the app's own `Origin`, or, with none, a `Referer` whose origin is the app's (the app's `Referrer-Policy:
+same-origin` sends it on its own requests); a write with neither, or with a `Referer` that isn't an address, is
+refused with 403. Browsers send `Origin` with every write, so the app's own requests are unchanged; the session
+cookie's `SameSite=Lax` already kept it off most cross-site writes, and this closes what an older browser or an
+extension that strips `Origin` left open. GETs aren't checked: they change nothing, and a cross-site page can't read
+their answers. Browser test: `test_a_write_must_come_from_the_apps_own_pages` (the app's own `Origin` and `Referer`
+pass; another site's `Origin`, another site's `Referer` without an `Origin`, and neither are refused). Red first: on
+the old proxy the app's own writes passed and another site's `Origin` was refused, but a write carrying only another
+site's `Referer` went through. Green: `make e2e` 35 passed. Smoke, the golden set, and the scenario: CI's run on the
+pull request (no API, worker, or database code changed). Not built: refusing a GET without the app's `Origin` (reads
+are audited, and a cross-site link can make one; it reveals nothing to the linking site).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, and M7 are done; next, M6, M8 to M10, then the lows; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, and M8 are done; next, M6, M9, and M10, then the lows; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
