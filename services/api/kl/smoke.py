@@ -3661,8 +3661,12 @@ def team_rows_stay_in_their_team_and_the_change_feed_keeps_ninety_days():
         payments_model = conn.execute("SELECT m.id FROM kl.model_endpoints m JOIN kl.workspaces w ON w.id = m.workspace_id "
                                       "WHERE w.slug = 'payments' LIMIT 1").fetchone()
         finance = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'finance'").fetchone()["id"]
-        old = conn.execute("UPDATE kl.document_changes SET at = now() - interval '100 days' WHERE id = "  # the oldest change, aged:
-                           "(SELECT min(id) FROM kl.document_changes WHERE org_id = %s) RETURNING id", (org,)).fetchone()["id"]  # ids grow with time
+        # The two oldest changes, aged (ids grow with time). A client whose cursor is the first missed the second: its cursor
+        # is from before the window. A cursor of 0 is no cursor, the window's start, so on a fresh database (the first
+        # change's id is 1) aging only the oldest couldn't make one.
+        last_read, missed = sorted(r["id"] for r in conn.execute(
+            "UPDATE kl.document_changes SET at = now() - interval '100 days' WHERE id IN "
+            "(SELECT id FROM kl.document_changes WHERE org_id = %s ORDER BY id LIMIT 2) RETURNING id", (org,)))
     rows = {"asset_owners": ("source", f"smoke-{tag}"), "document_authors": ("login", f"author-{tag}"),
             "page_reviews": ("note", f"a team's own note {tag}"), "team_media": ("workspace_id", team_id)}
 
@@ -3691,11 +3695,12 @@ def team_rows_stay_in_their_team_and_the_change_feed_keeps_ninety_days():
 
         run_job("retention.apply")
         with psycopg.connect(OWNER_DB) as conn:
-            kept = conn.execute("SELECT count(*) FROM kl.document_changes WHERE id = %s", (old,)).fetchone()[0]
+            kept = conn.execute("SELECT count(*) FROM kl.document_changes WHERE id = ANY(%s)", ([last_read, missed],)).fetchone()[0]
         assert kept == 0, "a change older than the feed's 90 days was kept"
-        r = api("GET", "/v1/changes", "bob", params={"since": old - 1})
+        r = api("GET", "/v1/changes", "bob", params={"since": last_read})
         assert r.status_code == 410 and "90 days" in r.text, f"a client asking from before the feed's window wasn't told: {r.status_code} {r.text[:200]}"
-        print("      team rows reached only their team; media took only the team's own models; a 100-day-old change was pruned")
+        print("      team rows reached only their team; media took only the team's own models; 100-day-old changes were pruned, "
+              "and a cursor before them told so")
     finally:
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.documents WHERE id = %s", (doc,))
