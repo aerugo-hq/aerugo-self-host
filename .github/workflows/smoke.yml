@@ -34,6 +34,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Unit tests (who reads what, the parsers, the claim checker), before anything starts
+        run: make unit
+
       - name: Provision the stack
         run: make up
 

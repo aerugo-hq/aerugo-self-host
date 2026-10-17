@@ -93,6 +93,7 @@ Also: `authz/` (the authorization model and seed tuples), `deploy/` (Compose's m
 For every item, before it's done:
 
 ```powershell
+make unit              # the unit tests (M4): who reads what, the parsers, the claim checker; seconds, no stack
 make up                # migrations, the stack (rebuilds what changed)
 make smoke             # every leak check, the new one included
 make eval-scenario     # no permission leak; no regression against kl/evals_baseline.json

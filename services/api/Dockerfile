@@ -21,6 +21,8 @@ COPY kl ./kl
 
 # Smoke and the fake model (make smoke) build from this stage. Production images never carry them.
 FROM base AS test
+RUN pip install --no-cache-dir --require-hashes -r requirements-test.lock   # M4: pytest, hash-pinned
+COPY tests ./tests
 USER app
 
 # The default target, and the only one deployed: the same code without test tooling.
