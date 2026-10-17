@@ -145,6 +145,7 @@ supply chain, recalls, engineering and migration, leaders). Each phase is proven
 right answers before anything touches real data. Already built: documents, permissions, search and Ask, connectors for
 Confluence, Jira, Drive, GitHub, Slack, Microsoft 365, Notion, catalogs, and directories, each syncing only what
 changed since its last sync (a full reconcile daily, and at once when a source expires its cursor) and surviving a
-source's rate limits; the Map; the Terraform provider; Kubernetes manifests. Phase 0 so far: C1, P1 to P3, H1, H2, H4,
-H5, H6, and H6b. A connector only adds raw material; the core turns it into knowledge, keeps it fresh, and learns from
-people, so every new connector and pack makes it smarter.
+source's rate limits; the web app, its sign-in sessions shared by every web server; the Map; the Terraform provider;
+Kubernetes manifests. Phase 0 so far: C1, P1 to P3, H1, H2, H3 with M2, H4, H5, H6, and H6b. A connector only adds raw
+material; the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack
+makes it smarter.
