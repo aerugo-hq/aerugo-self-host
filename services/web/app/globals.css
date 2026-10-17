@@ -363,7 +363,7 @@ kbd {
 .input:disabled, .select:disabled { background: var(--bg); color: var(--faint); cursor: not-allowed; }
 .input[aria-invalid="true"] { border-color: var(--danger); }
 .select { padding-right: 28px; appearance: none; cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("/chevron-down.svg");   /* a file, not a data: URI: the content security policy allows no data: images (M1) */
   background-repeat: no-repeat; background-position: right 8px center; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > span { font-size: 12px; line-height: 16px; color: var(--muted); font-weight: 500; }

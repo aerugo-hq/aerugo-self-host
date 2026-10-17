@@ -216,6 +216,26 @@ def test_a_session_outlives_the_web_server_it_began_on(page):
         f"a second web server didn't know the session: {elsewhere.status}"
 
 
+def test_every_page_carries_a_content_security_policy_with_a_fresh_nonce(page):
+    policies = [page.request.get(f"{WEB}/").headers.get("content-security-policy", "") for _ in range(2)]  # M1
+    nonces = [re.search(r"'nonce-([A-Za-z0-9+/=]+)'", p) for p in policies]
+    assert nonces[0] and nonces[1] and nonces[0].group(1) != nonces[1].group(1), f"no fresh nonce per page: {policies}"
+    for directive in ("script-src 'self'", "'strict-dynamic'", "object-src 'none'", "frame-ancestors 'none'",
+                      "frame-src https://www.youtube-nocookie.com https://player.vimeo.com https://www.loom.com"):
+        assert directive in policies[0], f"the policy lacks {directive}: {policies[0]}"
+
+
+def test_the_app_runs_under_its_content_security_policy(page):
+    page.add_init_script("window.__violations = []; document.addEventListener('securitypolicyviolation', "
+                         "(e) => window.__violations.push(`${e.violatedDirective} ${e.blockedURI}`));")
+    sign_in(page, "alice")
+    for view in ("#/map", "#/search", "#/documents", "#/ask", "#/home"):
+        page.goto(f"{WEB}/{view}")
+        page.get_by_role("link", name="Map", exact=True).wait_for()
+    page.wait_for_timeout(1000)
+    assert page.evaluate("window.__violations") == [], "the app broke its own content security policy"
+
+
 def test_connected_accounts_offers_linking(page):
     sign_in(page, "alice")
     page.goto(f"{WEB}/#/accounts")
