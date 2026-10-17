@@ -6,7 +6,7 @@ psycopg[binary]>=3.2
 psycopg-pool>=3.2,<4  # H1: one pool of connections per process, from psycopg's own maintainers
 pyjwt[crypto]>=2.9
 fastembed>=0.4
-mcp>=1.12,<2
+mcp>=2.3.0,<3
 pyyaml>=6.0
 # Document formats (slice L): Word, PowerPoint, and PDF text extraction.
 python-docx>=1.1,<2
