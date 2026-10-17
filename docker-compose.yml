@@ -223,6 +223,7 @@ services:
       KL_INGEST_DATABASE_URL: postgresql://kl_ingest:${KL_INGEST_PASSWORD:-ingest-dev-only}@postgres:5432/kl
       KL_RESYNC_MINUTES: ${KL_RESYNC_MINUTES:-10}       # every connection re-syncs at least this often
       KL_SCHEDULER_SECONDS: ${KL_SCHEDULER_SECONDS:-15}  # how often the worker looks for stale ones
+      KL_JOB_LIMITS: ${KL_JOB_LIMITS:-}   # each job kind's time limit, if not the worker's own (M7)
       KL_SEED_KNOWLEDGE_DIR: /seed-knowledge   # dev only: sandbox bundles standing in for knowledge repos
       KL_SEED_SCENARIOS_DIR: /seed-scenarios   # dev only: opt-in demo companies (make demo, make eval; slice K1)
       OTEL_SERVICE_NAME: kl-worker

@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** M7 (`m7-job-time-limits`): every job kind has a time limit (changeable per
+deployment); at it, the lease settles the job as a failed attempt and ends the worker held by it, which is restarted.
+
 **Done and verified, 2026-10-17:** M5 (`m5-webhook-body-cap`): both webhook receivers read a body only up to their
 limit, refusing a declared length over it at the headers and a streamed one where it passes the limit.
 
