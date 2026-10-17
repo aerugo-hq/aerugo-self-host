@@ -8,9 +8,7 @@ a team's admin makes for what they share with the integration, and the form says
 
 Each sync reads everything shared with the integration now, so a page shared later arrives and one unshared or moved
 to the trash leaves. The export copies of the pages it reads, in the same team, are retired, so none is indexed twice."""
-import random
 import re
-import time
 
 import httpx
 
@@ -21,6 +19,7 @@ from .principals import is_valid
 from .sync_github import team_for
 from .sync_items import Item, sync_container
 from .vault import vault
+from . import source_http
 
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2026-03-11"
@@ -29,7 +28,6 @@ ROLES = {"member", "curator", "admin"}  # a role on the team that reads its docu
 MAX_PAGES = 1000
 MAX_BLOCKS = 5000  # per page: past this its text is cut, and says so
 MAX_DEPTH = 8
-RETRIES = 5
 TEXT_BLOCKS = {"paragraph", "quote", "callout", "toggle", "bulleted_list_item", "numbered_list_item", "template"}
 
 
@@ -66,18 +64,12 @@ class NotionClient:
         self.headers = {"Authorization": f"Bearer {token}", "Notion-Version": NOTION_VERSION}
 
     def _call(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> dict:
-        attempt = 0
-        while True:
-            r = httpx.request(method, f"{self.base}/{path}", json=body, params=params, headers=self.headers, timeout=30)
-            if r.status_code == 429 and attempt < RETRIES:  # about three requests a second; Notion says how long to wait
-                wait = r.headers.get("Retry-After")
-                time.sleep(float(wait) if wait and wait.replace(".", "", 1).isdigit() else 2 ** attempt + random.random())
-                attempt += 1
-                continue
-            if r.status_code >= 400:
-                code = (r.json() if r.headers.get("content-type", "").startswith("application/json") else {}).get("code")
-                raise NotionError(f"Notion answered {r.status_code} {str(code or '')[:60]}".strip())
-            return r.json()
+        # about three requests a second, and Notion says how long to wait: waited out (H2)
+        r = source_http.send(method, f"{self.base}/{path}", json=body, params=params, headers=self.headers, timeout=30)
+        if r.status_code >= 400:
+            code = (r.json() if r.headers.get("content-type", "").startswith("application/json") else {}).get("code")
+            raise NotionError(f"Notion answered {r.status_code} {str(code or '')[:60]}".strip())
+        return r.json()
 
     def _pages(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> list[dict]:
         out, cursor = [], None

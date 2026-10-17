@@ -241,6 +241,7 @@ services:
     command: ["python", "-m", "kl.smoke"]
     environment:
       <<: *api-env
+      OTEL_SERVICE_NAME: kl-smoke   # so its own database connections are never counted as the API's (H1)
       KL_API_URL: http://api:8000
       KL_TOKEN_URL: http://keycloak:8080/realms/acme/protocol/openid-connect/token
       KL_APP_DATABASE_URL: postgresql://kl_app:${KL_APP_PASSWORD:-app-dev-only}@postgres:5432/kl
@@ -281,6 +282,7 @@ services:
       KL_MCP_AUDIENCE: kl-mcp   # only tokens issued for the MCP server are accepted here
       KL_MCP_PUBLIC_URL: http://localhost:${KL_MCP_PORT:-8090}
       OTEL_SERVICE_NAME: kl-mcp
+      KL_DB_POOL_MAX: ${KL_MCP_DB_POOL_MAX:-10}   # its own pool, beside the API's (H1)
     ports:
       - "127.0.0.1:${KL_MCP_PORT:-8090}:8090"
     depends_on:

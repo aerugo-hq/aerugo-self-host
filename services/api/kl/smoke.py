@@ -15,7 +15,7 @@ import secrets
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 import jwt
@@ -35,6 +35,7 @@ PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "oliv
 SKIP = object()
 CHECKS = []
 _tokens: dict[str, str] = {}
+_expires: dict = {}  # when each cached token stops working, so a long run fetches a fresh one instead of failing
 
 
 def check(fn):
@@ -57,7 +58,7 @@ def wait_for(url: str, seconds: int = 240) -> None:
 
 def token(user: str, client_id: str = "kl-cli") -> str:
     key = (user, client_id)
-    if key not in _tokens:
+    if key not in _tokens or _expires.get(key, 0) - time.time() < 60:
         deadline, last = time.monotonic() + 240, ""  # Keycloak is slow on first boot
         while True:
             try:
@@ -67,6 +68,7 @@ def token(user: str, client_id: str = "kl-cli") -> str:
                 })
                 if r.status_code == 200:
                     _tokens[key] = r.json()["access_token"]
+                    _expires[key] = time.time() + int(r.json().get("expires_in") or 300)
                     break
                 last = f"{r.status_code} {r.text[:200]}"
             except httpx.HTTPError as e:
@@ -3423,7 +3425,8 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
     alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
 
     def setup(n: int, delay: float = 0.0) -> None:  # n issues, each with an attachment the fake serves after `delay` seconds
-        issues = [{"key": f"{key}-{i}", "summary": f"Cutover step {i} {tag}", "description": f"Step {i} of the cutover {tag}.",
+        updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000")  # just written, as new issues are (H6)
+        issues = [{"key": f"{key}-{i}", "summary": f"Cutover step {i} {tag}", "description": f"Step {i} of the cutover {tag}.", "updated": updated,
                    "attachments": [{"id": f"{int(tag, 16)}{i:03d}", "filename": "notes.txt", "text": f"Notes for step {i} {tag}."}]}
                   for i in range(1, n + 1)]
         site = {"delay": delay, "projects": {key: {"name": f"Lease {tag}", "company_wide": False, "browsers": [alice], "issues": issues}}}
@@ -3511,6 +3514,540 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
         if proc and proc.poll() is None:
             proc.kill()
         httpx.post(f"{FAKE_JIRA}/setup", json={}, timeout=10)
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def the_api_pools_its_connections_and_every_role_has_time_limits():
+    """Connections (H1): the API keeps a pool of database connections instead of opening one per call; a connection back in the pool carries nothing of the request that used it, not even a session-wide setting; and each role has its time limits (short for the API, longer for the worker), so a runaway query or a stuck transaction can't hold a connection forever"""
+    import concurrent.futures
+    from . import db
+    users = ["alice", "bob"] * 8
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        codes = list(pool.map(lambda u: api("GET", "/v1/search", u, params={"q": "incident", "limit": 3}).status_code, users))
+    assert codes == [200] * len(users), f"a burst of searches failed: {codes}"
+    with psycopg.connect(OWNER_DB) as conn:
+        kept = conn.execute("SELECT count(*) FROM pg_stat_activity WHERE usename = 'kl_app' AND application_name = 'kl-api' "
+                            "AND state = 'idle'").fetchone()[0]
+    assert 1 <= kept <= 20, f"the API should keep between 1 and its pool's 20 connections after a burst, not {kept}"
+
+    pool = db.new_pool(max_size=1)  # the API's own pool, made to hand the same connection back
+    try:
+        with pool.connection() as conn:
+            pid = conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+            conn.execute("SELECT set_config('kl.principals', 'user:alice', false)")  # session-wide, as no request should
+        with pool.connection() as conn:
+            again = conn.execute("SELECT pg_backend_pid() AS pid, current_setting('kl.principals', true) AS principals").fetchone()
+        assert again["pid"] == pid, "the pool of one handed out another connection"
+        assert not again["principals"], f"a pooled connection kept a session's setting for the next caller: {again['principals']!r}"
+    finally:
+        pool.close()
+
+    for url, role, statement, idle in ((APP_DB, "kl_app", "30s", "1min"), (INGEST_DB, "kl_ingest", "10min", "10min")):
+        with psycopg.connect(url) as conn:
+            got = (conn.execute("SHOW statement_timeout").fetchone()[0], conn.execute("SHOW idle_in_transaction_session_timeout").fetchone()[0])
+        assert got == (statement, idle), f"{role}'s time limits are {got}, not {(statement, idle)}"
+    print(f"      {kept} connection(s) kept by the API after {len(users)} searches; a returned connection came back clean; "
+          "kl_app 30s and 1min, kl_ingest 10min and 10min")
+
+
+@check
+def no_model_call_holds_a_database_transaction():
+    """Connections (H5): Ask and a reranked search call their models with no database transaction open, so a slow model holds no connection: the search's retrieval and the answer's record are each their own short transaction"""
+    import concurrent.futures
+    ensure_fake_models()
+
+    def held_open() -> int:  # the API's sessions waiting inside a transaction
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM pg_stat_activity WHERE usename = 'kl_app' AND state = 'idle in transaction'").fetchone()[0]
+
+    calls = (("Ask", lambda: api("POST", "/v1/ask", "alice", json={"question": PAGE_QUESTION, "model": "payments/smoke-fake"})),
+             ("a reranked search", lambda: api("GET", "/v1/search", "alice", params={"q": "incident", "scope": "org", "limit": 10})))
+    try:
+        fake_reranker()
+        assert httpx.post(f"{FAKE_LLM}/mode", json={"delay": 3}, timeout=10).status_code == 200
+        for what, call in calls:
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                pending = pool.submit(call)
+                time.sleep(1.5)  # the model is answering now: retrieval takes well under a second
+                held = held_open()
+                r = pending.result(timeout=60)
+            assert r.status_code == 200, f"{what}: {r.status_code} {r.text[:200]}"
+            assert held == 0, f"{what} held {held} transaction(s) open while its model answered"
+        assert fake_reranks(), "the search was never reranked, so it proves nothing"
+        print("      no transaction was open while the model answered Ask, or reranked a search")
+    finally:
+        reset_fake()
+        no_reranker()
+
+
+@check
+def a_failed_change_never_strands_or_loses_a_secret():
+    """Secrets (H5): a model registered in a change that then fails leaves no secret behind in OpenBao, and a model whose removal fails keeps its key; once the removal commits, the key is destroyed"""
+    from .vault import vault
+    tag = secrets.token_hex(3)
+    doomed_new, kept = f"h5-new-{tag}", f"h5-kept-{tag}"
+    ref = lambda name: f"openbao://secret/kl/acme/payments/models/{name}"
+    model = lambda name: {"name": name, "provider": "openai_compatible", "model": "x", "base_url": f"{FAKE_LLM}/v1", "api_key": f"key-{tag}"}
+
+    def exists(r: str) -> bool:
+        try:
+            return vault.get(r).get("api_key") == f"key-{tag}"
+        except httpx.HTTPStatusError as e:
+            assert e.response.status_code == 404, e
+            return False
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # fail chosen changes on purpose, at their audit event
+        conn.execute("CREATE TABLE kl.smoke_doomed (action text, name text)")
+        conn.execute("""CREATE FUNCTION kl.smoke_doom() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = kl AS $$
+                        BEGIN
+                          IF EXISTS (SELECT 1 FROM smoke_doomed WHERE action = NEW.action AND name = NEW.details->>'name') THEN
+                            RAISE EXCEPTION 'smoke: this change fails on purpose';
+                          END IF;
+                          RETURN NEW;
+                        END $$""")
+        conn.execute("CREATE TRIGGER smoke_doom BEFORE INSERT ON kl.audit_events FOR EACH ROW EXECUTE FUNCTION kl.smoke_doom()")
+        conn.execute("INSERT INTO kl.smoke_doomed VALUES ('model.register', %s), ('model.remove', %s)", (doomed_new, kept))
+    try:
+        r = api("POST", "/v1/workspaces/payments/models", "alice", json=model(doomed_new))
+        assert r.status_code >= 500, f"the doomed registration didn't fail: {r.status_code}"
+        assert not exists(ref(doomed_new)), "a registration that failed left its key behind in OpenBao"
+
+        assert api("POST", "/v1/workspaces/payments/models", "alice", json=model(kept)).status_code == 201
+        assert api("DELETE", f"/v1/workspaces/payments/models/{kept}", "alice").status_code >= 500, "the doomed removal didn't fail"
+        assert exists(ref(kept)), "a removal that failed destroyed the key of the model it left in place"
+
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.smoke_doomed")
+        assert api("DELETE", f"/v1/workspaces/payments/models/{kept}", "alice").status_code == 200
+        assert not exists(ref(kept)), "a removal that committed left its key behind"
+        print("      the failed registration left no key; the failed removal kept its key; the committed one destroyed it")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DROP TRIGGER IF EXISTS smoke_doom ON kl.audit_events")
+            conn.execute("DROP FUNCTION IF EXISTS kl.smoke_doom()")
+            conn.execute("DROP TABLE IF EXISTS kl.smoke_doomed")
+        for name in (doomed_new, kept):
+            api("DELETE", f"/v1/workspaces/payments/models/{name}", "alice")
+
+
+@check
+def team_rows_stay_in_their_team_and_the_change_feed_keeps_ninety_days():
+    """Permissions audit (P1 to P3): the database itself keeps asset owners, review history, and media choices to their own team, and a document's authors to those who may read it, so a query that forgets a join reveals nothing; a team can choose only its own models for its media; and the change feed keeps 90 days, telling a client that asks from before"""
+    from . import db
+    tag = secrets.token_hex(3)
+    org, team = acme_org_id(), f"p1-{tag}"
+    stranger, bob, alice, olivia = [f"user:stranger-{tag}"], ["user:bob", "org:acme", "group:finance"], ["user:alice", "org:acme"], ["user:olivia", "org:acme"]
+    with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
+        team_id = conn.execute("INSERT INTO kl.workspaces (org_id, slug, name, discoverability) VALUES (%s, %s, 'P1 test', 'private') "
+                               "RETURNING id", (org, team)).fetchone()["id"]
+        asset = conn.execute("INSERT INTO kl.assets (org_id, workspace_id, kind, namespace, name) VALUES (%s, %s, 'dataset', 'edw', %s) "
+                             "RETURNING id", (org, team_id, f"P1_{tag}")).fetchone()["id"]
+        conn.execute("INSERT INTO kl.asset_owners (org_id, workspace_id, asset_id, email, source) VALUES (%s, %s, %s, 'owner@acme.test', %s)",
+                     (org, team_id, asset, f"smoke-{tag}"))
+        doc = conn.execute("INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, content_hash, "
+                           "classification, acl_principals) VALUES (%s, 'seed', %s, 'v1', %s, 'P1 test', %s, 'internal', %s) RETURNING id",
+                           (org, f"https://kb.acme.test/p1-{tag}", f"p1-{tag}", tag, ["user:alice"])).fetchone()["id"]
+        conn.execute("INSERT INTO kl.document_authors (org_id, document_id, login, commits, last_at, at_commit) VALUES (%s, %s, %s, 1, now(), 'c')",
+                     (org, doc, f"author-{tag}"))
+        page = conn.execute("SELECT k.id FROM kl.concepts k JOIN kl.workspace_documents wd ON wd.document_id = k.document_id "
+                            "JOIN kl.workspaces w ON w.id = wd.workspace_id WHERE w.slug = 'commons' AND 'org:acme' = ANY(k.acl_principals) "
+                            "LIMIT 1").fetchone()["id"]  # a page the whole org may read, bob included
+        conn.execute("INSERT INTO kl.page_reviews (org_id, workspace_id, concept_id, action, by_user, note) VALUES (%s, %s, %s, 'confirm', 'olivia', %s)",
+                     (org, team_id, page, f"a team's own note {tag}"))
+        conn.execute("INSERT INTO kl.team_media (workspace_id, org_id, updated_by) VALUES (%s, %s, 'olivia')", (team_id, org))
+        payments_model = conn.execute("SELECT m.id FROM kl.model_endpoints m JOIN kl.workspaces w ON w.id = m.workspace_id "
+                                      "WHERE w.slug = 'payments' LIMIT 1").fetchone()
+        finance = conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'finance'").fetchone()["id"]
+        # The two oldest changes, aged (ids grow with time). A client whose cursor is the first missed the second: its cursor
+        # is from before the window. A cursor of 0 is no cursor, the window's start, so on a fresh database (the first
+        # change's id is 1) aging only the oldest couldn't make one.
+        last_read, missed = sorted(r["id"] for r in conn.execute(
+            "UPDATE kl.document_changes SET at = now() - interval '100 days' WHERE id IN "
+            "(SELECT id FROM kl.document_changes WHERE org_id = %s ORDER BY id LIMIT 2) RETURNING id", (org,)))
+    rows = {"asset_owners": ("source", f"smoke-{tag}"), "document_authors": ("login", f"author-{tag}"),
+            "page_reviews": ("note", f"a team's own note {tag}"), "team_media": ("workspace_id", team_id)}
+
+    def seen(principals: list[str], teams: tuple = ()) -> dict:
+        with db.scoped(org, principals, **({"teams": list(teams)} if teams else {})) as conn:
+            return {table: conn.execute(f"SELECT count(*) AS n FROM {table} WHERE {column} = %s", (value,)).fetchone()["n"]
+                    for table, (column, value) in rows.items()}
+
+    try:
+        assert seen(stranger) == dict.fromkeys(rows, 0), f"a stranger read team rows directly: {seen(stranger)}"
+        assert seen(bob) == dict.fromkeys(rows, 0), f"someone outside the team, who may read the page, read its team's rows: {seen(bob)}"
+        assert seen(alice)["document_authors"] == 1, "the document's reader can't see who wrote it"
+        assert seen(olivia, (team,)) == {"asset_owners": 1, "document_authors": 0, "page_reviews": 1, "team_media": 1}, \
+            f"the team's own transaction should see its rows: {seen(olivia, (team,))}"
+        for what, sql, args in (("another team's media", "INSERT INTO team_media (workspace_id, org_id, updated_by) VALUES (%s, %s, 'x')", (finance, org)),
+                                ("another team's model", "UPDATE team_media SET vision_model_id = %s WHERE workspace_id = %s",
+                                 (payments_model["id"] if payments_model else None, team_id))):
+            if args[0] is None:
+                continue
+            try:
+                with db.scoped(org, olivia, teams=[team]) as conn:
+                    changed = conn.execute(sql, args).rowcount
+                raise AssertionError(f"a team's transaction could set {what} ({changed} row)")
+            except psycopg.errors.InsufficientPrivilege:
+                pass  # refused by the database, as it should be
+
+        run_job("retention.apply")
+        with psycopg.connect(OWNER_DB) as conn:
+            kept = conn.execute("SELECT count(*) FROM kl.document_changes WHERE id = ANY(%s)", ([last_read, missed],)).fetchone()[0]
+        assert kept == 0, "a change older than the feed's 90 days was kept"
+        r = api("GET", "/v1/changes", "bob", params={"since": last_read})
+        assert r.status_code == 410 and "90 days" in r.text, f"a client asking from before the feed's window wasn't told: {r.status_code} {r.text[:200]}"
+        print("      team rows reached only their team; media took only the team's own models; 100-day-old changes were pruned, "
+              "and a cursor before them told so")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.documents WHERE id = %s", (doc,))
+            conn.execute("DELETE FROM kl.workspaces WHERE id = %s", (team_id,))  # its asset, owners, reviews, and media go with it
+
+
+@check
+def the_claim_checker_never_passes_a_contradiction():
+    """Claims (H4): a claim that negates its source, or gives an amount or a count of days its source doesn't, is unsupported however many words it shares, and says why; the source's own statements stay supported"""
+    from .claims import check as check_claims
+    passage = "Refunds over $500 are approved by the finance lead. Records are kept for 90 days."
+    cases = [("Refunds over $500 are approved by the finance lead [1].", True), ("Records are kept for 90 days [1].", True),
+             ("Refunds over $500 are not approved by the finance lead [1].", False), ("Records are kept for 30 days [1].", False),
+             ("Refunds over $50 are approved by the finance lead [1].", False), ("Refunds are never approved by the finance lead [1].", False)]
+    for claim, supported in cases:
+        got = check_claims(claim, {1: passage})
+        assert got and got[0]["supported"] is supported, f"{claim!r} was judged the wrong way: {got}"
+        assert supported or got[0].get("reason"), f"a contradiction was unsupported without saying why: {got}"
+    print(f"      {len(cases)} claims judged right: the passage's own two supported, four contradictions not, each with its reason")
+
+
+@check
+def a_throttled_source_slows_a_sync_but_never_fails_it():
+    """Rate limits (H2): Jira answering 429 with Retry-After, and Confluence answering 503 without saying how long, are waited out and tried again, so each connection syncs to the end with every one of its jobs done on its first attempt"""
+    tag = secrets.token_hex(3).upper()
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    acct, page = f"557058:cfthr{tag.lower()}", str(int(tag, 16) * 10 + 7)
+    sources = (
+        ("jira", FAKE_JIRA, {"projects": {f"THR{tag}": {"name": f"Throttled {tag}", "company_wide": False, "browsers": [alice], "issues": [
+            {"key": f"THR{tag}-1", "summary": f"Throttled issue {tag}", "description": "Waited out."}]}}},
+         "/jira/rest/api/3/", 429, 1, f"jira-THR{tag}-1",
+         {"email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [f"THR{tag}"]}),
+        ("confluence", FAKE_CONFLUENCE, {"users": {acct: {"email": "alice@acme.test", "name": "Alice"}}, "groups": {}, "spaces": {
+            f"THR{tag}": {"id": str(int(tag, 16) * 10 + 9), "name": f"Throttled {tag}", "users": [acct], "groups": [],
+                          "pages": [{"id": page, "title": f"Throttled page {tag}", "body": "<p>Waited out.</p>", "version": 1}], "blogposts": []}}},
+         "/confluence/wiki/", 503, None, f"confluence-{page}",
+         {"email": "confluence-bot@acme.test", "api_token": "smoke-confluence-token", "spaces": [f"THR{tag}"]}),
+    )
+    names = []
+    try:
+        for kind, fake, setup, prefix, status, after, key, body in sources:
+            assert httpx.post(f"{fake}/setup", json=setup, timeout=10).status_code == 200
+            assert httpx.post(f"{FAKE_LLM}/throttle", json={"prefix": prefix, "count": 4, "status": status, "retry_after": after},
+                              timeout=10).status_code == 200
+            name = f"thr-{kind}-{tag.lower()}"
+            names.append(name)
+            r = api("POST", f"/v1/workspaces/payments/connections/{kind}", "alice",
+                    json={"name": name, "api_base": fake, "every_minutes": 10080, **body})
+            assert r.status_code == 201, f"{kind}: {r.status_code} {r.text[:200]}"
+            deadline, jobs, there = time.monotonic() + 180, [], None
+            while time.monotonic() < deadline:
+                with psycopg.connect(OWNER_DB) as conn:
+                    there = conn.execute("SELECT 1 FROM kl.documents WHERE external_key = %s", (key,)).fetchone()
+                    jobs = conn.execute("SELECT j.kind, j.status, j.attempts, j.last_error FROM kl.jobs j JOIN kl.connections c "
+                                        "ON j.payload->>'connection_id' = c.id::text WHERE c.name = %s ORDER BY j.id", (name,)).fetchall()
+                if there and jobs and all(s in ("done", "failed") for _, s, _, _ in jobs):
+                    break
+                time.sleep(1)
+            answered = httpx.get(f"{FAKE_LLM}/throttle", timeout=10).json()["answered"]
+            assert answered == 4, f"{kind}: the fake throttled {answered} call(s), not 4, so this proves nothing"
+            assert there, f"{kind}: a throttled sync never brought its item in: {jobs}"
+            assert all(s == "done" and n == 1 for _, s, n, _ in jobs), f"{kind}: a throttled call failed a job: {jobs}"
+        print("      Jira's 429s and Confluence's 503s were waited out: both synced, every job on its first attempt")
+    finally:
+        httpx.post(f"{FAKE_LLM}/throttle", json={"count": 0}, timeout=10)
+        for name in names:
+            api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+# ------------------------------------------------------------------ incremental syncs (H6)
+def last_synced(name: str):
+    with psycopg.connect(OWNER_DB) as conn:
+        row = conn.execute("SELECT last_synced_at FROM kl.connections WHERE name = %s", (name,)).fetchone()
+    return row[0] if row else None
+
+
+def wait_synced(name: str, after=None, seconds: int = 150) -> None:
+    """Until a connection has synced since `after` (or at all) and nothing of it is queued or running."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        with psycopg.connect(OWNER_DB) as conn:
+            pending = conn.execute("SELECT 1 FROM kl.jobs j JOIN kl.connections c ON j.payload->>'connection_id' = c.id::text "
+                                   "WHERE c.name = %s AND j.status IN ('queued', 'running')", (name,)).fetchone()
+        last = last_synced(name)
+        if last and (after is None or last > after) and not pending:
+            return
+        time.sleep(1)
+    raise AssertionError(f"{name} never finished syncing")
+
+
+def scheduled_sync(name: str, reconcile: bool = False) -> None:
+    """Sync a connection as the scheduler does (a refresh rediscovers, and reads everything), and wait for it; with
+    reconcile, a day after its last full read, when it reads everything again."""
+    before = last_synced(name)
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        if reconcile:
+            conn.execute("UPDATE kl.connection_containers SET reconciled_at = now() - interval '25 hours' WHERE connection_id = "
+                         "(SELECT id FROM kl.connections WHERE name = %s)", (name,))
+        conn.execute("INSERT INTO kl.jobs (org_id, kind, payload) SELECT org_id, 'connection.sync', "
+                     "jsonb_build_object('connection_id', id::text, 'reason', 'schedule') FROM kl.connections WHERE name = %s", (name,))
+    wait_synced(name, before)
+
+
+@check
+def a_jira_sync_reads_only_what_changed_until_its_reconcile():
+    """Incremental syncs (H6): after its first full read, a Jira connection asks Jira only for the issues updated since its last sync (a changed issue and a new one come in, one deleted at the source waits), and its reconcile, once a day, reads everything again, so the deleted one leaves"""
+    from datetime import timezone as tz
+    tag = secrets.token_hex(3).upper()
+    key, name = f"INC{tag}", f"inc-{tag.lower()}"
+    alice = {"accountId": f"557058:alice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    old, now = "2026-01-01T10:00:00.000+0000", lambda: datetime.now(tz.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000")
+
+    def setup(*issues) -> None:
+        site = {"projects": {key: {"name": f"Incremental {tag}", "company_wide": False, "browsers": [alice], "issues": [
+            {"key": f"{key}-{n}", "summary": f"{summary} {tag}", "description": "Kept current.", "updated": at} for n, summary, at in issues]}}}
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=site, timeout=10).status_code == 200
+
+    def indexed() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, title FROM kl.documents WHERE source_kind = 'jira' AND external_key LIKE %s",
+                                     (f"jira-{key}-%",)).fetchall())
+
+    try:
+        setup((1, "First", old), (2, "Second", old))
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
+            "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [key],
+            "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        assert set(indexed()) == {f"jira-{key}-1", f"jira-{key}-2"}, f"the first, full read: {indexed()}"
+
+        setup((2, "Second, changed", now()), (3, "Third", now()))  # 1 deleted at the source; 2 changed; 3 new
+        scheduled_sync(name)
+        asked = httpx.get(f"{FAKE_JIRA}/searches", timeout=10).json()
+        got = indexed()
+        assert asked and all("updated >=" in jql for jql in asked), f"the second sync asked for everything: {asked}"
+        assert set(got) == {f"jira-{key}-1", f"jira-{key}-2", f"jira-{key}-3"} and "changed" in got[f"jira-{key}-2"], \
+            f"the changes didn't come in, or the deletion didn't wait for the reconcile: {got}"
+
+        scheduled_sync(name, reconcile=True)
+        asked = httpx.get(f"{FAKE_JIRA}/searches", timeout=10).json()
+        assert asked and "updated >=" not in asked[-1], f"the reconcile didn't read everything: {asked}"
+        assert set(indexed()) == {f"jira-{key}-2", f"jira-{key}-3"}, f"the reconcile kept the deleted issue: {indexed()}"
+        print("      the second sync asked only for updates (2 changed, 3 new, 1 kept); the reconcile read everything and removed 1")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))
+
+
+@check
+def a_microsoft_365_sync_follows_graphs_delta():
+    """Incremental syncs (H6): after its first full read, a Microsoft 365 library resumes Graph's delta from where the last sync ended, so a changed file comes in, a new one too, and one deleted at the source leaves at once, since Graph names it; its reconcile, once a day, starts the delta over"""
+    tag = secrets.token_hex(3)
+    tenant, app = str(uuid.uuid4()), None
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    site, library, name = f"acme.sharepoint.com,{uuid.uuid4()},{uuid.uuid4()}", f"b!INC{tag}{secrets.token_hex(6)}", f"m365inc-{tag}"
+    file = lambda i, version: {"id": f"I{i}{tag}", "name": f"Note {i} {tag}.txt", "file": {"mimeType": "text/plain"}, "size": 64,
+                               "cTag": version, "parentReference": {"id": "root"}, "text": f"Note {i} {tag}, {version}.",
+                               "permissions": [{"roles": ["read"], "grantedToV2": {"user": {"id": "u1", "email": "alice@acme.test"}}}]}
+
+    def library_holds(*files) -> None:
+        assert httpx.post(f"{FAKE_MICROSOFT}/sites", json={"sites": {site: {"name": f"Inc {tag}", "granted": [app["client_id"]],
+                          "drives": {library: {"name": "Documents", "items": list(files)}}}}}, timeout=10).status_code == 200
+
+    def indexed() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, source_version FROM kl.documents WHERE source_kind = 'microsoft' "
+                                     "AND external_key LIKE %s", (f"%-I_{tag}",)).fetchall())
+
+    def deltas() -> list:
+        return [c for c in httpx.get(f"{FAKE_MICROSOFT}/deltas", timeout=10).json() if c["drive"] == library]
+
+    ends = lambda keys: {k.rsplit("-", 1)[1] for k in keys}
+    try:
+        library_holds(file(1, "v1"), file(2, "v1"))
+        r = api("POST", "/v1/workspaces/payments/connections/microsoft", "alice", json={
+            "name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "sites": [site], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        assert ends(indexed()) == {f"I1{tag}", f"I2{tag}"}, f"the first, full read: {indexed()}"
+        assert deltas() and deltas()[-1]["token"] is None, f"the first read didn't start the delta from the start: {deltas()}"
+
+        library_holds(file(1, "v2"), file(3, "v1"))  # 1 changed; 2 deleted at the source; 3 new
+        scheduled_sync(name)
+        got = indexed()
+        assert deltas()[-1]["token"] is not None, f"the second sync started the delta over: {deltas()}"
+        assert ends(got) == {f"I1{tag}", f"I3{tag}"}, f"the delta's changes, its deletion included, didn't carry over: {got}"
+        assert any(v == "v2" for k, v in got.items() if k.endswith(f"I1{tag}")), f"the changed file wasn't read again: {got}"
+
+        scheduled_sync(name, reconcile=True)
+        assert deltas()[-1]["token"] is None, f"the reconcile didn't start the delta over: {deltas()}"
+        assert ends(indexed()) == {f"I1{tag}", f"I3{tag}"}, f"the reconcile changed what's there: {indexed()}"
+        print("      the second sync resumed the delta: 1 changed, 3 new, 2 gone at once; the reconcile started it over")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+
+
+@check
+def a_drive_sync_follows_its_changes_feed():
+    """Incremental syncs (H6): after its first full read, a shared drive is read from its changes feed, so a changed file comes in, a new one too, and one removed at the source leaves at once; its reconcile, once a day, lists the drive in full again"""
+    tag = secrets.token_hex(3)
+    key = httpx.post(f"{FAKE_GOOGLE}/service-account", json={"email": f"inc-{tag}@acme-dev.iam.gserviceaccount.com"}, timeout=30).json()
+    drive, name = f"0AINC{tag}", f"driveinc-{tag}"
+    file = lambda i, version: {"id": f"inc{i}{tag}", "name": f"Note {i} {tag}.txt", "mimeType": "text/plain", "md5Checksum": version,
+                               "text": f"Note {i} {tag}, {version}.", "permissions": [{"type": "user", "role": "reader", "emailAddress": "alice@acme.test"}]}
+
+    def drive_holds(*files) -> None:
+        assert httpx.post(f"{FAKE_GOOGLE}/files", json={"drive": drive, "name": f"Inc {tag}", "files": list(files)}, timeout=10).status_code == 200
+
+    def indexed() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, source_version FROM kl.documents WHERE source_kind = 'gdrive' "
+                                     "AND container_ref = %s", (drive,)).fetchall())
+
+    def reads() -> list:
+        return [c for c in httpx.get(f"{FAKE_GOOGLE}/changes-calls", timeout=10).json() if c["drive"] == drive]
+
+    try:
+        drive_holds(file(1, "v1"), file(2, "v1"))
+        r = api("POST", "/v1/workspaces/payments/connections/google", "alice", json={
+            "name": name, "service_account_key": json.dumps(key), "domain": "acme.test", "api_base": FAKE_GOOGLE, "every_minutes": 10080,
+            "drives": [drive]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        assert set(indexed()) == {f"gd-inc1{tag}", f"gd-inc2{tag}"}, f"the first, full read: {indexed()}"
+        assert [c["call"] for c in reads()] == ["changes/startPageToken"], f"the full read didn't take the feed's token first: {reads()}"
+
+        drive_holds(file(1, "v2"), file(3, "v1"))  # 1 changed; 2 removed at the source; 3 new
+        scheduled_sync(name)
+        got = indexed()
+        assert reads()[-1]["call"] == "changes" and reads()[-1]["token"] is not None, f"the second sync listed the drive again: {reads()}"
+        assert set(got) == {f"gd-inc1{tag}", f"gd-inc3{tag}"} and got[f"gd-inc1{tag}"] == "v2", \
+            f"the feed's changes, its removal included, didn't carry over: {got}"
+
+        scheduled_sync(name, reconcile=True)
+        assert reads()[-1]["call"] == "changes/startPageToken", f"the reconcile read from the feed instead of in full: {reads()}"
+        assert set(indexed()) == {f"gd-inc1{tag}", f"gd-inc3{tag}"}, f"the reconcile changed what's there: {indexed()}"
+        print("      the second sync read the changes feed: 1 changed, 3 new, 2 gone at once; the reconcile listed it in full")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+
+
+@check
+def a_slack_sync_rereads_its_recent_days_until_its_reconcile():
+    """Incremental syncs (H6): after its first full read, a Slack channel's sync re-reads only its recent days, so today's new message comes in while an edit to a message weeks old waits; its reconcile, once a day, reads the whole history window, and the edit comes in"""
+    from datetime import timezone as tz
+    tag = secrets.token_hex(3).upper()
+    channel, name, alice = f"CINC{tag}", f"slackinc-{tag.lower()}", f"UINC{tag}"
+    now = time.time()
+    weeks_ago, today = f"{now - 20 * 86400:.6f}", f"{now - 60:.6f}"
+    day = lambda ts: datetime.fromtimestamp(float(ts), tz.utc).strftime("%Y-%m-%d")
+
+    def holds(*messages) -> None:
+        state = {"users": [{"id": alice, "team_id": "T0SMOKE", "name": "alice", "profile": {"real_name": "Alice", "email": "alice@acme.test"}}],
+                 "channels": {channel: {"name": f"inc-{tag.lower()}", "private": True, "members": [alice], "messages": list(messages)}}}
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state, timeout=10).status_code == 200
+
+    def versions() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return dict(conn.execute("SELECT external_key, source_version FROM kl.documents WHERE source_kind = 'slack' "
+                                     "AND container_ref = %s", (channel,)).fetchall())
+
+    def reads() -> list:
+        return [c for c in httpx.get(f"{FAKE_SLACK}/history-calls", timeout=10).json() if c["channel"] == channel]
+
+    old_day, new_day = f"slack-{channel}-{day(weeks_ago)}", f"slack-{channel}-{day(today)}"
+    try:
+        holds({"ts": weeks_ago, "user": alice, "text": f"Rehearsal plan {tag}"}, {"ts": today, "user": alice, "text": f"Today's note {tag}"})
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        first = versions()
+        assert set(first) == {old_day, new_day}, f"the first, full read: {first}"
+
+        later = f"{time.time() - 30:.6f}"
+        holds({"ts": weeks_ago, "user": alice, "text": f"Rehearsal plan, moved to Monday {tag}"},  # an edit, weeks old
+              {"ts": today, "user": alice, "text": f"Today's note {tag}"}, {"ts": later, "user": alice, "text": f"And another {tag}"})
+        scheduled_sync(name)
+        second = versions()
+        assert reads()[-1]["oldest"] > now - 9 * 86400, f"the second sync read the whole history again: {reads()}"
+        assert second[new_day] != first[new_day], "today's new message didn't come in"
+        assert second[old_day] == first[old_day], "an edit weeks old came in before the reconcile: the sync read everything"
+
+        scheduled_sync(name, reconcile=True)
+        assert reads()[-1]["oldest"] < now - 300 * 86400, f"the reconcile didn't read the whole history window: {reads()}"
+        assert versions()[old_day] != first[old_day], "the reconcile didn't bring the old edit in"
+        print("      the second sync re-read its recent days only (the new message came in, the old edit waited); the reconcile read it all")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+
+
+@check
+def a_confluence_sync_reads_only_what_changed_until_its_reconcile():
+    """Incremental syncs (H6): after its first full read, a Confluence space is listed newest-modified first and only down to the last sync, so an edited page comes in, and a new one too, under an unchanged parent it still names; one deleted at the source waits; its reconcile, once a day, lists the space in full, and the deleted page leaves"""
+    from datetime import timezone as tz
+    tag = secrets.token_hex(3).upper()
+    key, name, acct = f"INC{tag}", f"cfinc-{tag.lower()}", f"557058:cfinc{tag.lower()}"
+    base = int(tag, 16) * 10
+    ids = {n: str(base + i) for i, n in enumerate(("parent", "child", "new", "leaf"))}
+    old, now = "2026-01-01T10:00:00.000Z", datetime.now(tz.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    page = lambda n, title, version=1, modified=old, **more: {"id": ids[n], "title": f"{title} {tag}", "body": f"<p>{title} {tag}</p>",
+                                                              "version": version, "modified": modified, **more}
+
+    def space_holds(*pages) -> None:
+        setup = {"users": {acct: {"email": "alice@acme.test", "name": "Alice"}}, "groups": {},
+                 "spaces": {key: {"id": str(base + 9), "name": f"Inc {tag}", "users": [acct], "groups": [], "pages": list(pages), "blogposts": []}}}
+        assert httpx.post(f"{FAKE_CONFLUENCE}/setup", json=setup, timeout=10).status_code == 200
+
+    def held() -> dict:
+        with psycopg.connect(OWNER_DB) as conn:
+            return {k: (v, p) for k, v, p in conn.execute("SELECT external_key, source_version, source_path FROM kl.documents "
+                                                         "WHERE source_kind = 'confluence' AND container_ref = %s", (key,)).fetchall()}
+
+    def listings() -> list:
+        return [l for l in httpx.get(f"{FAKE_CONFLUENCE}/listings", timeout=10).json() if l["space"] == key and l["kind"] == "pages"]
+
+    doc = lambda n: f"confluence-{ids[n]}"
+    try:
+        space_holds(page("parent", "Parent"), page("child", "Child", parentId=ids["parent"]), page("leaf", "Leaf"))
+        r = api("POST", "/v1/workspaces/payments/connections/confluence", "alice", json={
+            "name": name, "api_base": FAKE_CONFLUENCE, "email": "confluence-bot@acme.test", "api_token": "smoke-confluence-token",
+            "spaces": [key], "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        wait_synced(name)
+        first = held()
+        assert set(first) == {doc("parent"), doc("child"), doc("leaf")}, f"the first, full read: {first}"
+
+        space_holds(page("parent", "Parent"), page("child", "Child, edited", 2, now, parentId=ids["parent"]),  # leaf deleted
+                    page("new", "New", 1, now, parentId=ids["parent"]))
+        scheduled_sync(name)
+        second = held()
+        assert listings()[-1]["sort"] == "-modified-date", f"the second sync listed the whole space: {listings()}"
+        assert second[doc("child")][0] != first[doc("child")][0], "the edited page wasn't read again"
+        assert doc("new") in second and f"Parent {tag}" in (second[doc("new")][1] or ""), \
+            f"the new page didn't come in under its unchanged parent: {second.get(doc('new'))}"
+        assert doc("leaf") in second, "a deletion was acted on before the reconcile, so the sync read everything"
+
+        scheduled_sync(name, reconcile=True)
+        assert listings()[-1]["sort"] is None, f"the reconcile didn't list the space in full: {listings()}"
+        assert set(held()) == {doc("parent"), doc("child"), doc("new")}, f"the reconcile kept the deleted page: {held()}"
+        print("      the second sync listed only what changed (the edit, and a new page under its parent); the reconcile removed the deleted one")
+    finally:
         api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%{tag.lower()}",))

@@ -1,12 +1,16 @@
 """Secrets backend (OpenBao KV v2, Vault-compatible API). The platform stores only the
 reference this returns; the secret itself never reaches Postgres, logs, or traces."""
 import base64
+import logging
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 
 import httpx
 
 from . import config
 
 _SCHEME = "openbao://"
+log = logging.getLogger("kl.vault")
 
 
 class SecretStore:
@@ -16,11 +20,49 @@ class SecretStore:
     def _headers(self) -> dict:
         return {"X-Vault-Token": self.token}
 
+    def ref(self, path: str) -> str:
+        """The reference a secret written at this path has, so a row can name it before it's written."""
+        return f"{_SCHEME}{self.mount}/{path}"
+
     def put(self, path: str, data: dict) -> str:
         r = httpx.post(f"{self.url}/v1/{self.mount}/data/{path}", json={"data": data},
                        headers=self._headers(), timeout=5)
         r.raise_for_status()
-        return f"{_SCHEME}{self.mount}/{path}"
+        return self.ref(path)
+
+    @contextmanager
+    def kept_if_committed(self) -> Generator[Callable[[str, dict], str], None, None]:
+        """Secrets a change writes before it has committed (H5). Enter it before the change's transaction,
+        `with vault.kept_if_committed() as put, scoped(...) as conn:`, and every secret written with `put` is destroyed
+        again if the change fails, so a failed change never leaves one behind. Only for a path no other change writes
+        at the same time: a fresh one, or one whose row the change has already claimed."""
+        written: list[str] = []
+
+        def put(path: str, data: dict) -> str:
+            ref = self.put(path, data)
+            written.append(ref)
+            return ref
+
+        try:
+            yield put
+        except BaseException:
+            for ref in written:
+                try:
+                    self.destroy(ref)
+                except (httpx.HTTPError, ValueError) as e:  # the change still failed; say what it left behind
+                    log.error("a secret written for a change that failed is still in the backend (%s): %s", type(e).__name__, ref)
+            raise
+
+    def destroy_committed(self, ref: str | None) -> None:
+        """Destroy the secret a committed change removed (H5: only after the commit, or a change that then rolled back
+        would keep a row naming a secret that's gone). A failure leaves it orphaned, which is logged, not raised: the
+        change itself is done. ponytail: an outbox the worker retries, if orphans turn up in practice."""
+        if not ref:
+            return
+        try:
+            self.destroy(ref)
+        except (httpx.HTTPError, ValueError) as e:
+            log.error("a secret its change removed couldn't be destroyed (%s): %s", type(e).__name__, ref)
 
     def get(self, ref: str) -> dict:
         if ref.startswith("gcpsm://"):  # a secret a team keeps in GCP Secret Manager (ADR 0011)

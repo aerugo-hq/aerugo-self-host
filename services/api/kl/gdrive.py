@@ -28,6 +28,7 @@ from .principals import is_valid
 from .sync_github import leave_former_teams, team_for
 from .sync_items import record_identities
 from .vault import vault
+from . import source_http
 
 GOOGLE_API = "https://www.googleapis.com"
 GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
@@ -45,7 +46,11 @@ SA_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 JWT_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 MAX_FOLDER_FILES = 5000
 MAX_BYTES = 20 * 1024 * 1024
-FIELDS = "nextPageToken,files(id,name,mimeType,modifiedTime,version,md5Checksum,size,webViewLink,permissions(type,role,emailAddress,domain))"
+FILE_FIELDS = "id,name,mimeType,modifiedTime,version,md5Checksum,size,webViewLink,trashed,permissions(type,role,emailAddress,domain)"
+FIELDS = f"nextPageToken,files({FILE_FIELDS})"
+CHANGE_FIELDS = f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_FIELDS}))"
+TOKEN = re.compile(r"^[0-9]{1,30}$")  # a changes feed's page token (H6)
+MAX_CHANGE_PAGES = 500
 
 
 def service_account_token(account: dict, scopes: tuple[str, ...], token_url: str, subject: str | None = None) -> str:
@@ -56,7 +61,7 @@ def service_account_token(account: dict, scopes: tuple[str, ...], token_url: str
     claims = {"iss": account["client_email"], "scope": " ".join(scopes), "aud": token_url, "iat": now, "exp": now + 3600}
     if subject:
         claims["sub"] = subject
-    r = httpx.post(token_url, data={"grant_type": JWT_GRANT,
+    r = source_http.post(token_url, data={"grant_type": JWT_GRANT,
                                     "assertion": jwt.encode(claims, account["private_key"], algorithm="RS256")}, timeout=15)
     r.raise_for_status()
     return r.json()["access_token"]
@@ -86,7 +91,7 @@ class DriveClient:
             if self._sa:
                 self._token = service_account_token(self._sa, (SA_SCOPE,), self._token_url())
             else:
-                r = httpx.post(self._token_url(), data=self._grant, timeout=15)
+                r = source_http.post(self._token_url(), data=self._grant, timeout=15)
                 r.raise_for_status()
                 self._token = r.json()["access_token"]
         return self._token
@@ -96,7 +101,7 @@ class DriveClient:
         return bool(self._sa)
 
     def _get(self, path: str, **params) -> httpx.Response:
-        r = httpx.get(f"{self.base}/drive/v3/{path}", params=params, timeout=60,
+        r = source_http.get(f"{self.base}/drive/v3/{path}", params=params, timeout=60,
                       headers={"Authorization": f"Bearer {self._access_token()}"})
         r.raise_for_status()
         return r
@@ -135,6 +140,32 @@ class DriveClient:
             return self.folder_files(container[len(FOLDER_PREFIX):])
         return self._pages("files", "files", corpora="drive", driveId=container, includeItemsFromAllDrives="true",
                            supportsAllDrives="true", q="trashed = false", pageSize=200, fields=FIELDS)
+
+    def start_token(self, drive: str) -> str | None:
+        """Where a shared drive's changes feed stands now (H6): taken before a full listing, so what changes during it
+        comes with the next sync."""
+        token = str(self._get("changes/startPageToken", driveId=drive, supportsAllDrives="true").json().get("startPageToken") or "")
+        return token if TOKEN.fullmatch(token) else None
+
+    def changes(self, drive: str, token: str) -> tuple[list[dict], list[str], str]:
+        """What changed in a shared drive since a token (H6): its changed files, with their permissions as a listing
+        gives them; the ids of those removed or trashed; and the token the next read starts from."""
+        files, removed = [], []
+        for _ in range(MAX_CHANGE_PAGES):
+            page = self._get("changes", pageToken=token, driveId=drive, includeItemsFromAllDrives="true", supportsAllDrives="true",
+                             pageSize=200, fields=CHANGE_FIELDS).json()
+            for change in page.get("changes") or []:
+                fid, f = str(change.get("fileId") or ""), change.get("file") or {}
+                if change.get("removed") or f.get("trashed"):
+                    removed.append(fid)
+                elif f.get("mimeType") != FOLDER:
+                    files.append(f)
+            if TOKEN.fullmatch(str(page.get("newStartPageToken") or "")):
+                return files, removed, str(page["newStartPageToken"])
+            token = str(page.get("nextPageToken") or "")
+            if not TOKEN.fullmatch(token):
+                break
+        raise RuntimeError("Drive's changes feed ended without saying where the next one starts")
 
     def folder_files(self, folder_id: str) -> list[dict]:
         """A shared folder's files, and its subfolders' too, breadth first, up to MAX_FOLDER_FILES. Only ids Drive
@@ -227,14 +258,21 @@ def viewer_tuples(key: str, acl: list[str]) -> set:
     return {(f"identity:{p[4:]}#owner" if p.startswith("ext:") else f"{p}#member", "viewer", f"document:{key}") for p in acl}
 
 
-def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str) -> dict:
+def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str, since: str | None = None) -> dict:
     """Index one shared drive: new and changed files, everyone's current access, and nothing left of removed files. With
-    `readers_only` on the connection (S8), only access: as `sync_items.sync_container` does."""
+    `readers_only` on the connection (S8), only access: as `sync_items.sync_container` does. From a changes-feed token
+    (H6), only what changed since, a removed or trashed file leaving at once; a folder shared with the service account
+    has no feed of its own, so it's always read in full."""
     org_id, team = connection["org_id"], team_for(connection, drive_id)
     readers_only = bool(connection.get("readers_only"))
     domain = (connection["config"] or {}).get("domain")
     groups = directory_groups(conn)  # read every sync: a member taken out of a group loses the file on the next one
-    files = client.files(drive_id)
+    incremental = bool(since and TOKEN.fullmatch(since)) and not drive_id.startswith(FOLDER_PREFIX) and not readers_only
+    if incremental:
+        files, removed, cursor = client.changes(drive_id, since)
+    else:
+        cursor = None if drive_id.startswith(FOLDER_PREFIX) or readers_only else client.start_token(drive_id)
+        files, removed = client.files(drive_id), []
     existing = {r["external_key"]: r for r in conn.execute(
         "SELECT id, external_key, content_hash FROM documents WHERE source_kind = 'gdrive' AND container_ref = %s", (drive_id,))}
     keep, changed, unreadable, writes, deletes = set(), 0, [], set(), set()
@@ -295,13 +333,19 @@ def sync_drive(conn, connection: dict, client: DriveClient, drive_id: str) -> di
         deletes |= have - want
     if seen and client.service_account:  # recorded only for service accounts; a person's token predates matching
         record_identities(conn, org_id, "google", {e: v for e, v in seen.items() if is_valid(f"ext:google.{e}")})
-    gone = [(k, r["id"]) for k, r in existing.items() if k not in keep]  # deleted, unshared, or no longer readable
+    if incremental:  # only what the feed named: removed or trashed, or changed and now unreadable by anyone
+        named = {f"gd-{fid}" for fid in removed} | ({f"gd-{f.get('id')}" for f in files} - keep)
+        gone = [(k, r["id"]) for k, r in existing.items() if k in named]
+    else:
+        gone = [(k, r["id"]) for k, r in existing.items() if k not in keep]  # deleted, unshared, or no longer readable
     with conn.transaction():
         if gone:
             conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([doc for _, doc in gone],))
         leave_former_teams(conn, connection, drive_id, team)  # a drive routed to another team moves there (slice F1)
-        conn.execute("UPDATE connection_containers SET cursor = now()::text WHERE connection_id = %s AND external_id = %s",
-                     (connection["id"], drive_id))
+        if not readers_only:  # a readers refresh reads no content: it neither moves the cursor nor reconciles
+            conn.execute("UPDATE connection_containers SET cursor = COALESCE(%s, now()::text), reconciled_at = CASE WHEN %s "
+                         "THEN now() ELSE reconciled_at END WHERE connection_id = %s AND external_id = %s",
+                         (cursor, not incremental, connection["id"], drive_id))
     for key, _ in gone:
         deletes |= {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": f"document:{key}"})}
     if writes or deletes:
