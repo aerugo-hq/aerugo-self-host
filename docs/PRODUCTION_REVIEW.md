@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** M4 (`m4-unit-tests`): 51 unit tests (each connector's readers, the parsers, the
+claim checker), run first in CI, shown to catch the bugs they guard.
+
 **Done and verified, 2026-10-17:** H3 with M2 (`h3-m2-web-sessions`): web sessions in Postgres (a hash of the
 cookie, tokens encrypted, a role that reaches nothing else, idle and absolute lifetimes, swept by the worker), shared
 by every web server; one refresh per session at a time, with Keycloak rotating refresh tokens.
