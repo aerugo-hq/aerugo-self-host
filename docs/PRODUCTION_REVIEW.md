@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** M5 (`m5-webhook-body-cap`): both webhook receivers read a body only up to their
+limit, refusing a declared length over it at the headers and a streamed one where it passes the limit.
+
 **Done and verified, 2026-10-17:** M3 (`m3-api-processes`): the API runs several processes (2 by default), each
 with its own pool of 10, the connection budget written down; each loads its model before it serves.
 
