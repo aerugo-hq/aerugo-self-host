@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** M9 (`m9-api-timeouts-uploads`): the web server's calls to the API have a time
+limit (504 when it passes), and request bodies stream through, cut off past the upload limit, never held whole.
+
 **Done and verified, 2026-10-17:** M8 (`m8-referer-check`): a write through the API proxy without an `Origin` must
 carry the app's own `Referer`; one with neither is refused.
 
