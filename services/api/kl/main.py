@@ -14,6 +14,7 @@ import re
 import secrets
 import time
 import zipfile
+from contextlib import asynccontextmanager
 from urllib.parse import urlencode
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,7 @@ from .claims import DEFAULT_THRESHOLD, check as check_claims
 from .decisions import ordered as order_decisions, parse_heading as parse_decision
 from .confidence import confidence
 from . import identity_match
-from .embeddings import embed_query, vector_literal
+from .embeddings import LOCAL_MODEL, embed, embed_query, vector_literal
 from .gateway import GatewayError, build_prompt, chat
 from .links import identifier_names
 from .managed import forget_managed, managed_header, managed_info, note_managed
@@ -54,7 +55,17 @@ from .webhooks import router as webhooks_router
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("kl.api")
 
-app = FastAPI(title="knowledge-layer API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """M3: each API process loads the local embedding model before it serves, so no request waits on it. Loading holds
+    the interpreter for seconds, and Uvicorn's supervisor replaces a worker that misses its health check (30 seconds
+    here): while serving, that drops the requests in flight; while starting, it only starts the worker again."""
+    await run_in_threadpool(embed, "local", LOCAL_MODEL, ["warm"])
+    yield
+
+
+app = FastAPI(title="knowledge-layer API", version="0.1.0", lifespan=lifespan)
 app.include_router(connections_router)
 app.include_router(webhooks_router)
 app.include_router(hooks_router)
