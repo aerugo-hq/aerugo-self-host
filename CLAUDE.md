@@ -870,8 +870,11 @@ and the restart costs seconds. Smoke: `a_stopped_or_killed_worker_never_strands_
 slower than a 0.1-minute limit. Unit: `tests/test_jobs.py` (the defaults, a deployment's changes, the refused
 settings). Red first, the new tests against the old worker: the unit tests failed (3 of 3, no limits), and the smoke
 phase failed (the sync still held its worker after 40 seconds). Green: 54 unit tests passed; the check passed, stopped
-at 3 of 12 issues and put back, killed at 13 of 20 and taken over, past its limit at 20 of 30 with its worker ended,
-each synced to the end, the overrun on its second attempt. On the rebuilt stack (the stack's own worker on M7 too),
+at 3 of 12 issues and put back, killed at 13 of 20 and taken over, past its limit with its worker ended, each synced
+to the end, the overrun on its second attempt. CI's first run found a flaw in the check: it also required fewer than
+30 issues indexed at the overrun, and on CI's faster machine all 30 were in within the limit while the sync was still
+fetching attachments; the overrun itself is the exit status and the failed attempt (a sync that finished first would
+have settled its job as done), so that guard is gone. On the rebuilt stack (the stack's own worker on M7 too),
 the check passed again, the overrunning worker ending 7 seconds after it started (a 6-second limit); `make unit` 54
 passed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario Recall@10 100%, MRR 0.92 over 12 cases, no leak,
 no regression. `make smoke` there: 166 passed, 15 skipped, 5 failed, none in jobs or the worker, each from what earlier

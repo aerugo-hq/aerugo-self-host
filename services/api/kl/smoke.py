@@ -3636,9 +3636,9 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
                 proc.wait(timeout=40)
             except subprocess.TimeoutExpired:
                 raise AssertionError(f"a sync past its time limit still held its worker after 40 seconds:\n{tail(log)}")
-            ended, overran_at, overran = time.monotonic() - started, indexed(), job(jid)
+            ended, overran = time.monotonic() - started, job(jid)
+            # Exit 3 and a failed attempt are the overrun: a sync that finished first would have settled its job as done.
             assert proc.returncode == 3, f"the worker didn't end for the overrun (worker.OVERRAN_EXIT), it exited {proc.returncode}:\n{tail(log)}"
-            assert overran_at < 30, f"the sync finished inside its limit, so nothing was proven: {overran_at} of 30"
             assert overran["status"] == "queued" and overran["attempts"] == 1 and "time limit" in (overran["last_error"] or ""), \
                 f"the overrun wasn't recorded as a failed attempt: {overran}"
             setup(30)
@@ -3647,7 +3647,7 @@ def a_stopped_or_killed_worker_never_strands_a_sync():
             assert done["status"] == "done" and done["attempts"] == 2, f"the overrun job didn't finish on its next attempt: {done}"
             assert indexed() == 30, f"after the overrun, the sync didn't complete: {indexed()} of 30 issues"
         print(f"      stopped at {stopped_at} of 12 issues and put back; killed at {killed_at} of 20 and taken over; "
-              f"past its limit at {overran_at} of 30, its worker ended {ended:.0f}s after it started; all synced to the end")
+              f"past its limit, its worker ended {ended:.0f}s after it started; all synced to the end")
     finally:
         if proc and proc.poll() is None:
             proc.kill()
