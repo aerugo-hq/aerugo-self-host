@@ -58,9 +58,9 @@ log = logging.getLogger("kl.api")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """M3: each API process loads the local embedding model before it serves. Loading holds the interpreter for
-    seconds, and Uvicorn's supervisor kills a worker that misses its health check while serving; before it serves, a
-    missed check only delays it."""
+    """M3: each API process loads the local embedding model before it serves, so no request waits on it. Loading holds
+    the interpreter for seconds, and Uvicorn's supervisor replaces a worker that misses its health check (30 seconds
+    here): while serving, that drops the requests in flight; while starting, it only starts the worker again."""
     await run_in_threadpool(embed, "local", LOCAL_MODEL, ["warm"])
     yield
 
