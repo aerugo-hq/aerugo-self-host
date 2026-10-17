@@ -143,6 +143,7 @@ synthetic company, the Atlas, pointer mode) → **Capture** (Teams, Slack, meeti
 Teams and Slack bots, the frontline view) → **Packs** (onboarding, incidents, policies, contact center, merchandising,
 supply chain, recalls, engineering and migration, leaders). Each phase is proven on a synthetic company with known
 right answers before anything touches real data. Already built: documents, permissions, search and Ask, connectors for
-Confluence, Jira, Drive, GitHub, Slack, Microsoft 365, Notion, catalogs, and directories; the Map; the Terraform
-provider; Kubernetes manifests. A connector only adds raw material; the core turns it into knowledge, keeps it fresh,
+Confluence, Jira, Drive, GitHub, Slack, Microsoft 365, Notion, catalogs, and directories, each syncing only what
+changed since its last sync (a full reconcile daily) and surviving a source's rate limits; the Map; the Terraform
+provider; Kubernetes manifests. Phase 0 so far: C1, P1 to P3, H1, H2, H4, H5, and H6. A connector only adds raw material; the core turns it into knowledge, keeps it fresh,
 and learns from people, so every new connector and pack makes it smarter.

@@ -116,15 +116,19 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
-**Done and verified:** C1 (`c1-job-leases`, not yet merged): every running job holds a lease renewed in the
+**Done and verified, 2026-10-17:** P1 to P3, H1, H5, H2, H6, and H4, one pull request with the plans
+(`o0-h2-h6-http-and-cursors`), each recorded in `CLAUDE.md` with what proved it. The whole loop at its tip found two
+failures, now fixed: H6 had left a group's membership change waiting for the next readers refresh (S5's check), and
+P3's check asked with cursor 0 on a fresh database.
+
+**Done and verified:** C1 (`c1-job-leases`, merged as pull request 23): every running job holds a lease renewed in the
 background, a reaper takes over expired ones, a stopping worker puts its job back without counting the attempt, and
 each run is fenced by its attempt number, so a worker that comes back late can't settle a job taken over. Proven red
 then green, and the whole loop is green at its commit: smoke 155 passed (the S2 to G3 checks included), 31 browser
 tests, 12 provider acceptance tests, no evaluation regression. `main` on GitHub holds the chain; a local `main` is
 stale until pulled. Migration 0040 fixed a real bug: two connections to two sites could share keys.
 
-**Still to do before anything else:** the provider repository is still on a detached HEAD (now `f127b3d`), with
-commits no branch holds: create a branch there first (`git switch -c <name>`), or that work can be lost.
+**The provider repository** is on `main` at `f127b3d`, with nothing that `origin/main` lacks (checked 2026-10-17).
 
 **The permissions audit** (migrations 0039 to 0049; row-level security is where every read is finally decided):
 

@@ -369,7 +369,8 @@ for i, (t, d, why, st) in enumerate(phases):
 for a, b in zip(pc, pc[1:]):
     p.edge(a, b)
 p.box("<b>Today</b>: documents, permissions, search and Ask, connectors for Confluence, Jira, Drive, GitHub, Slack, "
-      "Microsoft 365, Notion, catalogs, and directories; the Map; the Terraform provider; Kubernetes manifests.",
+      "Microsoft 365, Notion, catalogs, and directories, each syncing only what changed and surviving rate limits; "
+      "the Map; the Terraform provider; Kubernetes manifests.",
       60, 470, 1490, 70, S_BUILT)
 p.box("<b>Why foundations first:</b> a connector only adds raw material. What makes it a senior's memory is the core "
       "that turns material into knowledge, keeps it fresh, and learns from people. Built once, every new connector and "

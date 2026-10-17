@@ -636,11 +636,74 @@ over on the next tick); then the whole loop at fc73fa1 on a fresh stack with CI'
 16 skipped (the optional GitHub, model, web sign-in, and telemetry checks), 0 failed; the golden set hit@1 1.0, MRR 1.0,
 found@5 1.0; `make eval-scenario` Recall@10 100%, MRR 0.92, no leaks, no regression; `make e2e` 31 passed; the
 provider's acceptance tests 12 passed (the route's skips without a real GitHub connection).
+P1 to P3 (the permissions audit, `docs/PRODUCTION_REVIEW.md`). Migration 0053: `document_authors` are readable only
+with their document (a subquery under the documents table's own row-level security). A team's own rows
+(`asset_owners`, `page_reviews` and their notes, `team_media`) need the team, which only OpenFGA knows, so `db.scoped`
+takes `teams` (each passing `principals.is_team`, set as `kl.teams` after the API checked them), and a transaction that
+names none sees none of these rows; `kl_app` loses the `asset_owners` writes it never made. Retired pages still leave
+everyone's search and Ask through `kl.retired_concepts()`, which returns only their ids, joined under the caller's own
+row-level security. P2: `team_media` is written only in its own team's transactions, and only with its own models
+(`WITH CHECK`). P3: retention prunes `document_changes` past `KL_CHANGE_FEED_DAYS` (90), recording how far in
+`change_feed_floor`, and `GET /v1/changes` answers a cursor from before it with a 410; a cursor of 0 is no cursor (the
+window's start), so a new client can always begin. Smoke: `team_rows_stay_in_their_team_and_the_change_feed_keeps_ninety_days`.
+Found by the verification run: the check asked with cursor 0 on a fresh database (the first change's id is 1), so it
+got a 200; it now ages the two oldest changes and asks from the first.
+H1 and H5 (connections). H1: one `psycopg_pool` pool per process (`db.connect`; `KL_DB_POOL_MAX`, 20 for the API and
+10 for the MCP server), each connection checked before it's handed out and returned with `RESET ALL`; a request that
+waits longer than `KL_DB_POOL_TIMEOUT` (10 seconds) gets a 503 with `Retry-After`, and readiness fails when the pool
+can't hand one out within 2 seconds. Time limits per role (migration 0052): `kl_app` 30 seconds a statement and a
+minute idle in a transaction, `kl_ingest` ten minutes each. Rate counters commit without waiting for the disk
+(`synchronous_commit = off` for their own transaction only: a crash loses a moment's counts, nothing else). New
+dependency: `psycopg-pool`, from psycopg's own maintainers. H5: Ask and a reranked search call their models with no
+transaction open; a secret a change writes is destroyed again if the change then fails (`vault.kept_if_committed`),
+and one a change removes is destroyed only after the commit (`vault.destroy_committed`; a failure is logged with the
+reference, never the value). Smoke: `the_api_pools_its_connections_and_every_role_has_time_limits`,
+`no_model_call_holds_a_database_transaction`, `a_failed_change_never_strands_or_loses_a_secret`. Not built: sizing the
+pool from the process count (M3: the API is one Uvicorn process today), and an outbox that retries a removed secret
+whose destruction failed (logged today).
+H4 (the claim checker). Negations (contractions too) and every number count as content words: each number a claim
+gives, with its currency, percent, or unit, must be in the passage, and the claim must be negated exactly when the
+passage's best-matching sentence is. A claim that fails either is unsupported, and says why. The review's four
+contradictions and the passage's own two statements are in `kl/claims.py`'s self-test and in smoke
+(`the_claim_checker_never_passes_a_contradiction`). Not built: a team's model judging entailment on top (Q3).
+H2 and H6 (the HTTP helper and cursors). H2: `kl/source_http.py` carries every connector's calls. It waits out 429
+and 503 and each source's own sign of throttling (Google's rate-limit 403, Graph's 504, AWS's ThrottlingException,
+GitHub's exhausted limit), honoring `Retry-After` (seconds or a date), otherwise capped exponential backoff with
+jitter, up to five tries; a source asking for more than a minute gets its answer back, so the job's own retry comes
+later instead of holding the worker; a wait ends when the worker is stopping (C1). Slack's, Notion's, and the
+directories' own retry loops are gone. A connection's calls are already one at a time, which is the per-connection
+cap. The fakes can throttle (`POST /throttle`). H6: each container syncs from its cursor, and reads everything again
+when discovery asks or `KL_FULL_SYNC_HOURS` (24) have passed since its last full read (`reconciled_at`, migration
+0054). Jira asks for issues updated since its last sync; Microsoft 365 resumes Graph's delta (a deleted file leaves at
+once); a shared drive reads its changes feed (folders shared with the account are still read in full); Slack re-reads
+only its recent days; Confluence lists newest-modified first, down to its last sync. A readers refresh moves neither
+the cursor nor the reconcile. Smoke: `a_throttled_source_slows_a_sync_but_never_fails_it`, and one check per source
+(Jira, Microsoft 365, Drive, Slack, Confluence). Found by the verification run: when a directory saw a group's
+members change, it queued a content sync, which since H6 reads only files that changed, so someone taken out of an
+Entra group kept its file until the next readers refresh (up to five minutes); the directory now queues S8's readers
+refresh (`directory.REQUEUE_SQL`), which lists every item. Also in the stack: smoke renews its cached token before it
+expires (a long run had turned into 401s), and C1's check gives its new issues a fresh `updated`, as Jira does.
+Also found by the run, outside the stack: the command palette's browser test pressed Enter at once, so when
+`/v1/whoami` answered after the palette opened, only the search fallback was listed (it failed three times in three);
+it now waits until the section is offered, every assertion kept. Still open: through the web app, `whoami` sometimes
+takes over a second (1.2 and 1.6 seconds among six calls), while the API answers it directly in about 100 ms (twenty
+calls, 87 to 165 ms) and each of its steps inside the stack takes about 100 ms in all; the web app is unchanged here.
+Proof for P1 to P3, H1, H5, H4, H2, and H6, on a fresh stack with CI's settings (the example `.env`, an empty
+`.secrets/`), at c88b69c: `make smoke` 166 passed, 16 skipped (the optional GitHub, model, web sign-in, and telemetry
+checks), 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0 (claims threshold 1.0 over 9 labeled claims), no
+regression; `make eval-scenario` Recall@10 100%, MRR 0.92 over 12 cases, no leaks, no regression. At f41e0b7 (the
+browser test's fix): `make e2e` 31 passed. `make sdk-test` 5 and 4 passed; the provider's build, vet, and unit tests
+passed, and its acceptance tests 12 passed (the route's skips without a real GitHub connection). The scenario's gate said "BETTER" (impact-cross-team first at #1, up from
+#2), but migration-plan moved from #1 to #2 at the same time, MRR unchanged at 0.9167, so the baseline wasn't
+recorded again: the gate reports a case that ranks better and is silent on one that ranks worse (it fails only on a
+case that finds less, or on MRR). Red first: S5's check and P3's failed at the stack's tip before the two fixes (smoke
+164 passed, 16 skipped, 2 failed), and pass after. Not reproduced: each item's own red-first proof from when it was
+built (its commits record none). These landed as one pull request, by decision, rather than one per item.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
-findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1 is done; next, H1 and H5 together (connections), then H2 and
-H6, H3 with M2, and H4; then the mediums, M4 first; then deployment (E in the build plan), then Q.
+findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, and H4 are done; next,
+H3 with M2; then the mediums, M4 first; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
