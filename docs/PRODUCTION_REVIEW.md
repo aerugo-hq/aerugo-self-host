@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** H6b (`h6b-expired-cursors`, the Phase 0 report's first risk): a cursor Graph or
+Drive no longer accepts is read in full at once, instead of failing every attempt until the connection stopped.
+
 **Done and verified, 2026-10-17:** P1 to P3, H1, H5, H2, H6, and H4, one pull request with the plans
 (`o0-h2-h6-http-and-cursors`), each recorded in `CLAUDE.md` with what proved it. The whole loop at its tip found two
 failures, now fixed: H6 had left a group's membership change waiting for the next readers refresh (S5's check), and

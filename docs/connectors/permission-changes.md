@@ -5,8 +5,10 @@ sync. Three things make that happen, from slowest to fastest.
 
 ## Content syncs (every connection's own cadence)
 
-Every sync re-reads each item's readers along with its content, on the connection's own cadence (`every_minutes`).
-This is what makes permissions certain; the two below make them fast.
+Each sync reads what changed since the last one, on the connection's own cadence (`every_minutes`), and once a day
+(`KL_FULL_SYNC_HOURS`, 24) it reads everything again, every item's readers included. That daily full read is what
+makes permissions certain; the two below make them fast. A cursor the source no longer accepts (Microsoft Graph
+expiring a delta link, Drive refusing a changes token) is read in full at once, so it never stops a connection.
 
 ## The readers refresh (every few minutes)
 
@@ -14,7 +16,9 @@ Between content syncs, the worker re-reads only who may read each item, every `K
 default), for Google Drive, Jira, Confluence, Slack, Microsoft 365, and Notion. No body is read: an item someone may
 no longer read leaves at once, and a changed or new item waits for the next content sync. GitHub's sync is its readers
 (its webhooks keep it fresh), a directory's sync is who has left (on its own cadence), and a catalog's readers come
-with its listing. A connection's row says when its permissions were last read.
+with its listing. A connection's row says when its permissions were last read. When a Google Workspace or Entra
+directory sees a group's members change, it queues this refresh at once for every Drive or Microsoft 365 connection,
+so someone taken out of a group loses the files shared with it on the directory's sync.
 
 ## Webhooks (at once)
 
