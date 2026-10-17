@@ -386,11 +386,14 @@ def revoke_leavers(conn) -> list[str]:
     return sorted({r["username"] for r in rows})
 
 
+# A group's members changed: every file it's shared with gets its readers again (S8's readers refresh, which lists
+# everything). Never a content sync: since H6 that reads only files that changed, and a membership change changes none.
 REQUEUE_SQL = """
 INSERT INTO jobs (org_id, kind, payload)
-SELECT c.org_id, 'connection.sync', jsonb_build_object('connection_id', c.id::text) FROM connections c
+SELECT c.org_id, 'connection.refresh_readers', jsonb_build_object('connection_id', c.id::text, 'reason', 'directory')
+FROM connections c
 WHERE c.kind = %s AND c.status <> 'disabled'
-  AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'connection.sync' AND j.status = 'queued'
+  AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'connection.refresh_readers' AND j.status = 'queued'
                   AND j.payload->>'connection_id' = c.id::text)"""
 
 
