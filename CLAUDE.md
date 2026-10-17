@@ -23,17 +23,10 @@ migration. Self-hosted, with the data in the company's own cloud; people decide 
 5. `docs/BUILD_PLAN.md`: how to work: the rules, the verification loop, the recipe for a source.
 6. The rest of this file: every slice so far, and why each is the way it is.
 
-**Housekeeping first:**
-
-- The documents above were written into `.claude/worktrees/awesome-sammet-725a52/dev`, a second working folder of
-  this same repository (on `c1-job-leases`), and aren't committed yet. From that folder: commit them as one commit on
-  `c1-job-leases` (a new branch from `main` would conflict on this file), push, and merge its pull request (it also
-  carries C1, already proven). Then, in the main working folder, `self-hosted`: `git switch main`, `git pull`, and
-  work there from then on, every branch made from `main`. When the worktree has nothing uncommitted left, remove it
-  (`git worktree remove`).
-- In the provider repository: if HEAD is detached, create a branch at it first (`git switch -c <name>`), so no commit
-  is lost.
-- Before that commit, run `python docs/architecture/generate_architecture.py`, and commit the `.drawio` it writes with them.
+**Housekeeping: done (2026-10-17).** The plans and the diagram were committed in the worktree, which by then held
+Phase 0's first fixes on `o0-h2-h6-http-and-cursors`, and merged with them (pull request 24); every worktree is
+removed; the provider repository was already on `main` with nothing unpushed. Work in `self-hosted`, every branch made
+from `main`.
 
 **Then build, in this order** (each item's design is in its plan):
 
@@ -693,12 +686,48 @@ Proof for P1 to P3, H1, H5, H4, H2, and H6, on a fresh stack with CI's settings 
 checks), 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0 (claims threshold 1.0 over 9 labeled claims), no
 regression; `make eval-scenario` Recall@10 100%, MRR 0.92 over 12 cases, no leaks, no regression. At f41e0b7 (the
 browser test's fix): `make e2e` 31 passed. `make sdk-test` 5 and 4 passed; the provider's build, vet, and unit tests
-passed, and its acceptance tests 12 passed (the route's skips without a real GitHub connection). The scenario's gate said "BETTER" (impact-cross-team first at #1, up from
-#2), but migration-plan moved from #1 to #2 at the same time, MRR unchanged at 0.9167, so the baseline wasn't
-recorded again: the gate reports a case that ranks better and is silent on one that ranks worse (it fails only on a
-case that finds less, or on MRR). Red first: S5's check and P3's failed at the stack's tip before the two fixes (smoke
-164 passed, 16 skipped, 2 failed), and pass after. Not reproduced: each item's own red-first proof from when it was
-built (its commits record none). These landed as one pull request, by decision, rather than one per item.
+passed, and its acceptance tests 12 passed (the route's skips without a real GitHub connection). The scenario's gate
+said "BETTER" (impact-cross-team first at #1, up from #2), but migration-plan moved from #1 to #2 at the same time, MRR
+unchanged at 0.9167, so the baseline wasn't recorded again: the gate reports a case that ranks better and is silent on
+one that ranks worse (it fails only on a case that finds less, or on MRR). Red first: S5's check and P3's failed at the
+stack's tip before the two fixes (smoke 164 passed, 16 skipped, 2 failed), and pass after. Not reproduced: each item's
+own red-first proof from when it was built (its commits record none). These landed as one pull request, by decision,
+rather than one per item. CI on pull request 24: clients and smoke passed; merged as 62f1004.
+**Phase 0 report, 2026-10-17.**
+*Proven*, each on a fresh stack with CI's settings and recorded above with its checks. C1 (pull request 23): smoke 155
+passed, 31 browser tests, 12 provider acceptance tests. P1 to P3, H1, H5, H4, H2, and H6 (pull request 24): smoke 166
+passed, 16 skipped (optional), 0 failed; the golden set hit@1 1.0, MRR 1.0; the scenario Recall@10 100%, MRR 0.92 over
+12 cases, no leaks, no regression; 31 browser tests; the clients' 5 and 4 tests; the provider's 12 acceptance tests;
+CI green. The run found three things, each fixed red then green: H6 had left a group's membership change waiting for
+the next readers refresh, so someone taken out of an Entra group kept its file; P3's check asked with cursor 0 on a
+fresh database; and the palette's browser test raced `/v1/whoami`.
+*Left in Phase 0*, in the review's order: H3 with M2 (web sessions in one process's memory, lost on restart, invisible
+to a second replica, never expiring; concurrent token refreshes racing). Then the mediums, M4 first (unit tests for the
+readers functions, the parsers, and the claim checker, run first in CI), then M1 (CSP and HSTS), M3 (several API
+processes, sized with H1's pool), M5 (the webhook body streamed with a cap), M6 (rotating the services' OpenBao
+token), M7 (a time limit per job kind, with C1's lease), M8 (the cross-site check without an Origin header), M9 (the
+web server's calls to the API with a timeout, uploads not held in memory), and M10 (a saturated evaluation set, and
+sources proven only against fakes); the lows L1 to L4. From `docs/REVIEW.md`: verifying Graph's and Drive's
+notifications (optional), and growing the evaluation set to 40 to 60 cases that can fail.
+*Risks, most serious first.* (1) An expired cursor stops a connection, revocations included: no source handles a
+cursor its vendor no longer accepts (Graph answers an expired delta link with a 410; Drive refuses a stale page token),
+so the incremental sync fails every attempt, the connection goes to `error`, and the scheduler and the readers refresh
+pick only `ready` connections, so its permissions stop being refreshed until an admin acts. It's visible (the error,
+alerts), but it's C1's failure class. Proposed next, before H3, as H6b: on such an answer, drop the cursor and read
+the container in full, with a fake that expires a cursor and a smoke check. (2) The queue doesn't keep one
+connection's jobs apart: `CLAIM_SQL` takes any queued job, so with more than one worker a readers refresh (queued by a
+directory or a webhook) can run beside a content sync of the same connection, though H2's per-connection cap assumes
+they never overlap. One worker today; M3 and a second worker make it real; a per-connection advisory lock in the claim
+closes it. (3) Measurement can't see a ranking regression: the scenario's gate fails only when a case finds less or
+MRR falls, and with 12 saturated cases (M10) a ranking change can land unnoticed. (4) Every source is proven only
+against fakes: H2's throttling and H6's cursors follow the vendors' documents, not their behavior; contract fixtures
+from real accounts (REVIEW finding 11) need a go-ahead, since they connect something real. (5) `whoami` through the
+web app sometimes takes over a second, unexplained, and until it lands the palette shows no admin entries. (6)
+Smaller: `kl.retired_concepts()` gives the ids of every retired page to anything connected as `kl_app` (only the API,
+which joins them under row-level security); rate counters can lose a moment's counts in a crash (accepted in H1); each
+stacked item's red-first proof from when it was built isn't reproduced. (7) Names collide: the review's C1 and P1 to
+P3 share names with `docs/ENTERPRISE_PLAN.md`'s C1 (Teams capture) and P1 to P3 (the packs), items in this file's
+build order; records call the review's "the review's C1" wherever it could be confused.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
