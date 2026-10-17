@@ -836,11 +836,24 @@ on this machine's Docker Desktop today (Keycloak hung on its first start and was
 deadlines; syncs ran past their waits): 150 passed and 7 failed, every failure a timeout, none in what M3 changed. Not
 built: sizing the processes from the CPU count (a setting, for now); several API replicas in Kubernetes (each replica
 runs its processes; the budget then multiplies).
+M5 (webhook bodies read with a cap). Both receivers (GitHub's at `/v1/webhooks/github`, 5 MB; Jira's, Confluence's,
+and Slack's at `/v1/hooks/...`, 1 MB) read a delivery's whole body before checking its size, so an oversized one cost
+its memory first, and one that declared a large length and sent little held the request open waiting for the rest.
+`hooks.capped_body` reads only up to the limit: a declared `Content-Length` over it is refused at the headers, and a
+body streamed past it is cut off there; either answers 413 and counts as `too_large` in the rejected-webhooks metric.
+Signatures are still checked over the exact bytes received. Smoke:
+`webhook_receivers_refuse_an_oversized_body_before_reading_it`, over raw sockets against both receivers (a body
+declared at 50 MB, and a chunked one streamed past the limit). Red first: on the old code the declared 50 MB got no
+answer (the receiver waited for a body that never came); green after, and the three existing webhook checks
+(unsigned GitHub deliveries, Slack's Events API, Jira's) still pass. Proof: the check and the webhook checks locally;
+the whole loop is CI's run on the pull request (this machine's Docker Desktop is too slow today for a fair local
+smoke run, as M3's record says). Not built: a rate limit on the receivers (a delivery that passes the size cap is
+refused only by its signature, so a flood of small unsigned ones costs a secret lookup each).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, and M3 are done; next, M5 to M10, then the lows; then deployment (E in the build plan), then Q.
+M4, M1, M3, and M5 are done; next, M6 to M10, then the lows; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
