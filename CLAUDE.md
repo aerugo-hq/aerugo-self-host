@@ -779,11 +779,28 @@ regression; with both web servers up, smoke's two web checks passed and `make e2
 Not run: the provider's tests (nothing they call changed). Not built: signing out everywhere, and ending a leaver's
 web sessions (the table keeps the username for both); a second session key for rotation (changing the key signs
 everyone out); a rate limit on starting sign-ins (each start writes a row; expired ones are cleared at every start).
+M4 (unit tests). 51 pytest tests in `services/api/tests`, one per behavior, named for it, run in about three seconds
+with no service up (`make unit`, the test image, `--no-deps`): each connector's readers function (Drive, Microsoft 365,
+Slack, Confluence, Jira), the principal and team rules, the curator's held-back readers, identity matching's company
+email, GCP secret references and team ownership, the Markdown, Jira, and Confluence parsers, Drive's refused-token rule
+and the HTTP helper's waits (H2, H6b), and the claim checker with H4's contradictions. pytest is test tooling only:
+`requirements-test.txt`, hash-pinned in `requirements-test.lock` against the main lock (`make lock` writes both),
+installed in the test image with the tests; the runtime image carries neither. CI runs `make unit` before `make up`,
+and the verification loop (`docs/BUILD_PLAN.md`, section 4) starts with it. These tests pin behavior that already
+worked, so their red-first proof is a mutation: with Drive treating a link for anyone as the whole org, and Slack
+ignoring that a channel is shared with another company, exactly those two tests failed and the other 49 passed.
+Proof on a fresh stack with CI's settings, at d815f81: `make unit` 51 passed in 0.65 seconds; `make smoke` 164 passed,
+17 skipped, 3 failed, and each of the three passed when run again alone: Docker Desktop was slow, the API's and
+smoke's first token requests found Keycloak unreachable (ConnectError), and S2's identity matching ran past its wait;
+the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 100%, MRR 0.92, no
+leaks, no regression. CI's run on the pull request is the full clean proof. Not built: unit tests for the remaining
+parsers (spreadsheets, PDFs, OCR, Notion, Slack's threads) and the readers of the catalogs and Notion; smoke covers
+them against the fakes.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
-findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, and H3 with M2
-are done; next, the mediums, M4 first; then deployment (E in the build plan), then Q.
+findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
+M4 are done; next, the other mediums (M1, M3, M5 to M10), then the lows; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
