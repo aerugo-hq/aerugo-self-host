@@ -17,7 +17,7 @@ Alerts appear on the app's Alerts page (and in Slack or a webhook, if an org adm
 
 **Sync falling behind** (warning). A connection hasn't synced in three re-sync windows, so changes and permission updates aren't arriving. Check that the worker is running and the connection isn't failing.
 
-**Failing jobs** (warning). More than a fifth of the worker's recent jobs failed. Each job's error is in `kl.jobs.last_error`; `docker compose logs worker --tail 200` shows the rest.
+**Failing jobs** (warning). More than a fifth of the worker's recent jobs failed. Each job's error is in `kl.jobs.last_error`; `docker compose logs worker --tail 200` shows the rest. An error that says a job "ran past its time limit" means the job hung, or its kind's limit is too short for this company (a first sync of a very large source, say): the stuck job held the worker, so the worker ended itself and was started again. If the job was making progress, raise that kind's limit with `KL_JOB_LIMITS` (for example `connection.sync=480`, in minutes) and restart the worker; a sync run again skips what it already indexed.
 
 **Withheld sources** (warning). Far more content than usual is being kept from models by egress policy. Usually a reclassification (a reviewed personal-data flag, say) or a model registered with too few allowed classifications. Expected after a reclassification; otherwise review model settings.
 
