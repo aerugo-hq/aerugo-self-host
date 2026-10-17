@@ -220,6 +220,9 @@ def test_the_command_palette_reaches_a_section_in_one_step(page):
     page.keyboard.press("Control+k")
     palette = page.get_by_role("dialog", name="Command palette")
     palette.get_by_role("combobox", name="Command").fill("people's data")
+    # As a person would, press Enter once the section is offered: it's listed only after the app knows who you are
+    # (/v1/whoami), which can land after the palette opens.
+    expect(palette.get_by_role("option", name=re.compile(r"^Compliance: People's data"))).to_have_attribute("aria-selected", "true")
     page.keyboard.press("Enter")
     expect(page).to_have_url(re.compile(r"#/compliance/people$"))
     expect(page.get_by_role("link", name="People's data")).to_have_attribute("aria-current", "page")
