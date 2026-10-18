@@ -6042,7 +6042,11 @@ def google_drive_syncs_each_files_readers():
         r = api("POST", "/v1/workspaces/payments/connections/google", "alice", json=body)
         assert r.status_code == 201, f"connect: {r.status_code} {r.text[:200]}"
         assert settles({doc_key, sheet_key}), f"the drive didn't index as expected (and the link-shared file not at all): {sorted(indexed())}"
-        assert finds("alice", doc_key) and not finds("bob", doc_key), "the Doc reached someone it isn't shared with"
+        deadline = time.monotonic() + 30  # each file's row commits as it's read; the drive's grants are written at its end
+        while not finds("alice", doc_key) and time.monotonic() < deadline:
+            time.sleep(1)
+        assert finds("alice", doc_key), "the Doc never reached alice, who it's shared with"
+        assert not finds("bob", doc_key), "the Doc reached someone it isn't shared with"
         assert finds("alice", sheet_key) and finds("bob", sheet_key), "a file shared with the org's domain should reach the whole org"
         files[0]["permissions"] = [{"type": "user", "role": "reader", "emailAddress": "bob@acme.test"}]  # bob hasn't linked
         drive_has([files[0], files[2]])  # alice's access revoked, the Sheet deleted
