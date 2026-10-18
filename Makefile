@@ -1,6 +1,6 @@
 # Recipes start with ">" instead of a tab (.RECIPEPREFIX, GNU make 3.82+), so editors can't break them.
 .RECIPEPREFIX = >
-.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
+.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario company eval-company eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
 
 # The local model `make llm` downloads for Ask. About 1 GB; make llm LLM_MODEL=qwen2.5:3b for better answers (about 2 GB).
 LLM_MODEL ?= qwen2.5:1.5b
@@ -93,14 +93,28 @@ eval-scenario: env
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm smoke python -m kl.evals
 
-# Record both evaluation sets' scorecards as their baseline (slices K1 and Q1): the golden set on the plain seed first,
-# then the scenario, which it loads. From then on, make eval, make eval-scenario, and smoke fail when a case gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
+# The synthetic retailer (F9, kl.company): a fictional outdoor retailer with known truth, loaded through the connectors
+# from its own fake sites. company loads it (its people sign in as ana, cora, kai, and the rest, password <name>-dev-only);
+# eval-company loads it and scores it: each person opens exactly what the truth says, no forbidden page shows, and no
+# question does worse than its baseline. Smoke expects the plain seed: make reset && make up before make smoke.
+company: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm smoke python -m kl.company_eval --load-only
+
+eval-company: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm smoke python -m kl.company_eval
+
+# Record the evaluation sets' scorecards as their baseline (slices K1, Q1, and F9): the golden set on the plain seed first,
+# then the scenario, which it loads, then the synthetic retailer, which it loads. From then on, make eval, make eval-scenario, and smoke fail when a case gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
 # with a permission leak, or one that fails, is never recorded: the baseline you had stays.
 eval-baseline: env
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm -T smoke python -m kl.eval --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 >docker compose --profile smoke run --rm -T smoke python -m kl.evals --record > services/api/kl/evals_baseline.tmp
+>mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
+>docker compose --profile smoke run --rm -T smoke python -m kl.company_eval --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 
 # The clients (slice A2): the Python and TypeScript clients' own tests, against stand-ins for the API, in pinned images.

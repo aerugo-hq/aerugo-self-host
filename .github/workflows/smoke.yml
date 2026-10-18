@@ -58,6 +58,9 @@ jobs:
       - name: Evaluation set (no leak; no regression against the baseline)
         run: make eval-scenario
 
+      - name: The synthetic retailer, F9 (each person opens exactly what its truth says; no leak; no regression)
+        run: make eval-company
+
       - name: Service logs
         if: failure()
         run: docker compose --profile smoke logs --no-color --tail=300

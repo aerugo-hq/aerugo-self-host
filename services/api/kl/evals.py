@@ -381,11 +381,11 @@ def people_checks() -> list[str]:
             if api("GET", f"/v1/concepts/{page}/people", user).status_code != 404]
 
 
-def scorecard(rows, answers: dict | None = None) -> dict:
+def scorecard(rows, answers: dict | None = None, scenario: str = SCENARIO) -> dict:
     """The scorecard as data: each counted case's result, the totals, and (M10) which cases Ask cited a right page for."""
     counted = [(case, found, first) for case, found, first, _ in rows if case.expect and not case.needs]
     return {
-        "scenario": SCENARIO, "k": K,
+        "scenario": scenario, "k": K,
         "recall": round(sum(len(found) / len(case.expect) for case, found, _ in counted) / len(counted), 4) if counted else 0.0,
         "mrr": round(sum(1 / first if first else 0 for _, _, first in counted) / len(counted), 4) if counted else 0.0,
         "cases": {case.id: {"found": len(found), "of": len(case.expect), "first": first} for case, found, first in counted},
@@ -441,13 +441,14 @@ def golden_scorecard(report: dict) -> dict:
             "mrr": round(sum(1 / c["first"] if c["first"] else 0 for c in cases.values()) / count, 4), "cases": cases}
 
 
-def gate(name: str, card: dict, out) -> int:
-    """Hold a scorecard to its set's baseline: say what's better and new, fail on what's worse."""
+def gate(name: str, card: dict, out, kinds: dict | None = None) -> int:
+    """Hold a scorecard to its set's baseline: say what's better and new, fail on what's worse. `kinds`: each case's
+    kind, for a set other than the scenario's (F9's company)."""
     baseline = baseline_for(name)
     if baseline is None:
         print(f"  No {name} baseline yet: make eval-baseline records one, and then a regression fails the run.", file=out)
         return 0
-    worse, better, new = compare(card, baseline)
+    worse, better, new = compare(card, baseline, kinds)
     for line in better:
         print(f"  BETTER: {line}", file=out)
     for case_id in new:
@@ -462,9 +463,9 @@ def gate(name: str, card: dict, out) -> int:
     return 0
 
 
-def compare(card: dict, baseline: dict) -> tuple[list[str], list[str], list[str]]:
+def compare(card: dict, baseline: dict, kinds: dict | None = None) -> tuple[list[str], list[str], list[str]]:
     """Against the baseline: what got worse (each fails the run), what got better (record it), and what's new."""
-    kinds = {case.id: case.kind for case in CASES}
+    kinds = kinds or {case.id: case.kind for case in CASES}
     worse, better = [], []
     for case_id, was in sorted(baseline.get("cases", {}).items()):
         now = card["cases"].get(case_id)

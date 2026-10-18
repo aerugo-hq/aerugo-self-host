@@ -240,6 +240,7 @@ rc = [p.box(f"<b>{t}</b><br>{d}", x, y, 300, 90, S_NEW if i not in (2, 4) else S
 for a, b in zip(rc, rc[1:] + rc[:1]):
     p.edge(a, b)
 p.box("<b>Tests gate every change</b><br>per-team question sets, with right answers", 640, 420, 340, 90, S_SEC)
+p.box("<b>The synthetic retailer</b><br>a company with known right answers, loaded through the connectors", 640, 530, 340, 90, S_BUILT)
 p.box("<b>Ask an expert</b>: a gap goes to whoever knows; with their consent, their answer becomes knowledge for "
       "the next person.", 60, 860, 720, 70, S_NOTE)
 p.box("<b>Freshness</b>: every piece of knowledge has a review schedule; stale pieces go back to their owners.",

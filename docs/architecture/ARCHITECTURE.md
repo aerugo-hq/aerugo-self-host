@@ -147,7 +147,9 @@ right answers before anything touches real data. Already built: documents, permi
 Confluence, Jira, Drive, GitHub, Slack, Microsoft 365, Notion, catalogs, and directories, each syncing only what
 changed since its last sync (a full reconcile daily, and at once when a source expires its cursor) and surviving a
 source's rate limits; the web app, its sign-in sessions shared by every web server; the Map; the Terraform provider;
-Kubernetes manifests; onboarding as code, with a pilot that lets in only the teams onboarded so far (G4). Phase 0 is
-complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`), but for M10's real-vendor half,
-set aside; next, the foundation, starting with F9 and F10. A connector only adds raw material; the core turns it into
-knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it smarter.
+Kubernetes manifests; onboarding as code, with a pilot that lets in only the teams onboarded so far (G4); and the
+synthetic retailer (F9), a company with known right answers that comes in through the connectors, on which everything
+after is proven. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`), but
+for M10's real-vendor half, set aside; next, F10 (the Atlas, on the same retailer). A connector only adds raw material;
+the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
+smarter.
