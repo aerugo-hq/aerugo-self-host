@@ -33,6 +33,11 @@ reads: the bot sets what's indexed, and each message keeps its channel's own rea
 - **Who reads each one:** a private channel's members; a public channel's members, or the whole org if you confirm
   the workspace is the company's own; a channel shared with another organization (Slack Connect), only its members
   from this workspace, whatever you confirm. Someone who has left the workspace, and bots, read nothing.
+- **Enterprise Grid:** a connection is one workspace's bot, and "from this workspace" means that workspace's own
+  members. So a channel shared between sibling workspaces in your Grid org reaches only the connected workspace's
+  members; members of the sibling workspaces get no access to it through Aerugo. This fails closed, by design: Aerugo
+  can't tell a sibling workspace from another company's. Connecting each sibling workspace doesn't open it either: a
+  channel is indexed once, by the first connection that reads it, and another connection never takes it over.
 - **What it follows:** each sync re-reads the history window in full (a year unless you set `history_days`), so an
   edit, a deleted message, a member who left a channel, a message Slack's retention removed, and a day that fell out
   of the window all carry over on that sync. Older messages aren't indexed.

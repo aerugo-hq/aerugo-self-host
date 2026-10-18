@@ -116,6 +116,12 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-18:** L2 (`l2-eslint-in-ci`): the web app's lint runs in CI, errors failing it and
+warnings held to today's count; the web image is two stages, so the lint's packages never ship.
+
+**Done, 2026-10-18:** L4 (`l4-slack-grid-doc`): the Slack doc says a channel shared between Enterprise Grid's
+sibling workspaces reaches only the connected workspace's members, failing closed.
+
 **Done and verified, 2026-10-18:** L1 (`l1-images-by-digest`): every image Aerugo ships is pinned by digest, checked
 in CI (`make pins`), with Dependabot proposing new digests.
 
