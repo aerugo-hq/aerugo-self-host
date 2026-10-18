@@ -50,15 +50,17 @@ if ((Get-Command kind -ErrorAction SilentlyContinue) -and $context -like "kind-*
   } elseif ($nodes.Count -eq 0) {
     throw "No kind nodes found. Install kind (winget install Kubernetes.kind), or check the cluster is running."
   } else {
-    # Each image streams from Docker into each node's containerd inside Docker's own machine, through a throwaway docker
-    # CLI container on Docker's socket. A tar on this machine's disk, copied into each node, took over half an hour.
+    $tar = Join-Path ([System.IO.Path]::GetTempPath()) "aerugo-image.tar"
     foreach ($image in $images.Keys) {
+      Invoke-Native "docker" @("save", "-o", $tar, $image)
       foreach ($node in $nodes) {
         Write-Host "Loading $image into $node"
-        Invoke-Native "docker" @("run", "--rm", "-v", "/var/run/docker.sock:/var/run/docker.sock", "docker:27.5.1-cli",
-          "sh", "-c", "docker save $image | docker exec -i $node ctr --namespace=k8s.io images import -")
+        Invoke-Native "docker" @("cp", $tar, "${node}:/aerugo-image.tar")
+        Invoke-Native "docker" @("exec", $node, "ctr", "--namespace=k8s.io", "images", "import", "/aerugo-image.tar")
+        Invoke-Native "docker" @("exec", $node, "rm", "-f", "/aerugo-image.tar")
       }
     }
+    Remove-Item $tar -ErrorAction SilentlyContinue
   }
 }
 
