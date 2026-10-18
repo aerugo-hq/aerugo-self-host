@@ -83,11 +83,13 @@ def _forwarded_and_ready():
             time.sleep(2)
 
 
-def sign_in(page, user: str) -> None:
-    """Sign in as a person does: the app sends the browser to Keycloak, which sends it back signed in."""
+def sign_in(page, user: str, admitted: bool = True) -> None:
+    """Sign in as a person does: the app sends the browser to Keycloak, which sends it back signed in. Someone the org's
+    admission leaves out (G4) lands on the page saying so, without the app's navigation."""
     page.goto(f"{WEB}/auth/login")
     page.locator("#username").fill(user)
     page.locator("#password").fill(PASSWORDS[user])
     page.locator("#kc-login").click()
     page.wait_for_url(f"{WEB}/**", timeout=60_000)
-    page.get_by_role("link", name="Map", exact=True).wait_for(timeout=60_000)  # exact: Home also offers "Open the map"
+    if admitted:
+        page.get_by_role("link", name="Map", exact=True).wait_for(timeout=60_000)  # exact: Home also offers "Open the map"

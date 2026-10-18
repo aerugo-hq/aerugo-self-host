@@ -1303,6 +1303,7 @@ def teams_and_members_without_sql():
 def a_pilot_lets_in_only_onboarded_teams():
     """G4, onboarding a team at a time: with admission `teams` (a pilot), someone on no team is refused by the API and the MCP server alike, and whoami tells them only that they aren't in; a team member and an org admin get in; only an org admin changes it; giving a team to the group the identity provider puts them in lets them in at once (their token's groups reach OpenFGA), and taking it away shuts them out again; with admission `org`, everyone signed in gets in, as before"""
     import uuid
+    from . import admission as admission_mode
     from .authz import fga
     ws = f"pilot-{uuid.uuid4().hex[:8]}"  # a throwaway team for the pilot, removed at the end
     search = lambda user: api("GET", "/v1/search", user, params={"q": "incident", "limit": 3})  # noqa: E731
@@ -1319,7 +1320,8 @@ def a_pilot_lets_in_only_onboarded_teams():
         assert admission("everyone") == 422, "an unknown mode was accepted"
         assert admission("teams") == 200
         assert api("GET", "/v1/admin/admission", "olivia").json()["mode"] == "teams"
-        wait(lambda: search("nora").status_code == 403, 45, "someone on no team still got in during the pilot")
+        time.sleep(admission_mode.MODE_SECONDS + 2)  # every process, the API's and the MCP server's, has read the new mode
+        assert search("nora").status_code == 403, "someone on no team still got in during the pilot"
         assert "onboarded" in search("nora").json()["detail"]
         assert api("GET", "/v1/whoami", "nora").json() == {"username": "nora", "admitted": False}, "whoami told an outsider more than that"
         try:
