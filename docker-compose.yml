@@ -433,7 +433,7 @@ services:
       - "127.0.0.1:16686:16686"
 
   grafana:
-    image: grafana/grafana:11.5.2
+    image: grafana/grafana:13.2.3
     profiles: ["observability"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${KL_GRAFANA_PASSWORD:-admin-dev-only}
