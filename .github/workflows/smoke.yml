@@ -37,6 +37,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Every image Aerugo ships is pinned by digest (L1)
+        run: make pins
+
       - name: Unit tests (who reads what, the parsers, the claim checker), before anything starts
         run: make unit
 
