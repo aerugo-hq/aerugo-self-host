@@ -231,9 +231,17 @@ Every screen in the app's existing shell and voice, permissions on everything, b
 
 ## 11. Build order
 
-Phase 0 first, as `docs/ORG_INTELLIGENCE_PLAN.md` says (the production review's prerequisites). Then the foundation,
-then capture, then the packs; each item on its own branch, proven on the synthetic company and in the stack, recorded
-in `CLAUDE.md`, ticked here, stopping for review after each phase.
+Phase 0 first, as `docs/ORG_INTELLIGENCE_PLAN.md` says (the production review's prerequisites). Then the pilot path
+(G4), then the foundation, then capture, then the packs; each item on its own branch, proven on the synthetic company
+and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review after each phase.
+
+### The pilot path (decided 2026-10-17: right after Phase 0, before F9 and F10)
+- [ ] **G4.** Onboarding as code, with a pilot gate, so a company can start with two teams (say EDW and EDP) and add
+      the rest a wave at a time: each team's folder in the onboarding repository declares the team, its admins, and
+      its members by directory group (joining or leaving the group is the onboarding; no pull request per person);
+      a pilot setting lets in only members of onboarded teams, beside the identity provider's own app assignment
+      (Entra's "assignment required"), so nothing a source shares company-wide reaches people outside the pilot;
+      each wave is a reviewed pull request whose plan shows what it connects.
 
 ### Foundation
 - [ ] **F1.** Knowledge units, perspectives, and conflicts: the tables, row-level security from evidence, the API.
@@ -258,6 +266,10 @@ in `CLAUDE.md`, ticked here, stopping for review after each phase.
 - [ ] **C5.** Announcement mailboxes as policy versions (optional).
 
 ### Where people meet it
+- [ ] **D0.** The UI revamp's design (decided 2026-10-17: after F1, so it reflects real knowledge units, and before
+      D1): the information architecture for every entity (the organization and its sign-in, people, teams as spaces,
+      sources and the chat channels mapped to them, knowledge, systems, reviews), the onboarding flows, and a
+      clickable prototype reviewed before any D1 screen is built; then built alongside D1.
 - [ ] **D1.** The Knowledge, unit, policy, procedure runner, who-to-call, gaps, and review screens.
 - [ ] **D2.** Teams and Slack as places to ask, save, and follow procedures; change notices to affected roles.
 - [ ] **D3.** The frontline view.

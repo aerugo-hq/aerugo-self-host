@@ -1057,12 +1057,50 @@ digest or a patch release (an `ignore` of minor and major updates, in `.github/d
 version is an upgrade to plan and prove as an item of its own, not a refresh. The development tools (Ollama and the
 observability stack) aren't proposed at all. Configuration only; the file parses, and Dependabot applies it on its
 next weekly run. The thirteen open pull requests are left for the user to keep or close.
+**Phase 0 report, final, 2026-10-18.** The production review's findings are built, each on its own branch and pull
+request, proven red then green, recorded above, and merged after CI passed (pull requests 23 to 54). The first report
+(pull request 25) listed what was left; all of it is done, but the half of M10 set aside by decision.
+*Proven.* Critical and high: C1 (job leases, #23); P1 to P3, H1, H5, H2, H6, and H4 (#24); H6b (expired cursors, #26);
+H3 with M2 (web sessions in Postgres, one refresh at a time, #27). Medium: M4 (unit tests, #28), M1 (CSP and HSTS,
+#29), M3 (several API processes, #30), M5 (webhook bodies capped, #31), M7 (a time limit per job kind, #32), M8 (the
+cross-site check without an Origin, #33), M9 (web-to-API timeouts and streamed uploads, #34), M6 (the services sign in
+to OpenBao with the platform's identity, #35), M10's evaluation half (an evaluation set that can fail, #36). Low: L1
+(images by digest, #37), L4 (Slack Enterprise Grid, documented, #51), L2 (the web app's lint in CI, #52), L3 (the ID
+token verified at sign-in, #53), and L1b (Dependabot's scope, #54). Where it stands, in CI: the image pin check; unit
+64 (the API) and 7 (the web app); the lint at 0 errors under its 43-warning ceiling; smoke 169 passed, 17 skipped
+(optional), 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario at its new, harder baseline
+(Recall@10 85%, MRR 0.78 over 43 counted cases, Ask right for 20 of 25), no leak and no regression. Locally: 37 browser
+tests, and `make kind-check` on Docker Desktop's cluster.
+*Left in Phase 0.* M10's real-vendor half (contract fixtures from real accounts), set aside by decision. Proposed and
+waiting on a decision: R2, a per-connection lock in the job claim, so a readers refresh and a content sync of one
+connection never run side by side once there's a second worker (the first report's risk 2). The thirteen Dependabot
+pull requests L1's first config opened are still open, for the user to keep or close.
+*Changed in the plan by decision.* G4 (onboarding as code, with a pilot gate) comes right after Phase 0, before F9 and
+F10; D0 (the UI revamp's design, with a clickable prototype) comes after F1 and before D1. Both are now in
+`docs/ENTERPRISE_PLAN.md`. Found while designing G4: OpenFGA learns who is in a group only from the dev seed, so in
+production a team granted to a group never reaches its members; G4 brings each person's token groups into OpenFGA.
+*Risks, most serious first.* (1) Natural questions miss the source documents that say the answer: search ranks curated
+pages above a Jira issue, Confluence page, or Slack thread that states it outright, and a short message without the
+question's own words isn't found at all (M10's traps: six cases now miss). Answers about what was only said in a source
+suffer most, which is what capture (C1 to C5) adds a lot of; F4 and Q2 are where it's fixed, and the evaluation set
+says BETTER when it is. (2) The lineage hop in search doesn't reach Finance's mart from "Which tables read
+edp.orders?", even for someone on both teams. (3) The queue can run one connection's jobs side by side once a second
+worker exists (R2). (4) Proven only against fakes or not yet run: every source (M10's other half), M6's VM sign-in
+(until a real GCP deploy), and the new image running as the services in a cluster (until the Helm deploy; loading
+images into Docker Desktop's four-node cluster stalled). (5) This machine: Docker Desktop's Kubernetes held about 3 GB
+of its 7.6 and made a day of local runs flaky, until it was turned off (by decision); local cluster proofs need a
+one-node cluster. (6) Smaller: 43 lint warnings held at a ceiling, not fixed; the old Aerugo deployment in Docker
+Desktop's cluster no longer starts (its image predates M6's settings), for `make kind-down` or a redeploy on a
+one-node cluster.
+*Next:* G4, designed and approved (`team.yaml` in the onboarding repository, members by identity-provider group, the
+admission setting enforced in the API and MCP, the not-onboarded page), then F9 and F10.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, and L3 are done; Phase 0 is complete but for M10's real-vendor half (set aside),
-and its final report is below; next, G4; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
+but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
+this file says: G4 (the pilot path), then the foundation in `docs/ENTERPRISE_PLAN.md`, F9 and F10 first.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
