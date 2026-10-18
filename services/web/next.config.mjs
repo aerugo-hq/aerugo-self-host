@@ -1,5 +1,5 @@
 // No telemetry, no framework fingerprint, and conservative security headers on every response.
-export default {
+const config = {
   poweredByHeader: false,
   reactStrictMode: true,
   eslint: { ignoreDuringBuilds: true },
@@ -15,3 +15,5 @@ export default {
     }];
   },
 };
+
+export default config;

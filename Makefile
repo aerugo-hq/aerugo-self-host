@@ -1,6 +1,6 @@
 # Recipes start with ">" instead of a tab (.RECIPEPREFIX, GNU make 3.82+), so editors can't break them.
 .RECIPEPREFIX = >
-.PHONY: sdk-test unit env up smoke eval eval-mine demo eval-scenario eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
+.PHONY: sdk-test lint-web unit env up smoke eval eval-mine demo eval-scenario eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
 
 # The local model `make llm` downloads for Ask. About 1 GB; make llm LLM_MODEL=qwen2.5:3b for better answers (about 2 GB).
 LLM_MODEL ?= qwen2.5:1.5b
@@ -16,6 +16,9 @@ up: env
 
 # Unit tests (M4): the logic that decides who reads what, the parsers, and the claim checker, in seconds and with no
 # service running. CI runs them before anything else.
+lint-web:   # L2: the web app's lint (ESLint, Next's rules), in the npm tool image; node_modules stays out of the tree
+>docker compose --profile tools run --rm -v /app/node_modules lock-web sh -c "npm ci --no-audit --no-fund && npm run lint"
+
 unit:
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm --no-deps smoke python -m pytest -q -p no:cacheprovider tests
