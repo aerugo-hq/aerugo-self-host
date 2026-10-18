@@ -1141,7 +1141,17 @@ Recall@10 85%, MRR 0.78 over 43 counted cases, no leak, no regression; `make e2e
 passed (the route's skipped), and its CI; the example plans 8 resources and refuses a malformed member. Not built: an
 admission page in the app (the API and Terraform set it); signing someone out when they leave a group (they keep it
 until their next sign-in through the identity provider, as the runbook says); checking that a `team.yaml`'s group
-exists in the identity provider (a plan can't see it); Entra group ids shown as names.
+exists in the identity provider (a plan can't see it); Entra group ids shown as names. CI on pull request 58: unit
+71 passed; smoke 170 passed, 17 skipped, 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario at its
+baseline (Recall@10 85%, MRR 0.78); no leak and no regression. Merged with the provider's pull request 9.
+Drive's smoke check, a race found by G4's run. A Drive sync commits each file's row as it reads it and writes the
+drive's grants to OpenFGA at the end, so for a moment a new file is in the index but not yet authorized, and search's
+post-check denies it (fail closed, logged as drift). The check searched as soon as the rows were there: alice's search
+ran 8 ms before the grant was written, she didn't find her own Doc, and the assertion, which tested both people at
+once, said the Doc "reached someone it isn't shared with". It now waits up to 30 seconds for alice to find it, then
+checks bob separately, so a miss and a leak read differently. Red: the logged run (the API's post-check at 54.538,
+the worker's grant at 54.546). Green: the check alone, twice, and CI's run on the pull request. Not changed: the
+sync's order (rows, then grants), which fails closed.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
