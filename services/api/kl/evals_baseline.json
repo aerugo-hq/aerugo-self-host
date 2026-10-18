@@ -1,34 +1,34 @@
 {
   "company": {
     "answers": {
-      "allocation-fewer-units": false,
+      "allocation-fewer-units": true,
       "bike-key-denver": true,
       "bike-key-portland": true,
-      "christmas-eve-hours": false,
+      "christmas-eve-hours": true,
       "district-manager-mountain": true,
       "first-week": true,
-      "first-week-courses": false,
-      "injury-california": false,
-      "injury-denver-fall": false,
-      "injury-what-to-do": false,
+      "first-week-courses": true,
+      "injury-california": true,
+      "injury-denver-fall": true,
+      "injury-what-to-do": true,
       "recall-can-i-sell": true,
-      "recall-decision": false,
-      "recall-stores": false,
-      "registers-denver": false,
+      "recall-decision": true,
+      "recall-stores": true,
+      "registers-denver": true,
       "registers-down-associate": true,
       "registers-down-leader": true,
-      "returns-no-receipt": false,
-      "returns-owner": false,
-      "returns-window": false,
-      "risk-hospital": false,
+      "returns-no-receipt": true,
+      "returns-owner": true,
+      "returns-window": true,
+      "risk-hospital": true,
       "shoplifting-associate": true,
-      "shoplifting-leader": false,
-      "sick-california": false,
-      "sick-colorado": false
+      "shoplifting-leader": true,
+      "sick-california": true,
+      "sick-colorado": true
     },
     "cases": {
       "allocation-fewer-units": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -49,21 +49,21 @@
       },
       "cc-injury-return": {
         "first": 1,
-        "found": 1,
+        "found": 2,
         "of": 2
       },
       "checkout-changed": {
-        "first": 10,
-        "found": 1,
+        "first": 3,
+        "found": 2,
         "of": 2
       },
       "checkout-runbook": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "christmas-eve-hours": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -73,12 +73,12 @@
         "of": 1
       },
       "close-september": {
-        "first": 9,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "copy-approval": {
-        "first": 9,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -88,7 +88,7 @@
         "of": 1
       },
       "ecom-on-call": {
-        "first": 9,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -98,47 +98,47 @@
         "of": 1
       },
       "first-week-courses": {
-        "first": 9,
+        "first": 3,
         "found": 1,
         "of": 1
       },
       "flash-sale-lesson": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "holiday-results": {
-        "first": 9,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "injury-california": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "injury-denver-fall": {
-        "first": 7,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "injury-what-to-do": {
-        "first": 7,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "late-shipment": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "northpeak-last-time": {
-        "first": 9,
+        "first": 1,
         "found": 2,
         "of": 2
       },
       "pay-range-people": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -148,7 +148,7 @@
         "of": 1
       },
       "recall-decision": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -158,22 +158,22 @@
         "of": 1
       },
       "recall-lesson": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "recall-regulator": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "recall-reports": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "recall-script": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -183,12 +183,12 @@
         "of": 1
       },
       "recall-stores": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "registers-denver": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -198,37 +198,37 @@
         "of": 1
       },
       "registers-down-leader": {
-        "first": 3,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "returns-50-days": {
-        "first": 10,
+        "first": 3,
         "found": 1,
         "of": 1
       },
       "returns-changes": {
-        "first": 9,
-        "found": 1,
+        "first": 1,
+        "found": 2,
         "of": 2
       },
       "returns-no-receipt": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "returns-owner": {
-        "first": 9,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "returns-window": {
-        "first": 9,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "risk-hospital": {
-        "first": 10,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -238,34 +238,34 @@
         "of": 1
       },
       "shoplifting-associate": {
-        "first": 6,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "shoplifting-leader": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "sick-california": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "sick-colorado": {
-        "first": 9,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "weeks-of-supply": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       }
     },
     "k": 10,
-    "mrr": 0.3387,
-    "recall": 0.9681,
+    "mrr": 0.8582,
+    "recall": 1.0,
     "scenario": "company"
   },
   "golden": {
@@ -315,7 +315,7 @@
   "migration": {
     "answers": {
       "archive-asked": true,
-      "backfill-carol": false,
+      "backfill-carol": true,
       "backfill-trap": true,
       "before-retiring": true,
       "checklist-current": true,
@@ -324,16 +324,16 @@
       "decision-latest-first": true,
       "edp-orders-readers": false,
       "impact-cross-team": true,
-      "july-reconciliation": false,
+      "july-reconciliation": true,
       "loader-not-archive": true,
       "lookup-order-hist": true,
       "migration-not-faq": true,
       "migration-plan": true,
       "owner-people": true,
       "owner-ticket": true,
-      "rehearsal-length": false,
+      "rehearsal-length": true,
       "retention-trap": true,
-      "rollback": false,
+      "rollback": true,
       "runbook-2023-asked": true,
       "runbook-current": true,
       "runbook-on-call": true,
@@ -347,8 +347,8 @@
         "of": 1
       },
       "backfill-carol": {
-        "first": null,
-        "found": 0,
+        "first": 4,
+        "found": 1,
         "of": 1
       },
       "backfill-trap": {
@@ -358,7 +358,7 @@
       },
       "before-retiring": {
         "first": 3,
-        "found": 2,
+        "found": 1,
         "of": 2
       },
       "checklist-current": {
@@ -413,12 +413,12 @@
       },
       "impact-cross-team": {
         "first": 3,
-        "found": 2,
+        "found": 1,
         "of": 2
       },
       "july-reconciliation": {
-        "first": null,
-        "found": 0,
+        "first": 5,
+        "found": 2,
         "of": 2
       },
       "lineage-downstream": {
@@ -477,8 +477,8 @@
         "of": 1
       },
       "rehearsal-length": {
-        "first": null,
-        "found": 0,
+        "first": 3,
+        "found": 1,
         "of": 1
       },
       "retention-legal": {
@@ -502,8 +502,8 @@
         "of": 1
       },
       "rollback": {
-        "first": null,
-        "found": 0,
+        "first": 3,
+        "found": 2,
         "of": 2
       },
       "runbook-2023-asked": {
@@ -533,7 +533,7 @@
       },
       "ticket-412": {
         "first": 1,
-        "found": 1,
+        "found": 2,
         "of": 2
       },
       "ticket-421": {
@@ -553,13 +553,13 @@
       },
       "window-and-rehearsal": {
         "first": 1,
-        "found": 1,
+        "found": 2,
         "of": 2
       }
     },
     "k": 10,
-    "mrr": 0.781,
-    "recall": 0.8488,
+    "mrr": 0.807,
+    "recall": 0.9419,
     "scenario": "migration"
   }
 }

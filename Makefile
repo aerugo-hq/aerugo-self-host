@@ -108,13 +108,16 @@ eval-company: env
 # Record the evaluation sets' scorecards as their baseline (slices K1, Q1, and F9): the golden set on the plain seed first,
 # then the scenario, which it loads, then the synthetic retailer, which it loads. From then on, make eval, make eval-scenario, and smoke fail when a case gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
 # with a permission leak, or one that fails, is never recorded: the baseline you had stays.
+# Each step reads the file the step before it wrote (mounted over the image's copy, which is as it was built), so a step
+# never puts back another set's old scorecard.
+BASELINE_FILE = -v "$(CURDIR)/services/api/kl/evals_baseline.json:/app/kl/evals_baseline.json:ro"
 eval-baseline: env
 >docker compose --profile smoke build smoke
->docker compose --profile smoke run --rm -T smoke python -m kl.eval --record > services/api/kl/evals_baseline.tmp
+>docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.eval --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
->docker compose --profile smoke run --rm -T smoke python -m kl.evals --record > services/api/kl/evals_baseline.tmp
+>docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.evals --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
->docker compose --profile smoke run --rm -T smoke python -m kl.company_eval --record > services/api/kl/evals_baseline.tmp
+>docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.company_eval --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 
 # The clients (slice A2): the Python and TypeScript clients' own tests, against stand-ins for the API, in pinned images.
