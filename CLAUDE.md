@@ -990,12 +990,27 @@ These are F4's and Q2's to fix, and the gate now says BETTER when one is. Proof 
 169 passed, 17 skipped, 0 failed; `make eval` hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario`
 against the new baseline: no leak, no regression. Not built: the real-vendor half of M10 (REVIEW finding 11, set
 aside by decision), answer faithfulness on the scenario (it needs a real model: `make eval`'s optional judge), and
-Drive in the scenario.
+Drive in the scenario. CI on pull request 36: unit 64 passed; smoke 169 passed, 17 skipped, 0 failed; the golden set
+hit@1 1.0, MRR 1.0, found@5 1.0; the scenario at its new baseline exactly (Recall@10 85%, MRR 0.78, Ask right for 20
+of 25), so the baseline holds on another machine; no leak and no regression.
+L1 (images by digest). Base images were pinned by tag, so a rebuild or a pull could quietly pick up a different image.
+The four Dockerfiles' bases (`python:3.12-slim`, `node:22-alpine`, `pgvector/pgvector:pg17`, Playwright's) and the
+services every deployment runs (OpenFGA, OpenBao, Keycloak, and Caddy on the VM), in Compose, the Kubernetes
+manifests, and the GCP overlay, now name their tag and the digest it resolves to (`image:tag@sha256:...`, the
+multi-architecture index), read from each registry the day it was pinned: two images held locally were older than
+their tags, pgvector's among them, so CI's builds already ran the newer ones. `make pins`
+(`scripts/check-pinned-images.sh`) lists any image that isn't pinned and fails; CI runs it first. Dependabot now
+proposes new digests for every Dockerfile and the Compose file (with the same five-day cooldown); the Kubernetes
+manifests and the GCP overlay carry the same digests, kept in step by hand. Left as they are: the optional
+development tools (Ollama, whose version is a setting, and the observability stack `make obs` starts). Red first:
+against `main`'s files the check listed 15 unpinned references and failed; green on L1's. Proof: every pinned image
+built from exactly its digest (the build log names each `FROM ...@sha256`), the three service images and Caddy pulled
+by digest; the full loop is CI's run on the pull request.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, M8, M9, M6, and M10 (its evaluation half) are done; next, the lows (L1 to L4); then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), and L1 are done; next, L2 to L4; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

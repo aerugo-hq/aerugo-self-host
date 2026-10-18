@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-18:** L1 (`l1-images-by-digest`): every image Aerugo ships is pinned by digest, checked
+in CI (`make pins`), with Dependabot proposing new digests.
+
 **Done and verified, 2026-10-18:** M10, its evaluation half (`m10-evaluation-set`): 49 cases with traps (near
 duplicates, stale against current, distractors, two-source answers through the fakes, deep lineage, permission traps
 in every kind of source), a gate that fails on rank falls and on Ask's citations, and a new baseline that names what
