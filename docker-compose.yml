@@ -78,7 +78,7 @@ services:
         condition: service_completed_successfully
 
   openbao:
-    image: openbao/openbao:2.6.2@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641
+    image: openbao/openbao:2.6.4@sha256:cf2340fc9a22cb9358ca0defd1f39b65673836bd23fe2bb8984a07e11fe13ef4
     # A dev server that keeps secrets and encryption keys across restarts (slice I3a): see deploy/openbao/start.sh.
     user: "0:0"   # dev only: owns its volume
     entrypoint: ["/bin/sh", "/openbao/start/start.sh"]
