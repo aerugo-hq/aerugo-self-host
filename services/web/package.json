@@ -4,7 +4,8 @@
   "description": "knowledge-layer web app: sign-in, search and ask, the knowledge map, concept pages",
   "scripts": {
     "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 3000"
+    "start": "next start -H 0.0.0.0 -p 3000",
+    "lint": "eslint . --max-warnings 43"
   },
   "dependencies": {
     "d3-force": "^3.0.0",
@@ -13,5 +14,10 @@
     "pg": "^8.13.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "15.5.27"
   }
 }
