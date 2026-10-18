@@ -953,12 +953,49 @@ loaded nothing, and the cluster quietly ran a two-day-old image; it now refuses,
 loop on a fresh stack didn't get past `make up`: Postgres was killed during its first start (it recovered), and
 Docker's build engine then failed ("unable to lease content"), with Docker Desktop's four-node Kubernetes cluster
 holding about 3 GB of its 7.6; CI's run on the pull request is the full proof. Not built: rotating the dev and CI
-static token, and OpenBao sign-in through AWS's or Azure's identity (the platform after GCP).
+static token, and OpenBao sign-in through AWS's or Azure's identity (the platform after GCP). CI on pull request 35: unit 60
+passed; smoke 169 passed, 17 skipped, 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario
+Recall@10 100%, MRR 0.92 over 12 cases; no leak and no regression.
+M10 (an evaluation set that can fail; REVIEW finding 10). The scenario's 12 counted cases had saturated (Recall@10
+100%, MRR 0.92), and its gate failed only when a case found less or MRR fell by 0.05, so a ranking regression could
+land unnoticed (the Phase 0 report's risk 3). Now 49 cases, 43 counted, written as traps. Near duplicates and stale
+against current: a 2024 draft of the platform standards (14 days, 0.5 percent) that the standards now supersede, and a
+2023 ORD_LOAD runbook the current one supersedes. Distractors: ORDER_HIST_ARCHIVE beside ORDER_HIST, customers' order
+history (a support FAQ), EDP-421 beside EDP-412. Answers that need two sources: curated pages beside what was said in
+Payments' Jira project, its Confluence space, and the company's Slack, served by smoke's fakes and connected by
+alice for Payments (`load_sources`: the fakes' state, each person linked to their accounts in the aliases and in
+OpenFGA, the three connections made or synced again, each waited for). Lineage four hops deep (Finance's
+`finance_mart.daily_sales` and the Executive revenue dashboard). Permission traps in every kind of source: a Jira
+issue under a security level, a restricted Confluence space, a private Slack channel, a Legal-only draft; the map,
+who to ask, and the impact checks know the new private pages. The gate (`compare`) also fails when a case's first
+right page falls more than `RANK_SLACK` (2) places, or any place at all for stale and decision cases
+(`STRICT_KINDS`, where current knowledge first is the point), and when Ask stops citing a right page. Ask is now
+checked for alice and carol (Payments' model): a forbidden page among its citations is a leak, and each case records
+whether a right page was cited. Unit: `tests/test_evals_gate.py` (4). The design named Drive too; its fake needs a
+service account's signed key, so the superseded draft is a curated page instead. Red first: with current knowledge
+first switched off in the API (a mutation of `main.py`, then restored), the run failed: `dual-run-length` and
+`reconcile-threshold` fell from #1 to #2 behind the superseded draft, while MRR still rounded to 0.78, so the old gate
+would have passed it (a case moving from #1 to #2 is 0.012 of MRR here, and was 0.042 of the old 12); the gate's
+unit tests failed 3 of 4 against the old `compare`. The new baseline, recorded on a fresh stack after smoke and the
+golden set, as CI orders them: Recall@10 85%, MRR 0.78 over 43 counted cases; Ask cites a right page for 20 of 25;
+no leak (the golden set's part unchanged). What the traps found, kept in the baseline as cases that now miss:
+natural questions rank curated pages above the source documents that say the answer outright (six cases: carol's
+"How long did the cutover rehearsal take?" misses the Slack thread that says 41 minutes, though "cutover
+rehearsal" finds it first; EDP-430's backfill depth; July's reconciliation and the rollback plan in Jira and
+Confluence); the lineage hop doesn't reach Finance's mart from "Which tables read edp.orders?", even for carol, on
+both teams; and the new pages push the standards out of alice's top ten for "How should we migrate ORDER_HIST to the
+EDP?" (`migration-plan` now finds 1 of 2; `impact-cross-team` and `retention-trap` rank one and two places lower).
+These are F4's and Q2's to fix, and the gate now says BETTER when one is. Proof on a fresh stack with CI's settings
+(Docker Desktop's Kubernetes turned off, which also ended the day's flaky runs): `make unit` 58 passed; `make smoke`
+169 passed, 17 skipped, 0 failed; `make eval` hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario`
+against the new baseline: no leak, no regression. Not built: the real-vendor half of M10 (REVIEW finding 11, set
+aside by decision), answer faithfulness on the scenario (it needs a real model: `make eval`'s optional judge), and
+Drive in the scenario.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, M8, M9, and M6 are done; next, M10, then the lows; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, M9, M6, and M10 (its evaluation half) are done; next, the lows (L1 to L4); then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
