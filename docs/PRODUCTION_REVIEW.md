@@ -116,6 +116,10 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-17:** M6 (`m6-openbao-platform-login`): the services sign in to OpenBao with the
+platform's identity (a Kubernetes service account, or the GCP VM's), an hour at most; no OpenBao token is stored in a
+deployment. The cluster's side is proven on Docker Desktop's cluster; the VM's, at a real deploy.
+
 **Done and verified, 2026-10-17:** M9 (`m9-api-timeouts-uploads`): the web server's calls to the API have a time
 limit (504 when it passes), and request bodies stream through, cut off past the upload limit, never held whole.
 

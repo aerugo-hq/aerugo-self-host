@@ -40,7 +40,12 @@ if ((Get-Command kind -ErrorAction SilentlyContinue) -and $context -like "kind-*
   }
 } else {
   $nodes = @(& docker ps --filter "label=io.x-k8s.kind.cluster" --format "{{.Names}}" | Where-Object { $_ })
-  if ($nodes.Count -eq 0 -and $context -eq "docker-desktop") {
+  $kindNodes = @(& kubectl get nodes -o name | Where-Object { $_ -like "node/desktop-*" })
+  if ($nodes.Count -eq 0 -and $context -eq "docker-desktop" -and $kindNodes.Count -gt 0) {
+    # Docker Desktop's kind-based cluster (nodes named desktop-*) keeps its own images: without its nodes in view,
+    # nothing could be loaded, and the cluster would quietly run whatever older image it already holds.
+    throw "Docker Desktop's cluster runs on kind nodes Docker hides: turn on Settings, Kubernetes, 'Show system containers (advanced)', then run this again."
+  } elseif ($nodes.Count -eq 0 -and $context -eq "docker-desktop") {
     Write-Host "Docker Desktop's cluster shares Docker's images: nothing to load"
   } elseif ($nodes.Count -eq 0) {
     throw "No kind nodes found. Install kind (winget install Kubernetes.kind), or check the cluster is running."

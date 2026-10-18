@@ -21,7 +21,6 @@ secret() {
 
 DOMAIN="$(attr aerugo-domain)"
 REGISTRY="$(attr aerugo-registry)"
-OPENBAO_TOKEN="$(secret openbao-token)"
 OWNER_PASSWORD="$(secret owner-password)"
 KEYCLOAK_DB_PASSWORD="$(secret keycloak-db-password)"
 TERRAFORM_SECRET="$(secret terraform-client-secret)"
@@ -43,7 +42,6 @@ KL_WEB_SESSION_KEY=$(secret web-session-key)
 KL_BACKUP_CIPHER_PASS=$(secret backup-cipher)
 KC_ADMIN_PASSWORD=$(secret keycloak-admin-password)
 KL_KEYCLOAK_DB_PASSWORD=$KEYCLOAK_DB_PASSWORD
-OPENBAO_SERVICES_TOKEN=$OPENBAO_TOKEN
 ENV
 
 KL_DOMAIN="$DOMAIN" KL_FIRST_ADMIN="$(attr aerugo-admin)" KL_TERRAFORM_CLIENT_SECRET="$TERRAFORM_SECRET" \
@@ -72,7 +70,7 @@ printf '%s' "$TOKEN" | docker login -u oauth2accesstoken --password-stdin "https
 "${COMPOSE[@]}" pull --quiet
 
 # OpenBao: initialized once. Cloud KMS unseals it, so the root token and recovery key are needed only now: they go
-# straight to Secret Manager (aerugo-openbao-init), and the services get their own token.
+# straight to Secret Manager (aerugo-openbao-init), and the services sign in with the VM's identity.
 "${COMPOSE[@]}" up -d --no-build postgres openbao
 bao() { "${COMPOSE[@]}" exec -T -e BAO_ADDR=http://127.0.0.1:8200 "$@"; }
 for _ in $(seq 60); do
@@ -92,21 +90,28 @@ if [ "$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys
   echo "deploy: OpenBao initialized; its root token and recovery key are in Secret Manager (aerugo-openbao-init)"
 fi
 
-# The services' token (G1): exactly their paths (deploy/openbao/services.hcl), never root, lasting ten years (nothing
-# renews it). Checked on every deploy, so an OpenBao set up before G1 replaces the root token its services held. The
-# root token is read from Secret Manager for this alone, and never written down.
+# The services sign in with the VM's own identity (M6): Google signs an identity token for OpenBao's audience that
+# names the VM's service account, OpenBao checks it against Google's published keys, and each sign-in gets an hour with
+# exactly the services' paths (deploy/openbao/services.hcl). Nothing long-lived is stored. Set up on every deploy, with
+# the root token read from Secret Manager for this alone and never written down.
 ROOT="${ROOT:-$(secret openbao-init | python3 -c 'import json,sys; print(json.load(sys.stdin)["root_token"])')}"
 for _ in $(seq 30); do bao -e BAO_TOKEN="$ROOT" openbao bao token lookup >/dev/null 2>&1 && break; sleep 2; done
-bao -e BAO_TOKEN="$ROOT" openbao bao policy write aerugo-services - < deploy/openbao/services.hcl >/dev/null
-bao -e BAO_TOKEN="$ROOT" openbao bao auth tune -max-lease-ttl=87600h token/ >/dev/null
-HELD="$(bao -e BAO_TOKEN="$ROOT" openbao bao token lookup -format=json "$OPENBAO_TOKEN" 2>/dev/null \
-  | python3 -c 'import json,sys; p=json.load(sys.stdin)["data"]["policies"]; print("scoped" if sorted(p) == ["aerugo-services", "default"] else "other")' \
-  || echo missing)"
-if [ "$HELD" != "scoped" ]; then
-  [ "$HELD" = "missing" ] || bao -e BAO_TOKEN="$ROOT" openbao bao token revoke "$OPENBAO_TOKEN" >/dev/null
-  bao -e BAO_TOKEN="$ROOT" openbao bao token create -id="$OPENBAO_TOKEN" -policy=aerugo-services -orphan -ttl=87600h >/dev/null
-  echo "deploy: the services' OpenBao token now holds only their paths"
-fi
+root() { bao -e BAO_TOKEN="$ROOT" openbao bao "$@"; }
+root policy write aerugo-services - < deploy/openbao/services.hcl >/dev/null
+root auth list | grep -q '^gcp/' || root auth enable -path=gcp jwt >/dev/null
+root write auth/gcp/config oidc_discovery_url=https://accounts.google.com bound_issuer=https://accounts.google.com >/dev/null
+printf '{"role_type": "jwt", "user_claim": "sub", "bound_audiences": ["openbao://aerugo"], "bound_claims": {"email": "%s"},
+  "token_policies": ["aerugo-services"], "token_ttl": "1h", "token_max_ttl": "1h"}' "$(md instance/service-accounts/default/email)" \
+  | root write auth/gcp/role/aerugo-services - >/dev/null
+# A static services' token from before M6 is revoked, so nothing long-lived stays valid: any token holding their
+# policy that was made by hand (auth/token/create...) rather than by signing in.
+for ACCESSOR in $(root list -format=json auth/token/accessors | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))'); do
+  if root token lookup -accessor -format=json "$ACCESSOR" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]
+sys.exit(0 if "aerugo-services" in d["policies"] and d["path"].startswith("auth/token/create") else 1)'; then
+    root token revoke -accessor "$ACCESSOR" >/dev/null
+    echo "deploy: revoked a static services' OpenBao token (M6: the services sign in now)"
+  fi
+done
 unset ROOT
 
 # Keycloak keeps its users in Postgres, in a database of its own.

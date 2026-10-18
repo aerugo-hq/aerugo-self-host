@@ -45,8 +45,9 @@ You need `gcloud` and `terraform` (1.6 or later), signed in as an owner of the p
    entry of `terraform output github_variables`. Under Environments, create `production` (add yourself as a
    required reviewer to approve each deploy).
 5. **Deploy.** Push to `main`, or run the `deploy-gcp` workflow by hand. The first one takes a while: it builds every
-   image, initializes OpenBao (its root token and recovery key go to Secret Manager, `aerugo-openbao-init`), and
-   creates Keycloak's database.
+   image, initializes OpenBao (its root token and recovery key go to Secret Manager, `aerugo-openbao-init`), sets up
+   the services' sign-in to OpenBao with the VM's own identity (an hour's token each time; no OpenBao token is stored
+   anywhere), and creates Keycloak's database.
 
 ## Try it cheaply
 
@@ -99,5 +100,4 @@ rather sign in with Google.
 ## Not yet
 
 This is the plan's first stage: one VM. Still to come are backups shipped to the bucket Terraform made (pgBackRest
-already archives to the VM's disk), the Helm chart for GKE and Cloud SQL, and a services token with less than the
-root policy in OpenBao.
+already archives to the VM's disk), and the Helm chart for GKE and Cloud SQL.
