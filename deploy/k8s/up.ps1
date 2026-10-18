@@ -40,22 +40,25 @@ if ((Get-Command kind -ErrorAction SilentlyContinue) -and $context -like "kind-*
   }
 } else {
   $nodes = @(& docker ps --filter "label=io.x-k8s.kind.cluster" --format "{{.Names}}" | Where-Object { $_ })
-  if ($nodes.Count -eq 0 -and $context -eq "docker-desktop") {
+  $kindNodes = @(& kubectl get nodes -o name | Where-Object { $_ -like "node/desktop-*" })
+  if ($nodes.Count -eq 0 -and $context -eq "docker-desktop" -and $kindNodes.Count -gt 0) {
+    # Docker Desktop's kind-based cluster (nodes named desktop-*) keeps its own images: without its nodes in view,
+    # nothing could be loaded, and the cluster would quietly run whatever older image it already holds.
+    throw "Docker Desktop's cluster runs on kind nodes Docker hides: turn on Settings, Kubernetes, 'Show system containers (advanced)', then run this again."
+  } elseif ($nodes.Count -eq 0 -and $context -eq "docker-desktop") {
     Write-Host "Docker Desktop's cluster shares Docker's images: nothing to load"
   } elseif ($nodes.Count -eq 0) {
     throw "No kind nodes found. Install kind (winget install Kubernetes.kind), or check the cluster is running."
   } else {
-    $tar = Join-Path ([System.IO.Path]::GetTempPath()) "aerugo-image.tar"
+    # Each image streams from Docker into each node's containerd inside Docker's own machine, through a throwaway docker
+    # CLI container on Docker's socket. A tar on this machine's disk, copied into each node, took over half an hour.
     foreach ($image in $images.Keys) {
-      Invoke-Native "docker" @("save", "-o", $tar, $image)
       foreach ($node in $nodes) {
         Write-Host "Loading $image into $node"
-        Invoke-Native "docker" @("cp", $tar, "${node}:/aerugo-image.tar")
-        Invoke-Native "docker" @("exec", $node, "ctr", "--namespace=k8s.io", "images", "import", "/aerugo-image.tar")
-        Invoke-Native "docker" @("exec", $node, "rm", "-f", "/aerugo-image.tar")
+        Invoke-Native "docker" @("run", "--rm", "-v", "/var/run/docker.sock:/var/run/docker.sock", "docker:27.5.1-cli",
+          "sh", "-c", "docker save $image | docker exec -i $node ctr --namespace=k8s.io images import -")
       }
     }
-    Remove-Item $tar -ErrorAction SilentlyContinue
   }
 }
 
