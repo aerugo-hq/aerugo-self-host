@@ -51,7 +51,7 @@ services:
       retries: 150   # restoring and replaying the log take a while
 
   openfga-migrate:
-    image: openfga/openfga:v1.11.1
+    image: openfga/openfga:v1.11.1@sha256:1f9187961aded3ce60e3c4b7ccc39074ce88291aa51d9e3be09db4ff51e7b692
     command: migrate
     environment:
       OPENFGA_DATASTORE_ENGINE: postgres
@@ -61,7 +61,7 @@ services:
         condition: service_healthy
 
   openfga:
-    image: openfga/openfga:v1.11.1
+    image: openfga/openfga:v1.11.1@sha256:1f9187961aded3ce60e3c4b7ccc39074ce88291aa51d9e3be09db4ff51e7b692
     command: run
     environment:
       OPENFGA_DATASTORE_ENGINE: postgres
@@ -78,7 +78,7 @@ services:
         condition: service_completed_successfully
 
   openbao:
-    image: openbao/openbao:2.6.2
+    image: openbao/openbao:2.6.2@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641
     # A dev server that keeps secrets and encryption keys across restarts (slice I3a): see deploy/openbao/start.sh.
     user: "0:0"   # dev only: owns its volume
     entrypoint: ["/bin/sh", "/openbao/start/start.sh"]
@@ -100,7 +100,7 @@ services:
       - "127.0.0.1:${KL_OPENBAO_PORT:-8200}:8200"
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.3
+    image: quay.io/keycloak/keycloak:26.3@sha256:357829ec7c4693397533035092ad13b0644bcc95ded311f33a3738c4d9e9bdba
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
@@ -378,7 +378,7 @@ services:
   # Lockfiles (`make lock`): hash-pinned Python and npm dependencies, resolved inside containers so this
   # works the same on every machine. Commit what they write; the images install from them.
   lock-python:
-    image: python:3.12-slim
+    image: python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
     profiles: ["tools"]
     working_dir: /src
     volumes:
@@ -386,7 +386,7 @@ services:
     command: ["sh", "-c", "pip install -q --root-user-action=ignore uv && uv pip compile --generate-hashes --python-version 3.12 -o requirements.lock requirements.txt && uv pip compile --generate-hashes --python-version 3.12 -c requirements.lock -o requirements-test.lock requirements-test.txt"]   # the test image's, at the same versions
 
   lock-web:
-    image: node:22-alpine
+    image: node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
     profiles: ["tools"]
     working_dir: /app
     volumes:

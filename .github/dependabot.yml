@@ -1,5 +1,7 @@
-# Keeps pinned actions, Python dependencies, and the API base image current.
+# Keeps pinned actions, Python dependencies, and the images Aerugo builds on current.
 # The cooldown waits a few days after a release before proposing it (supply-chain hygiene).
+# Images are pinned by digest (L1), so a rebuild never picks up a different image; these entries propose each new digest
+# as a pull request. The Kubernetes manifests and deploy/gcp/compose.gcp.yml carry the same digests, kept in step by hand.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -15,6 +17,14 @@ updates:
     cooldown:
       default-days: 5
   - package-ecosystem: docker
-    directory: /services/api
+    directories: [/services/api, /services/web, /services/e2e, /deploy/postgres-image]
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 5
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 5
