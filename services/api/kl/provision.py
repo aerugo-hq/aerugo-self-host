@@ -16,12 +16,12 @@ import psycopg
 
 from .authz import OpenFGA
 from .migrate import OWNER_DB, apply_pending
+from .vault import vault
 
 FGA = os.environ.get("KL_OPENFGA_URL", "http://openfga:8080").rstrip("/")
 STORE = os.environ.get("KL_OPENFGA_STORE", "kl-dev")
 AUTHZ_DIR = os.environ.get("KL_AUTHZ_DIR", "/app/authz")
 BAO = os.environ.get("KL_OPENBAO_URL", "http://openbao:8200").rstrip("/")
-BAO_TOKEN = os.environ.get("KL_OPENBAO_TOKEN", "")
 SECRETS_DIR = os.environ.get("KL_SECRETS_DIR", "/run/kl-secrets")
 ORG_SLUG = os.environ.get("KL_ORG_SLUG", "acme")
 GITHUB_LOGIN = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}$")
@@ -47,7 +47,7 @@ def fail(store_id: str, what: str, r: httpx.Response) -> None:
 def ensure_kv_mount() -> None:
     """The API stores model keys in KV v2 at secret/. Create the mount if the backend lacks it."""
     wait_for(f"{BAO}/v1/sys/health")
-    h = {"X-Vault-Token": BAO_TOKEN}
+    h = vault.headers()  # the services' token, signed in for with the platform's identity in a deployment (M6)
     mounts = httpx.get(f"{BAO}/v1/sys/mounts", headers=h, timeout=5)
     mounts.raise_for_status()
     body = mounts.json()
@@ -80,7 +80,7 @@ def import_github_app(prefix: str = "github-app") -> None:
         data["webhook_secret"] = stored.get("webhook_secret") or ""
         data["client_secret"] = stored.get("client_secret") or ""
     r = httpx.post(f"{BAO}/v1/secret/data/kl/{ORG_SLUG}/connectors/{prefix}",
-                   headers={"X-Vault-Token": BAO_TOKEN}, json={"data": data}, timeout=5)
+                   headers=vault.headers(), json={"data": data}, timeout=5)
     r.raise_for_status()
     print(f"provision: {prefix} {data['slug'] or data['app_id']} loaded into OpenBao")
 

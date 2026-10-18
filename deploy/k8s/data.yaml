@@ -179,6 +179,25 @@ spec:
       port: 8200
       targetPort: 8200
 ---
+# M6: OpenBao asks the cluster whether a service-account token is real (TokenReview), as its own account.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aerugo-openbao-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openbao
+    namespace: aerugo
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -194,6 +213,7 @@ spec:
       labels:
         app: openbao
     spec:
+      serviceAccountName: openbao
       containers:
         - name: openbao
           image: openbao/openbao:2.6.2
@@ -202,9 +222,11 @@ spec:
             - name: KL_DEV_TOKEN   # the operator's (root); no service holds it
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: openbao-token}
-            - name: KL_SERVICES_TOKEN   # the services' (G1): services.hcl only
+            - name: KL_K8S_SERVICE_ACCOUNTS   # M6: who may sign in as the services (app.yaml), in this namespace
+              value: aerugo-api,aerugo-worker,aerugo-mcp,aerugo-provision
+            - name: KL_K8S_NAMESPACE
               valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
+                fieldRef: {fieldPath: metadata.namespace}
           securityContext:   # as in Compose: dev only (it owns its volume, and locks its memory)
             runAsUser: 0
             runAsGroup: 0
@@ -212,9 +234,9 @@ spec:
               add: ["IPC_LOCK"]
           ports:
             - containerPort: 8200
-          readinessProbe:   # unsealed, with the services' token working and Transit mounted
+          readinessProbe:   # unsealed, with the services' sign-in and Transit set up
             exec:
-              command: ["sh", "-c", "BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$KL_SERVICES_TOKEN bao secrets list | grep -q '^transit/'"]
+              command: ["sh", "-c", "export BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=$KL_DEV_TOKEN; bao auth list | grep -q '^kubernetes/' && bao secrets list | grep -q '^transit/'"]
             periodSeconds: 2
           resources:
             requests: {cpu: 50m, memory: 64Mi}

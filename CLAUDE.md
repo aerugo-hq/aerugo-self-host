@@ -918,12 +918,47 @@ it couldn't tell the two proxies apart; it now sends a well-formed form whose fi
 e2e` 37 passed (once, `test_a_team_scope_follows_you_everywhere` missed its click under load and passed alone and in
 the full run after). Smoke and both evaluation sets: CI's run on the pull request (no API, worker, or database code
 changed). Not built: streaming answers back to the browser (they're small JSON; the OKF export isn't fetched through
-the proxy).
+the proxy). CI on pull request 34: unit 54 passed; smoke 169 passed, 17 skipped, 0 failed; the golden set and the
+scenario (Recall@10 100%, MRR 0.92 over 12 cases) with no leak and no regression.
+M6 (the services' OpenBao token). G1's token lived ten years, stored in the cluster's secret and the VM's `.env`;
+whoever read either held every team's secrets until someone revoked it by hand. A deployment now stores no OpenBao
+token. `kl.vault` signs in with the service's own platform identity when `KL_OPENBAO_AUTH_PATH` names an auth
+method: the file Kubernetes mounts (`KL_OPENBAO_JWT_FILE`), else the GCP metadata server's identity token for
+`KL_OPENBAO_AUDIENCE` (`glue.web_identity_token`, which G3's Vault sign-in uses too). It uses what it gets for two
+thirds of its life, signs in again once when a call is refused, and fails closed: a refused sign-in raises, and no
+static token is ever tried instead. Every call goes through one helper (`_call`), and provisioning uses the same
+client (`vault.headers()`). Kubernetes: OpenBao's `kubernetes` method, which has the cluster check each token
+(TokenReview, as OpenBao's own service account, bound to `system:auth-delegator`); role `aerugo-services` admits only
+`aerugo-api`, `aerugo-worker`, `aerugo-mcp`, and `aerugo-provision` in Aerugo's namespace, an hour per sign-in, with
+the existing policy. `start.sh` sets it up when `KL_K8S_SERVICE_ACCOUNTS` is set (and mints the static token only
+otherwise); OpenBao's readiness checks the method and Transit; `openbao-services-token` leaves the cluster's secret.
+The GCP VM: a `jwt` method at `gcp` trusting `accounts.google.com`, its role bound to the audience
+`openbao://aerugo` and the VM's service account's email, an hour per sign-in; `deploy.sh` sets it up on every deploy
+and revokes any token holding the services' policy that was made by hand (`auth/token/create...`), so a token from
+before M6 dies whatever Terraform holds; the token leaves the `.env` and Terraform's generated secrets, and OpenBao's
+health check there is `bao status`. Dev and CI keep the static token scoped to the services' paths (G1).
+`make kind-check` (`deploy/k8s/check.ps1`) proves the cluster's side. Unit: `tests/test_vault.py` (6: the static
+token as it is, one sign-in reused, signing in again when due and when refused, failing closed, a malformed path
+refused). Red first: against the old client all 6 failed; green, `make unit` 60 passed. On Docker Desktop's cluster,
+the check against the old deployment failed (each service held a static token); after M6's manifests and OpenBao
+setup, the API's, worker's, and MCP server's pods each signed in as their own account (3,600 seconds, policies
+`aerugo-services` and `default`), round-tripped a secret, and were refused a path outside the policy; the web pod's
+account (the namespace's default) was refused (403, "service account name not authorized"); the cluster stores no
+services' token. Not proven: the new image running as the services in that cluster (loading images into its four
+nodes took about ten minutes per node per image, and stalled; by decision, proven at the Helm deploy on GKE, where
+images come from a registry), and the VM path (only a real GCP deploy proves it). Found while proving it: `up.ps1`
+took Docker Desktop's kind-based cluster (nodes named `desktop-*`) for the older one that shares Docker's images,
+loaded nothing, and the cluster quietly ran a two-day-old image; it now refuses, saying to turn on Docker Desktop's
+"Show system containers". A change streaming images into the nodes was measured no faster and dropped. The local
+loop on a fresh stack didn't get past `make up`: Postgres was killed during its first start (it recovered), and
+Docker's build engine then failed ("unable to lease content"), with Docker Desktop's four-node Kubernetes cluster
+holding about 3 GB of its 7.6; CI's run on the pull request is the full proof. Not built: rotating the dev and CI
+static token, and OpenBao sign-in through AWS's or Azure's identity (the platform after GCP).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, M8, and M9 are done; next, M6 and M10, then the lows; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, M9, and M6 are done; next, M10, then the lows; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

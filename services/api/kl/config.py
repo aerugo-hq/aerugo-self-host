@@ -20,7 +20,14 @@ ORG_SLUG = _env("KL_ORG_SLUG", "acme")
 OPENFGA_URL = _env("KL_OPENFGA_URL", "http://openfga:8080").rstrip("/")
 OPENFGA_STORE = _env("KL_OPENFGA_STORE", "kl-dev")
 OPENBAO_URL = _env("KL_OPENBAO_URL", "http://openbao:8200").rstrip("/")
-OPENBAO_TOKEN = _env("KL_OPENBAO_TOKEN")
+OPENBAO_TOKEN = _env("KL_OPENBAO_TOKEN")  # a static token: dev and CI only, once a deployment signs in (M6)
+# M6: the services sign in to OpenBao with the platform's identity when KL_OPENBAO_AUTH_PATH names its auth method:
+# Kubernetes' (the pod's service-account token, KL_OPENBAO_JWT_FILE) or a JWT method trusting Google (the GCP metadata
+# server's identity token, minted for KL_OPENBAO_AUDIENCE). Each token they get lives an hour at most.
+OPENBAO_AUTH_PATH = _env("KL_OPENBAO_AUTH_PATH")
+OPENBAO_ROLE = _env("KL_OPENBAO_ROLE", "aerugo-services")
+OPENBAO_AUDIENCE = _env("KL_OPENBAO_AUDIENCE", "openbao://aerugo")
+OPENBAO_JWT_FILE = _env("KL_OPENBAO_JWT_FILE")
 OIDC_ISSUER = _env("KL_OIDC_ISSUER", "http://localhost:8081/realms/acme")
 OIDC_JWKS_URL = _env("KL_OIDC_JWKS_URL", "http://keycloak:8080/realms/acme/protocol/openid-connect/certs")
 OIDC_AUDIENCE = _env("KL_OIDC_AUDIENCE", "kl-api")

@@ -1,6 +1,27 @@
 # The application: provisioning (migrations, the authorization model, OpenBao's mounts), then the API, the worker, the
 # MCP server, and the web app, with docker-compose.yml's settings. No demo content and no development fakes: connect
 # your own sources. Settings the API's image shares are in aerugo-app-env, one place to change them.
+# Each service that reads secrets runs as its own service account, which is how it signs in to OpenBao (M6).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aerugo-provision
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aerugo-api
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aerugo-worker
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aerugo-mcp
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,6 +31,9 @@ data:
   KL_OPENFGA_URL: http://openfga:8080
   KL_OPENFGA_STORE: kl-dev
   KL_OPENBAO_URL: http://openbao:8200
+  # M6: the services sign in to OpenBao with their own service accounts' tokens; no OpenBao token is stored here.
+  KL_OPENBAO_AUTH_PATH: kubernetes
+  KL_OPENBAO_JWT_FILE: /var/run/secrets/kubernetes.io/serviceaccount/token
   KL_OIDC_ISSUER: http://localhost:8081/realms/acme   # the browser's address for Keycloak (open.ps1 forwards it)
   KL_OIDC_JWKS_URL: http://keycloak:8080/realms/acme/protocol/openid-connect/certs
   KL_OIDC_AUDIENCE: kl-api
@@ -64,6 +88,7 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      serviceAccountName: aerugo-provision
       containers:
         - name: provision
           image: aerugo/api:dev
@@ -76,9 +101,10 @@ spec:
               value: kl-dev
             - name: KL_OPENBAO_URL
               value: http://openbao:8200
-            - name: KL_OPENBAO_TOKEN
-              valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
+            - name: KL_OPENBAO_AUTH_PATH   # M6: signs in with its own service account
+              value: kubernetes
+            - name: KL_OPENBAO_JWT_FILE
+              value: /var/run/secrets/kubernetes.io/serviceaccount/token
             - name: KL_OWNER_DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: owner-database-url}
@@ -133,6 +159,7 @@ spec:
       labels:
         app: api
     spec:
+      serviceAccountName: aerugo-api
       initContainers:
         - name: wait-for-provision   # as Compose's depends_on: provisioning finished (aerugo-wait)
           image: aerugo/api:dev
@@ -153,9 +180,6 @@ spec:
             - name: KL_DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: database-url}
-            - name: KL_OPENBAO_TOKEN
-              valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
           ports:
             - containerPort: 8000
           readinessProbe:
@@ -185,6 +209,7 @@ spec:
       labels:
         app: worker
     spec:
+      serviceAccountName: aerugo-worker
       initContainers:
         - name: wait-for-provision
           image: aerugo/api:dev
@@ -209,9 +234,6 @@ spec:
             - name: KL_INGEST_DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: ingest-database-url}
-            - name: KL_OPENBAO_TOKEN
-              valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
             - name: KL_RESYNC_MINUTES
               value: "10"
             - name: KL_SCHEDULER_SECONDS
@@ -252,6 +274,7 @@ spec:
       labels:
         app: mcp
     spec:
+      serviceAccountName: aerugo-mcp
       initContainers:
         - name: wait-for-provision
           image: aerugo/api:dev
@@ -273,9 +296,6 @@ spec:
             - name: KL_DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: aerugo-dev, key: database-url}
-            - name: KL_OPENBAO_TOKEN
-              valueFrom:
-                secretKeyRef: {name: aerugo-dev, key: openbao-services-token}
             - name: KL_MCP_AUDIENCE   # only tokens issued for the MCP server are accepted here
               value: kl-mcp
             - name: KL_MCP_PUBLIC_URL

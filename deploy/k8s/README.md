@@ -25,7 +25,7 @@ After a code change, `make kind-up` again: it rebuilds, reloads, and restarts wh
 |---|---|---|
 | `postgres` | StatefulSet, two volumes | pgvector and pgBackRest; `deploy/postgres` initializes it |
 | `openfga` | Deployment, after the `openfga-migrate` Job | permissions |
-| `openbao` | StatefulSet, a volume | secrets; the dev server that keeps its data |
+| `openbao` | StatefulSet, a volume | secrets; the dev server that keeps its data; the services sign in to it with their own service accounts (`aerugo-api`, `aerugo-worker`, `aerugo-mcp`, `aerugo-provision`), an hour's token each time |
 | `keycloak` | StatefulSet, a volume | sign-in; the dev realm, and any users you add, kept |
 | `provision` | Job | migrations, the authorization model, OpenBao's mounts, the GitHub App's credentials |
 | `api`, `worker`, `mcp` | Deployments | each waits for provisioning, as Compose's `depends_on` does |
