@@ -1152,6 +1152,35 @@ once, said the Doc "reached someone it isn't shared with". It now waits up to 30
 checks bob separately, so a miss and a leak read differently. Red: the logged run (the API's post-check at 54.538,
 the worker's grant at 54.546). Green: the check alone, twice, and CI's run on the pull request. Not changed: the
 sync's order (rows, then grants), which fails closed.
+Org membership at sign-in (found by F9's first run, decided 2026-10-18 as its own item). A document a source shares
+with the whole company (a Confluence space anyone may read on a company site, a public Slack channel on a company
+workspace, a Drive file shared with the domain, a company-wide Jira project) carries `org:acme`, and OpenFGA grants it
+to `org:acme#member`. Row-level security let every caller in (each carries `org:<org>`), but only the dev seed ever
+made anyone an org member, so outside the seed the post-check let no one but org admins read it: fail closed (F9's
+run logged 1,519 drift denials, no leak), yet in a real deployment everything company-wide was invisible. G4's group
+sync (`kl/admission.py`, renamed `sync_memberships`) now also records `user:<u> member org:<org>` on a person's
+first request, once; never for a service account, whose grants stay its own. Leaving the company is the identity
+provider's to decide (no token, no request); the tuple stays. The pilot gate changed with it: the dev seed grants the
+whole org membership of `commons`, so with everyone an org member, everyone would have counted as on a team and passed
+a pilot. `admitted` now counts only a role granted to the person or to one of their groups (`onboarded`: OpenFGA's
+stored tuples for `user:<u>` and each `group:<g>#member`, one read each), so a team granted to the whole org onboards
+nobody, and a pilot is exactly as narrow as before. `docs/runbooks/pilot-onboarding.md` says both. Checks: smoke's
+`everyone_signed_in_reads_what_a_source_shares_with_the_whole_company` (nora, on no team, finds the seed's handbook and
+nothing else of the seed's, and holds the org membership); `a_pilot_lets_in_only_onboarded_teams` now signs nora in
+first, so she's an org member when the pilot starts and must still be refused (and her teams now include commons,
+the whole org's, beside her group's); the service accounts' check asserts no org membership; 4 new unit tests (75 in
+all). Red first, the three checks in the stack: on main's gate, nora found nothing and held no membership (2 failed);
+with membership recorded but the old gate (`list_objects`), the pilot check failed with "someone on no team still got
+in during the pilot", the hole the second half closes; with both, all three passed. The unit tests, against main's
+gate: 7 failed (one for the missing membership, the rest on the stand-in's new reads). Proof on a fresh stack with
+CI's settings, at de7370d: `make unit` 75 passed; `make smoke` 171 passed, 15 skipped, 2 failed, both the optional web
+checks, run against web servers a previous stack had left up (they held the wiped database's org id, so every sign-in
+broke on a foreign key; recreated, both passed); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make
+eval-scenario` Recall@10 85%, MRR 0.78 over 43 counted cases, no leak, no regression; with the web servers recreated,
+`make e2e` 37 passed and 1 failed, `test_a_team_scope_follows_you_everywhere`, the click M9's record notes it misses
+under load (alone, it passed twice); `make test-web` 7 passed. Found while proving it: a web server keeps the org's id
+it first read, so after a restore or re-provisioning that changes it, the web servers need a restart. Not built:
+removing a leaver's org membership when a directory says they've left (they can't sign in, so it grants nothing).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
