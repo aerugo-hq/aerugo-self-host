@@ -7,6 +7,7 @@
 // one in. A session ends when it's idle too long or reaches its absolute lifetime, whichever is first.
 import crypto from "node:crypto";
 import { tx } from "./db.js";
+import { UnknownKey, verifyIdToken } from "./idtoken.mjs";
 
 const env = (name, fallback) => process.env[name] || fallback;
 export const WEB_URL = env("KL_WEB_URL", "http://localhost:3000");
@@ -89,7 +90,36 @@ async function tokens(form) {
   return r.json();
 }
 
-// Read for display and the nonce only: the API verifies every token's signature, issuer, audience, expiry.
+// The identity provider's published signing keys, cached; a token naming a key not among them fetches the set again,
+// once (Keycloak rotates its keys). L3: a sign-in's ID token is verified against them before any session is made.
+let signingKeys = [];
+async function fetchSigningKeys() { // throws when the identity provider doesn't answer: not a refusal, try again shortly
+  const r = await fetch(`${INTERNAL_ISSUER}/protocol/openid-connect/certs`, { cache: "no-store", signal: AbortSignal.timeout(IDP_TIMEOUT_MS) });
+  if (!r.ok) throw new Error(`the identity provider's keys couldn't be read (${r.status})`);
+  signingKeys = (await r.json()).keys || [];
+}
+
+function refused(e) {
+  console.warn(`sign-in refused, the ID token check failed: ${e.message}`); // what failed, never the token
+  return new SignInError("the sign-in response couldn't be verified");
+}
+
+async function verifiedIdToken(idToken, nonce) {
+  const expected = { issuer: PUBLIC_ISSUER, audience: CLIENT_ID, nonce };
+  try {
+    return verifyIdToken(idToken, signingKeys, expected);
+  } catch (e) {
+    if (!(e instanceof UnknownKey)) throw refused(e);
+  }
+  await fetchSigningKeys();
+  try {
+    return verifyIdToken(idToken, signingKeys, expected);
+  } catch (e) {
+    throw refused(e);
+  }
+}
+
+// Read for display only, after verification for the ID token: the API verifies every access token itself.
 export function claims(jwt) {
   try {
     return JSON.parse(Buffer.from(String(jwt).split(".")[1], "base64url").toString("utf8"));
@@ -108,7 +138,7 @@ export async function finishLogin({ state, code, cookieState }) {
   if (!pending) throw new SignInError("this sign-in expired or didn't start here");
   const t = await tokens({ grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI,
                            code_verifier: open(pending.verifier, row) });
-  if (claims(t.id_token).nonce !== pending.nonce) throw new SignInError("the sign-in response didn't match this request");
+  await verifiedIdToken(t.id_token, pending.nonce); // L3: signed by the identity provider, for this app and this sign-in
   const user = claims(t.access_token).preferred_username;
   if (!user || !t.refresh_token) throw new SignInError("the sign-in response had no user or no refresh token");
   const sid = random(32);

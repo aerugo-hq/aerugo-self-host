@@ -1,7 +1,9 @@
 # Keeps pinned actions, Python dependencies, and the images Aerugo builds on current.
 # The cooldown waits a few days after a release before proposing it (supply-chain hygiene).
 # Images are pinned by digest (L1), so a rebuild never picks up a different image; these entries propose each new digest
-# as a pull request. The Kubernetes manifests and deploy/gcp/compose.gcp.yml carry the same digests, kept in step by hand.
+# and patch release as a pull request. A minor or major version (Python 3.12 to 3.14, Node 22 to 25) is an upgrade to
+# plan, not a refresh, so it isn't proposed; nor are the optional development tools, which aren't pinned. The Kubernetes
+# manifests and deploy/gcp/compose.gcp.yml carry the same digests, kept in step by hand.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -22,9 +24,21 @@ updates:
       interval: weekly
     cooldown:
       default-days: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
     cooldown:
       default-days: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "ollama/ollama"
+      - dependency-name: "busybox"
+      - dependency-name: "otel/opentelemetry-collector-contrib"
+      - dependency-name: "prom/prometheus"
+      - dependency-name: "jaegertracing/all-in-one"
+      - dependency-name: "grafana/grafana"

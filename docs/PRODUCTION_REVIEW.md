@@ -116,6 +116,15 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done, 2026-10-18:** L1b (`l1b-dependabot-scope`): Dependabot proposes image digests and patches, not minor or
+major upgrades, and nothing for the optional development tools.
+
+**Done and verified, 2026-10-18:** L3 (`l3-id-token-signature`): a sign-in's ID token is verified (signature,
+issuer, audience, expiry, nonce) against the identity provider's published keys before a session is made.
+
+**Done and verified, 2026-10-18:** L2 (`l2-eslint-in-ci`): the web app's lint runs in CI, errors failing it and
+warnings held to today's count; the web image is two stages, so the lint's packages never ship.
+
 **Done, 2026-10-18:** L4 (`l4-slack-grid-doc`): the Slack doc says a channel shared between Enterprise Grid's
 sibling workspaces reaches only the connected workspace's members, failing closed.
 
