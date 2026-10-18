@@ -425,7 +425,7 @@ services:
       - "127.0.0.1:9090:9090"
 
   jaeger:
-    image: jaegertracing/all-in-one:1.66.0
+    image: jaegertracing/all-in-one:1.76.0
     profiles: ["observability"]
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
