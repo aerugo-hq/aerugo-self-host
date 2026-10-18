@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done, 2026-10-18:** L1b (`l1b-dependabot-scope`): Dependabot proposes image digests and patches, not minor or
+major upgrades, and nothing for the optional development tools.
+
 **Done and verified, 2026-10-18:** L3 (`l3-id-token-signature`): a sign-in's ID token is verified (signature,
 issuer, audience, expiry, nonce) against the identity provider's published keys before a session is made.
 

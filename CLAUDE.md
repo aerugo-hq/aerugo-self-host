@@ -1047,7 +1047,16 @@ generate), and CI runs it beside the lint. Red first: with the signature check r
 tampered token and another key's signature failed and the other five passed; green, 7 of 7. Proof: `make e2e` 37
 passed, every sign-in a real Keycloak token verified (the web server logged no refusal); the lint at 0 errors and
 43 warnings with L3's code; the full loop is CI's run on the pull request. Not built: verifying the ID token again on
-refresh (a refresh's ID token isn't used).
+refresh (a refresh's ID token isn't used). CI on pull request 53: the web app's 7 tests passed; the lint at 0 errors and
+43 warnings; unit 64 passed; smoke 169 passed, 17 skipped, 0 failed; the golden set and the scenario at their
+baselines; no leak and no regression.
+L1b (Dependabot's scope, a follow-up to L1). L1's config had Dependabot watch every Dockerfile and the Compose file, and
+it opened thirteen pull requests at once, some minor or major version moves (Node 22 to 25, OpenFGA 1.11 to 1.22,
+Grafana 11 to 13) and some for the optional development tools L1 left unpinned. For images it now proposes only a new
+digest or a patch release (an `ignore` of minor and major updates, in `.github/dependabot.yml`): a minor or major
+version is an upgrade to plan and prove as an item of its own, not a refresh. The development tools (Ollama and the
+observability stack) aren't proposed at all. Configuration only; the file parses, and Dependabot applies it on its
+next weekly run. The thirteen open pull requests are left for the user to keep or close.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
