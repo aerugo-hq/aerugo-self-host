@@ -1181,14 +1181,68 @@ eval-scenario` Recall@10 85%, MRR 0.78 over 43 counted cases, no leak, no regres
 under load (alone, it passed twice); `make test-web` 7 passed. Found while proving it: a web server keeps the org's id
 it first read, so after a restore or re-provisioning that changes it, the web servers need a restart. Not built:
 removing a leaver's org membership when a directory says they've left (they can't sign in, so it grants nothing).
+F9 (the synthetic retailer, `docs/ENTERPRISE_PLAN.md` section 10; decided 2026-10-18: text from templates, not a
+model; the same retailer is F10's enterprise; the Teams and meeting fakes come with C1 and C3; it loads into the acme
+org). `kl/company.py` builds Acme Outfitters, the same every time for a seed and a number of stores (at least three;
+six by default, 88 people): stores in states with their own rules, two distribution centers, the head office, and the
+contact center; eleven teams; people with a title, team, and place, a district manager per district, and one who has
+left (Max Weber, the returns policy's former owner). Twelve sign in: ana, ben, cora, dara, eli, fay, gus, hana, ivy,
+jon, kai, and lea. What they wrote: 38 Confluence pages in eleven spaces (a returns policy with its 2025 version still
+there, sick leave by state, procedures, runbooks, a glossary, brand guidelines, a close checklist, a pay table only
+people leads may read, a page per store), 9 Jira issues in four projects (store incidents; the TrailLite 2 recall with
+its decision, a regulator notification under a security level, and its delisting; a flash-sale outage), 18 Slack
+threads in sixteen channels (one per store, private team channels, two public ones), and, kept for C1 and C3, a Teams
+shift handover and a recall stand-up's transcript. Each piece's readers come from its source's own permissions,
+computed as the connectors compute them: a space's grants narrowed by a page's restriction, a project's browsers or an
+issue's security level, a channel's members, the whole company for a space anyone may read or a public channel. The
+truth: 49 facts (current, superseded, or sensitive, each with its scope and what contradicts it) and 58 questions,
+each asked by one of the twelve, naming the pages a right answer draws on, the pages the asker must never see, and the
+sensitive pages a source lets them read but no answer should use. Its traps: a superseded policy beside a stale Slack
+reminder, a definition a team's thread contradicts, a decision, answers that depend on the asker's state, answers only
+in a store's own channel, permission traps in every source, answers that need two sources, and facts only capture
+will bring in; 7 questions wait on F8, C1, C2, or C3. `problems` holds the truth to itself: every right page readable
+by its asker (unless the question waits on a slice), no forbidden page, every sensitive page. The render functions give
+each fake its state, and the fakes gained the retailer's own Confluence site, Jira site, and Slack workspace
+(`/retail-confluence`, `/retail-jira`, `/retail-slack`), so loading it never replaces the migration scenario's
+content; the dev allowlists name them. `kl/company_eval.py` loads it as a company's own would come in: the twelve in
+the dev Keycloak, each in a `retail-<team>` group (Keycloak's admin API with the dev admin password, which only
+smoke's container gets); the teams, made by the org admin and granted to those groups; 25 connections, one per team
+and source, and the directory (made again each run, since the fake mints a new app each time it starts); and everyone
+signing in once, which links them to their accounts by email. Then it checks: each person opens exactly the documents
+the truth says (one more is a leak, one fewer is missing); each question's retrieval, scored and gated as kl.evals
+scores the scenario, under "company" in the baseline (`kl.evals`'s scorecard and gate now take another set's name and
+kinds); and Ask, for the store people, whose team gets the fake model. Sensitive pages someone was shown are reported,
+not failed: excluding them is C2's work. `make company` and `make eval-company`; `make eval-baseline` records it third,
+and CI runs it after the scenario. Unit: `tests/test_company.py` (11: the same seed builds the same company; a seed or
+size never changes a document's key; consistent at 3, 6, 15, and 40 stores; fewer than three refused; each person
+reads only what the sources grant; every kind of trap; what each fake serves carries the permissions; the storage
+format). Red first: with page restrictions dropped, 5 of the 11 failed. Found by the first run: company-wide documents
+reached nobody outside the seed (every person opened exactly 13 fewer documents than the truth said, the handbook and
+the two public channels; no leak), fixed as its own item (pull request 60); and Ask cited Sam's medical thread for
+ben's question about Risk, which the source allows (reported as sensitive, for C2). Found by the proof: search ranks
+every curated page above every source document, however unrelated. For jon's "Checkout errors are spiking. What's the
+runbook?", the migration scenario's eight curated pages (the EDP standards, the cutover calendar) come first and the
+runbook ninth, so most right pages sit at #7 to #10 (M10's first risk, now plain). The baseline holds it as found;
+fixing it is proposed as the next item. Proof on a fresh stack with CI's settings, at 65e5de2 (F9 with the org
+membership fix): `make pins` passed; `make unit` 86 passed; `make smoke` 173 passed, 15 skipped, 0 failed (the web
+servers recreated first, so the optional web checks ran too); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no
+regression; `make eval-scenario` Recall@10 85%, MRR 0.78 over 43 counted cases, Ask right for 20 of 25, no leak, no
+regression; `make eval-company`: everyone opens exactly what the truth says, no leak, Recall@10 97%, MRR 0.34 over 47
+counted questions, Ask right for 8 of 24, recorded as the company's baseline (`evals_baseline.json` gains only
+`company`), then run again against it with the same numbers and no regression; `make e2e` 37 passed and 1 failed
+(`test_a_team_scope_follows_you_everywhere`, the known load flake); `make test-web` 7 passed; the lint at 0 errors and
+43 warnings. Not built: Drive, SharePoint, and Notion content in the retailer (Confluence, Jira, and Slack cover its
+kinds of knowledge; a source joins when a pack needs its formats); the Teams and meeting fakes (C1, C3); per-team
+question files (F7); role and location in answers (F8; the directory already carries each person's title,
+department, and office).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
-this file says: G4 (the pilot path) is done, recorded above; next, the foundation in `docs/ENTERPRISE_PLAN.md`, F9 and
-F10 first.
+this file says: G4 (the pilot path) and F9 (the synthetic retailer) are done, recorded above; next, F10 (the Atlas, on
+the same retailer), and, proposed, the ranking fix F9 found (curated pages outranking the source that answers).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

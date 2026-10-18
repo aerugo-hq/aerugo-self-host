@@ -1,4 +1,273 @@
 {
+  "company": {
+    "answers": {
+      "allocation-fewer-units": false,
+      "bike-key-denver": true,
+      "bike-key-portland": true,
+      "christmas-eve-hours": false,
+      "district-manager-mountain": true,
+      "first-week": true,
+      "first-week-courses": false,
+      "injury-california": false,
+      "injury-denver-fall": false,
+      "injury-what-to-do": false,
+      "recall-can-i-sell": true,
+      "recall-decision": false,
+      "recall-stores": false,
+      "registers-denver": false,
+      "registers-down-associate": true,
+      "registers-down-leader": true,
+      "returns-no-receipt": false,
+      "returns-owner": false,
+      "returns-window": false,
+      "risk-hospital": false,
+      "shoplifting-associate": true,
+      "shoplifting-leader": false,
+      "sick-california": false,
+      "sick-colorado": false
+    },
+    "cases": {
+      "allocation-fewer-units": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "bike-key-denver": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "bike-key-portland": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "cc-escalate": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "cc-injury-return": {
+        "first": 1,
+        "found": 1,
+        "of": 2
+      },
+      "checkout-changed": {
+        "first": 10,
+        "found": 1,
+        "of": 2
+      },
+      "checkout-runbook": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "christmas-eve-hours": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "close-checklist": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "close-september": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "copy-approval": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "district-manager-mountain": {
+        "first": 3,
+        "found": 1,
+        "of": 1
+      },
+      "ecom-on-call": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "first-week": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "first-week-courses": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "flash-sale-lesson": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "holiday-results": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "injury-california": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "injury-denver-fall": {
+        "first": 7,
+        "found": 1,
+        "of": 1
+      },
+      "injury-what-to-do": {
+        "first": 7,
+        "found": 1,
+        "of": 1
+      },
+      "late-shipment": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "northpeak-last-time": {
+        "first": 9,
+        "found": 2,
+        "of": 2
+      },
+      "pay-range-people": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "recall-can-i-sell": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "recall-decision": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "recall-delisted": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "recall-lesson": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "recall-regulator": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "recall-reports": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "recall-script": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "recall-steps": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "recall-stores": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "registers-denver": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "registers-down-associate": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "registers-down-leader": {
+        "first": 3,
+        "found": 1,
+        "of": 1
+      },
+      "returns-50-days": {
+        "first": 10,
+        "found": 1,
+        "of": 1
+      },
+      "returns-changes": {
+        "first": 9,
+        "found": 1,
+        "of": 2
+      },
+      "returns-no-receipt": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "returns-owner": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "returns-window": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "risk-hospital": {
+        "first": 10,
+        "found": 1,
+        "of": 1
+      },
+      "sell-through": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "shoplifting-associate": {
+        "first": 6,
+        "found": 1,
+        "of": 1
+      },
+      "shoplifting-leader": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "sick-california": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "sick-colorado": {
+        "first": 9,
+        "found": 1,
+        "of": 1
+      },
+      "weeks-of-supply": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      }
+    },
+    "k": 10,
+    "mrr": 0.3387,
+    "recall": 0.9681,
+    "scenario": "company"
+  },
   "golden": {
     "cases": {
       "alice: page the payments on-call": {
