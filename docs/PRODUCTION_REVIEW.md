@@ -116,6 +116,11 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-18:** M10, its evaluation half (`m10-evaluation-set`): 49 cases with traps (near
+duplicates, stale against current, distractors, two-source answers through the fakes, deep lineage, permission traps
+in every kind of source), a gate that fails on rank falls and on Ask's citations, and a new baseline that names what
+now misses. The real-vendor half (contract fixtures) is set aside by decision.
+
 **Done and verified, 2026-10-17:** M6 (`m6-openbao-platform-login`): the services sign in to OpenBao with the
 platform's identity (a Kubernetes service account, or the GCP VM's), an hour at most; no OpenBao token is stored in a
 deployment. The cluster's side is proven on Docker Desktop's cluster; the VM's, at a real deploy.
