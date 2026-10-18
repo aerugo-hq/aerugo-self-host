@@ -12,6 +12,8 @@ x-kl:
   aliases: [EDP standards, platform standards, cutover standards, cutover checklist]
   classification: internal
   audience: org
+  relations:
+    - {type: supersedes, target: /edp-standards-2024-draft.md}
 ---
 # EDP platform standards
 
