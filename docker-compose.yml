@@ -403,7 +403,7 @@ services:
       - kl-telemetry:/telemetry
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.120.0
+    image: otel/opentelemetry-collector-contrib:0.162.0-386
     profiles: ["observability"]
     user: "0"   # dev only: writes the file export into the shared volume
     command: ["--config=/etc/otelcol/config.yaml"]
