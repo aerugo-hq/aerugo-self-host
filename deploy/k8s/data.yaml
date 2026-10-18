@@ -106,7 +106,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: migrate
-          image: openfga/openfga:v1.11.1
+          image: openfga/openfga:v1.11.1@sha256:1f9187961aded3ce60e3c4b7ccc39074ce88291aa51d9e3be09db4ff51e7b692
           args: ["migrate"]
           env:
             - name: OPENFGA_DATASTORE_ENGINE
@@ -146,7 +146,7 @@ spec:
     spec:
       containers:
         - name: openfga
-          image: openfga/openfga:v1.11.1
+          image: openfga/openfga:v1.11.1@sha256:1f9187961aded3ce60e3c4b7ccc39074ce88291aa51d9e3be09db4ff51e7b692
           args: ["run"]
           env:
             - name: OPENFGA_DATASTORE_ENGINE
@@ -216,7 +216,7 @@ spec:
       serviceAccountName: openbao
       containers:
         - name: openbao
-          image: openbao/openbao:2.6.2
+          image: openbao/openbao:2.6.2@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641
           command: ["/bin/sh", "/openbao/start/start.sh"]   # the dev server that keeps its data across restarts (slice I3a)
           env:
             - name: KL_DEV_TOKEN   # the operator's (root); no service holds it
