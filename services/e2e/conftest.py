@@ -15,7 +15,7 @@ import pytest
 
 WEB = "http://localhost:3000"
 KEYCLOAK_PORT = int(os.environ.get("KL_KEYCLOAK_PORT", "8081"))
-PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "olivia")}
+PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "olivia", "nora")}
 WEB_B = "http://localhost:3001"  # a second web server beside the first (H3): a session must live in neither alone
 WEB_C = "http://localhost:3002"  # a third, whose calls to the API run out of time at once (M9)
 FORWARDS = {3000: (os.environ.get("KL_E2E_WEB", "web"), 3000),

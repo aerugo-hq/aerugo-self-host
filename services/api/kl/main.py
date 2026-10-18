@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import httpx
+import psycopg
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -29,7 +30,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import PoolTimeout
 
 from . import alerting, compiler, config, google_identity, imports, manifests, okf, originals, pipelines, telemetry
-from .auth import Caller, authenticate
+from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .connections_api import router as connections_router
 from .db import connect, resolve_org_id, scoped
@@ -38,7 +39,7 @@ from .principals import is_valid as valid_principal
 from .claims import DEFAULT_THRESHOLD, check as check_claims
 from .decisions import ordered as order_decisions, parse_heading as parse_decision
 from .confidence import confidence
-from . import identity_match
+from . import admission, identity_match
 from .embeddings import LOCAL_MODEL, embed, embed_query, vector_literal
 from .gateway import GatewayError, build_prompt, chat
 from .links import identifier_names
@@ -635,7 +636,16 @@ def openapi_for_people(caller: Caller = Depends(authenticate)):
 
 # ------------------------------------------------------------------ identity
 @app.get("/v1/whoami")
-def whoami(caller: Caller = Depends(authenticate)):
+def whoami(caller: Caller = Depends(signed_in)):
+    """Who the caller is. Answered before admission (G4): someone the org's admission leaves out learns that they aren't
+    in (`admitted: false`), and nothing else."""
+    try:
+        admission.sync_groups(caller)
+        admitted = admission.admitted(caller)
+    except (httpx.HTTPError, psycopg.Error, RuntimeError) as e:
+        raise admission.unavailable(e)
+    if not admitted:
+        return {"username": caller.username, "admitted": False}
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         if not caller.service:  # identity matching (ADR 0011): people, by their verified company email
@@ -644,6 +654,7 @@ def whoami(caller: Caller = Depends(authenticate)):
             "SELECT source FROM principal_aliases WHERE canonical = %s ORDER BY source", (caller.fga_user,))]
     return {
         "username": caller.username,
+        "admitted": True,
         "groups": list(caller.groups),
         "principals": caller.principals,
         "identities": identities,
@@ -651,6 +662,38 @@ def whoami(caller: Caller = Depends(authenticate)):
         "admin_of": sorted(memberships(caller, "admin")),
         "org_admin": fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}"),
     }
+
+
+class AdmissionIn(BaseModel):
+    mode: Literal["org", "teams"]
+
+
+@app.get("/v1/admin/admission")
+def get_admission(caller: Caller = Depends(authenticate)):
+    """Who gets in (G4): `org`, anyone the identity provider signs in; `teams`, only members of an onboarded team and org
+    admins (a pilot). Org admins only."""
+    require_org_admin(caller)
+    with scoped(resolve_org_id(config.ORG_SLUG), caller.principals) as conn:
+        row = conn.execute("SELECT mode, changed_by, changed_at FROM org_admission").fetchone()
+        managed = managed_info(conn, "admission", ["org"]).get("org")
+    return {"mode": row["mode"] if row else "org", "changed_by": row["changed_by"] if row else None,
+            "changed_at": row["changed_at"].isoformat() if row else None, "managed_by": managed}
+
+
+@app.put("/v1/admin/admission")
+def set_admission(body: AdmissionIn, caller: Caller = Depends(authenticate), managed: tuple | None = Depends(managed_header)):
+    """Change who gets in. This process applies it at once, others within half a minute; a person already in keeps
+    their admission for up to a minute."""
+    require_org_admin(caller)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        conn.execute("INSERT INTO org_admission (org_id, mode, changed_by) VALUES (kl.current_org(), %s, %s) "
+                     "ON CONFLICT (org_id) DO UPDATE SET mode = EXCLUDED.mode, changed_by = EXCLUDED.changed_by, changed_at = now()",
+                     (body.mode, caller.username))
+        audit(conn, org_id, caller.username, "org.admission", [], {"mode": body.mode})
+        note_managed(conn, org_id, "admission", "org", managed, caller.username)
+    admission.forget_mode()
+    return {"mode": body.mode}
 
 
 # ------------------------------------------------------------------ cost controls (slice O)

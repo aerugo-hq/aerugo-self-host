@@ -84,6 +84,13 @@ def decode_token(token: str, audience: str | None = None) -> dict:
 
 
 def authenticate(authorization: str | None = Header(default=None)) -> Caller:
+    """Every route's caller: signed in, with their groups current in OpenFGA, and let in by the org's admission (G4)."""
+    from .admission import admit  # here: admission builds on this module
+    return admit(signed_in(authorization))
+
+
+def signed_in(authorization: str | None = Header(default=None)) -> Caller:
+    """A valid token's caller, before admission: only /v1/whoami takes this, so the app can say why someone isn't in."""
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "missing bearer token", headers={"WWW-Authenticate": "Bearer"})
     try:

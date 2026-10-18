@@ -15,6 +15,9 @@
     },
     {
       "name": "legal"
+    },
+    {
+      "name": "pilot"
     }
   ],
   "users": [
@@ -116,6 +119,25 @@
         }
       ],
       "groups": []
+    },
+    {
+      "username": "nora",
+      "enabled": true,
+      "email": "nora@acme.test",
+      "emailVerified": true,
+      "firstName": "Nora",
+      "lastName": "Pilot",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "nora-dev-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/pilot"
+      ]
     }
   ],
   "clients": [

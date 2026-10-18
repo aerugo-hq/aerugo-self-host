@@ -30,7 +30,7 @@ INGEST_DB = os.environ["KL_INGEST_DATABASE_URL"]
 BAO_URL = os.environ.get("KL_OPENBAO_URL", "http://openbao:8200")
 BAO_TOKEN = os.environ.get("KL_OPENBAO_TOKEN", "")
 ISSUER = os.environ.get("KL_OIDC_ISSUER", "http://localhost:8081/realms/acme")
-PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "olivia")}  # olivia: the org admin
+PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "olivia", "nora")}  # olivia: the org admin; nora: on no team (G4)
 
 SKIP = object()
 CHECKS = []
@@ -1292,6 +1292,58 @@ def teams_and_members_without_sql():
         assert listed[ws]["name"] == "Team test, renamed" and "admin" in listed[ws]["roles"], listed.get(ws)
         assert {g["principal"] for g in members("alice").json()["members"]} == {"user:alice"}
     finally:  # tidy up the throwaway team and its tuples
+        doomed = {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": f"workspace:{ws}"})}
+        if doomed:
+            fga.write(deletes=doomed)
+        with psycopg.connect(OWNER_DB) as conn:
+            conn.execute("DELETE FROM kl.workspaces WHERE slug = %s", (ws,))
+
+
+@check
+def a_pilot_lets_in_only_onboarded_teams():
+    """G4, onboarding a team at a time: with admission `teams` (a pilot), someone on no team is refused by the API and the MCP server alike, and whoami tells them only that they aren't in; a team member and an org admin get in; only an org admin changes it; giving a team to the group the identity provider puts them in lets them in at once (their token's groups reach OpenFGA), and taking it away shuts them out again; with admission `org`, everyone signed in gets in, as before"""
+    import uuid
+    from .authz import fga
+    ws = f"pilot-{uuid.uuid4().hex[:8]}"  # a throwaway team for the pilot, removed at the end
+    search = lambda user: api("GET", "/v1/search", user, params={"q": "incident", "limit": 3})  # noqa: E731
+    admission = lambda mode, user="olivia": api("PUT", "/v1/admin/admission", user, json={"mode": mode}).status_code  # noqa: E731
+
+    def wait(ok, seconds: float, what: str) -> None:  # each API process reads the mode within 30 s, an admission within 60
+        deadline = time.monotonic() + seconds
+        while not ok():
+            assert time.monotonic() < deadline, what
+            time.sleep(2)
+
+    try:
+        assert admission("teams", "alice") == 403, "a team admin changed who gets in"
+        assert admission("everyone") == 422, "an unknown mode was accepted"
+        assert admission("teams") == 200
+        assert api("GET", "/v1/admin/admission", "olivia").json()["mode"] == "teams"
+        wait(lambda: search("nora").status_code == 403, 45, "someone on no team still got in during the pilot")
+        assert "onboarded" in search("nora").json()["detail"]
+        assert api("GET", "/v1/whoami", "nora").json() == {"username": "nora", "admitted": False}, "whoami told an outsider more than that"
+        try:
+            asyncio.run(_mcp_call(token("nora", client_id="kl-mcp-cli"), "search", {"query": "incident"}))
+            raise AssertionError("the MCP server let in someone on no team")
+        except AssertionError as e:
+            assert "onboarded" in str(e), f"the MCP server didn't refuse for admission: {e}"
+        assert search("alice").status_code == 200 and search("olivia").status_code == 200, "a member or an org admin was refused"
+        assert api("GET", "/v1/whoami", "alice").json()["admitted"] is True
+
+        # The identity provider puts nora in the group "pilot"; a team for that group lets her in at once.
+        assert api("POST", "/v1/workspaces", "olivia", json={"slug": ws, "name": "Pilot", "discoverability": "private"}).status_code == 201
+        assert api("PUT", f"/v1/workspaces/{ws}/members", "olivia", json={"principal": "group:pilot", "role": "member"}).status_code == 200
+        assert search("nora").status_code == 200, "a member of an onboarded team's group was refused"
+        assert fga.read({"user": "user:nora", "relation": "member", "object": "group:pilot"}), "her token's group never reached OpenFGA"
+        assert api("GET", "/v1/whoami", "nora").json()["workspaces"] == [ws]
+        assert api("DELETE", f"/v1/workspaces/{ws}/members", "olivia", params={"principal": "group:pilot", "role": "member"}).status_code == 200
+        wait(lambda: search("nora").status_code == 403, 75, "taking the team away didn't shut her out again")
+
+        assert admission("org") == 200
+        wait(lambda: search("nora").status_code == 200, 45, "after the pilot, someone signed in was still refused")
+        print(f"      pilot: nora refused by the API and MCP, let in through her group's team, shut out again; open again after")
+    finally:
+        admission("org")
         doomed = {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": f"workspace:{ws}"})}
         if doomed:
             fga.write(deletes=doomed)
