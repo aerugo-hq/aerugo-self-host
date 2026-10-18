@@ -1030,12 +1030,30 @@ package and a runtime with only the production ones and the built app (`next.con
 development tool and no source is in what runs. Red first: a probe that calls a hook conditionally failed the lint
 (an error), and one adding a single missed dependency failed it too ("too many warnings (maximum: 43)"); green
 without them. Proof: the runtime image holds no `eslint` package, and `make e2e` 37 passed against it; the full loop is
-CI's run on the pull request. Not built: fixing the 43 warnings.
+CI's run on the pull request. Not built: fixing the 43 warnings. CI on pull request 52: the lint at 0 errors and 43
+warnings; unit 64 passed; smoke 169 passed, 17 skipped, 0 failed; the golden set and the scenario at their
+baselines; no leak and no regression.
+L3 (the ID token verified at sign-in). The web server read the ID token's nonce without verifying the token. It
+arrives over the back channel straight from the identity provider, so this was acceptable, but verifying it is cheap
+and closes anything that could tamper with that answer. `lib/idtoken.mjs` (`verifyIdToken`, pure: the keys are passed
+in) checks the RS256 signature against one of the identity provider's published keys (any other algorithm, `none`
+included, fails closed), the issuer (the public issuer, as the API checks it), the audience (this app, also among
+several), the expiry (60 seconds of clock skew), and the sign-in's nonce. `finishLogin` calls it with Keycloak's JWKS
+(`/protocol/openid-connect/certs` on the internal issuer), cached and fetched again once when a token names a key
+the cache doesn't hold (Keycloak rotates keys). A token that fails is a refused sign-in, logged with what failed and
+never the token; the keys not being readable stays an outage (try again), not a refusal. No library: Node's crypto
+reads each key. `make test-web` runs `lib/idtoken.test.mjs` (7 tests, on Node's built-in runner, with keys they
+generate), and CI runs it beside the lint. Red first: with the signature check removed, the two tests for a
+tampered token and another key's signature failed and the other five passed; green, 7 of 7. Proof: `make e2e` 37
+passed, every sign-in a real Keycloak token verified (the web server logged no refusal); the lint at 0 errors and
+43 warnings with L3's code; the full loop is CI's run on the pull request. Not built: verifying the ID token again on
+refresh (a refresh's ID token isn't used).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, and L2 are done; next, L3; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, and L3 are done; Phase 0 is complete but for M10's real-vendor half (set aside),
+and its final report is below; next, G4; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

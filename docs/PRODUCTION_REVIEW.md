@@ -116,6 +116,9 @@ slower cadence for deletions and permissions.
 
 ## Status, and the permissions audit (after C1)
 
+**Done and verified, 2026-10-18:** L3 (`l3-id-token-signature`): a sign-in's ID token is verified (signature,
+issuer, audience, expiry, nonce) against the identity provider's published keys before a session is made.
+
 **Done and verified, 2026-10-18:** L2 (`l2-eslint-in-ci`): the web app's lint runs in CI, errors failing it and
 warnings held to today's count; the web image is two stages, so the lint's packages never ship.
 
