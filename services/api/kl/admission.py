@@ -1,4 +1,4 @@
-"""Who gets in, and in which groups (G4).
+"""Who gets in, and what they're a member of (G4, and the org's membership).
 
 Groups: a person's groups come from their signed token (the identity provider's groups, through Keycloak), so the
 token is the truth for which groups they're in. OpenFGA has to hold it too, or a team granted to a group would refuse
@@ -6,12 +6,20 @@ the group's members: each authenticated request makes OpenFGA's `user:<u> member
 writing the groups joined and deleting the groups left, checked at most every SYNC_SECONDS for an unchanged set. A
 person leaving a group in the identity provider loses it at their next token.
 
-Admission: an org admin chooses `org` (anyone signed in, as before) or `teams` (a pilot: only members of an onboarded
-team, in any role, and org admins), read through kl.admission_mode (migration 0056). Service accounts always pass: an
-org admin registers each one.
+The org: someone the company's identity provider signs in is one of its people, so each request also records
+`user:<u> member org:<org>`, once. Without it, a document a source shares with the whole company (a Confluence space
+anyone may read, a public Slack channel, a Drive file shared with the domain) reached only org admins: row-level
+security let everyone in, and OpenFGA's post-check, knowing no one's membership but the dev seed's, let no one. Leaving
+the company is the identity provider's to decide: someone it no longer signs in makes no request.
 
-Both fail closed: when OpenFGA or Postgres can't answer, the request gets a 503, never an admission or a skipped
-removal. Nothing here grants a document; it only narrows who gets in and keeps group membership current."""
+Admission: an org admin chooses `org` (anyone signed in, as before) or `teams` (a pilot: only people on an onboarded
+team, and org admins), read through kl.admission_mode (migration 0056). On an onboarded team means a role granted to
+the person or to one of their groups: a team granted to the whole org (a commons anyone may join) onboards nobody,
+or a pilot would let everyone in. Service accounts always pass (an org admin registers each one), and are never made
+members of a group or the org: their grants are their own.
+
+All of it fails closed: when OpenFGA or Postgres can't answer, the request gets a 503, never an admission or a skipped
+removal. Nothing here grants a document; it records who someone is, and narrows who gets in."""
 import logging
 import time
 
@@ -28,6 +36,7 @@ SYNC_SECONDS = 300      # an unchanged set of groups is compared with OpenFGA at
 MODE_SECONDS = 30       # how long a process trusts the mode it read; one that changes it forgets at once
 ADMITTED_SECONDS = 60   # how long an admission holds; a refusal is never kept, so onboarding takes effect at once
 CACHE_LIMIT = 10_000    # ponytail: each cache is emptied whole when full; an LRU if a deployment outgrows it
+TEAM_ROLES = ("admin", "curator", "member", "auditor")
 _synced: dict[str, tuple[frozenset[str], float]] = {}
 _admitted: dict[str, float] = {}
 _mode: tuple[str, float] = ("org", 0.0)
@@ -46,8 +55,9 @@ def group_changes(user: str, held: set[str], token_groups: set[str]) -> tuple[se
     return {member(g) for g in token_groups - held}, {member(g) for g in held - token_groups}
 
 
-def sync_groups(caller: Caller) -> None:
-    if caller.service:  # an automation account's grants are its own, never a group's
+def sync_memberships(caller: Caller) -> None:
+    """Make OpenFGA hold the caller's groups as their token says, and their membership of the org."""
+    if caller.service:  # an automation account's grants are its own, never a group's or the org's
         return
     groups = frozenset(caller.groups)
     seen = _synced.get(caller.fga_user)
@@ -55,10 +65,13 @@ def sync_groups(caller: Caller) -> None:
         return
     held = {t["object"].split(":", 1)[1] for t in fga.read({"user": caller.fga_user, "relation": "member", "object": "group:"})}
     writes, deletes = group_changes(caller.fga_user, held, set(groups))
+    org = (caller.fga_user, "member", f"org:{caller.org_slug}")
+    if not fga.read({"user": org[0], "relation": org[1], "object": org[2]}):
+        writes.add(org)
     if writes or deletes:
         fga.write(writes=writes, deletes=deletes)
         _admitted.pop(caller.fga_user, None)  # their teams may have changed with their groups
-        log.info("a person's groups now match their token: %d joined, %d left", len(writes), len(deletes))
+        log.info("a person's memberships now match their token: %d added, %d left", len(writes), len(deletes))
     _remember(_synced, caller.fga_user, (groups, time.monotonic() + SYNC_SECONDS))
 
 
@@ -78,15 +91,21 @@ def forget_mode() -> None:
     _mode = ("org", 0.0)
 
 
+def onboarded(caller: Caller) -> bool:
+    """A role on a team, granted to the caller or to one of their groups. A grant to the whole org doesn't count."""
+    for who in (caller.fga_user, *(f"group:{g}#member" for g in caller.groups)):
+        if any(t["relation"] in TEAM_ROLES for t in fga.read({"user": who, "object": "workspace:"})):
+            return True
+    return False
+
+
 def admitted(caller: Caller) -> bool:
     if caller.service or mode() == "org":
         return True
     until = _admitted.get(caller.fga_user)
     if until and until > time.monotonic():
         return True
-    ok = (bool(fga.list_objects(caller.fga_user, "member", "workspace"))     # any team role: admins and curators are members
-          or bool(fga.list_objects(caller.fga_user, "auditor", "workspace"))
-          or fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}"))
+    ok = onboarded(caller) or fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}")
     if ok:
         _remember(_admitted, caller.fga_user, time.monotonic() + ADMITTED_SECONDS)
     return ok
@@ -98,9 +117,9 @@ def unavailable(e: Exception) -> HTTPException:
 
 
 def admit(caller: Caller) -> Caller:
-    """Bring the caller's groups up to date, then refuse anyone the org's admission leaves out (403)."""
+    """Bring the caller's memberships up to date, then refuse anyone the org's admission leaves out (403)."""
     try:
-        sync_groups(caller)
+        sync_memberships(caller)
         ok = admitted(caller)
     except (httpx.HTTPError, psycopg.Error, RuntimeError) as e:
         raise unavailable(e)

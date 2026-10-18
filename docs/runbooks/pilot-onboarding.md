@@ -12,10 +12,12 @@ reviewed code in the company's onboarding repository; Aerugo's example is `examp
    no pull request per person.
 2. **Groups from the sign-in token.** Aerugo reads the `groups` claim of the token Keycloak signs. On each request it
    makes OpenFGA's group membership match the token, adding the groups joined and removing the groups left, so a team
-   granted to a group reaches the group's members.
+   granted to a group reaches the group's members. It also records them as a member of the org, so what a source shares
+   with the whole company reaches them.
 3. **Admission.** `org.yaml` says who gets in: `admission: teams` (a pilot) or `admission: org` (everyone the identity
    provider signs in, the default). During a pilot only members of an onboarded team, in any role, and org admins get
-   in. Anyone else gets a 403 from the API and MCP ("your team isn't onboarded to Aerugo yet"), and the web app shows
+   in. A member means a role granted to the person or to one of their groups: a team granted to the whole org (a
+   commons anyone may join) onboards nobody. Anyone else gets a 403 from the API and MCP ("your team isn't onboarded to Aerugo yet"), and the web app shows
    "Your team isn't on Aerugo yet" with a way to sign out, and nothing else. Service accounts always get in: an org
    admin registers each one.
 

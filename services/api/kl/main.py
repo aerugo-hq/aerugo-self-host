@@ -640,7 +640,7 @@ def whoami(caller: Caller = Depends(signed_in)):
     """Who the caller is. Answered before admission (G4): someone the org's admission leaves out learns that they aren't
     in (`admitted: false`), and nothing else."""
     try:
-        admission.sync_groups(caller)
+        admission.sync_memberships(caller)
         admitted = admission.admitted(caller)
     except (httpx.HTTPError, psycopg.Error, RuntimeError) as e:
         raise admission.unavailable(e)
