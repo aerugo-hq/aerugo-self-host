@@ -305,7 +305,7 @@ p = Page("8. Security and trust", "Security and trust: what keeps it safe",
          "The same permissions as the sources, enforced in the database. Read-only toward every source. Every action is "
          "a person's decision. Nothing is used to watch people.")
 person = p.box("<b>A person</b>", 60, 380, 180, 80, S_PEOPLE)
-sso = p.box("<b>Sign-in</b><br>the company's identity provider", 300, 380, 220, 80, S_SEC)
+sso = p.box("<b>Sign-in</b><br>the company's identity provider; during a pilot, only onboarded teams", 300, 370, 220, 100, S_SEC)
 api = p.box("<b>Aerugo</b>", 580, 380, 200, 80, S_NEW)
 fga = p.box("<b>Permissions</b><br>mirrored from each source; checked in the database (row-level security) and OpenFGA",
             860, 220, 320, 100, S_SEC)

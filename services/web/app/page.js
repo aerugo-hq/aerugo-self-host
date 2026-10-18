@@ -97,7 +97,7 @@ export default function App() {
   const [palette, setPalette] = useState(null); // the command palette: "commands", "help" (the shortcuts), or closed
   const [status, setStatus] = useState(null); // the health indicator: the API's version and which parts are up
   useEffect(() => {
-    if (!me) return undefined;
+    if (!me || me.admitted === false) return undefined;
     const check = () => kl("status").then(setStatus).catch(() => setStatus({ ok: false, checks: {}, version: null }));
     check();
     const timer = setInterval(check, 60000);
@@ -141,12 +141,14 @@ export default function App() {
 
   // Admins see how many alerts are firing, refreshed each minute (a badge poll, not a render loop).
   useEffect(() => {
-    if (!me || !(me.admin_of.length || me.org_admin)) return undefined;
+    if (!me || me.admitted === false || !(me.admin_of.length || me.org_admin)) return undefined;
     const count = () => kl("alerts").then((d) => setAlerts(d.firing)).catch(() => {});
     count();
     const timer = setInterval(count, 60000);
     return () => clearInterval(timer);
   }, [me]);
+
+  if (me && me.admitted === false) return h(NotOnboarded, { username: me.username });
 
   const team = where.team;
   const item = (view, icon, label, scope = team) => h("a", {
@@ -250,4 +252,14 @@ export default function App() {
         me ? h(Account, { key: `${team}:${where.view}`, me, onHelp: () => setPalette("help") }) : null),
       team ? teamPage() : orgPage()),
     palette ? h(Palette, { me, mode: palette, onMode: setPalette, onClose: () => setPalette(null) }) : null);
+}
+
+// G4: during a pilot, someone signed in whose team isn't onboarded yet sees why, and nothing else (the API refuses
+// everything else for them, and whoami says only that they aren't in).
+function NotOnboarded({ username }) {
+  return h("main", { className: "page" }, h("div", { className: "panel" },
+    h(Empty, { title: "Your team isn't on Aerugo yet", icon: "shield",
+               action: h("a", { className: "btn btn-sm", href: "/auth/logout" }, "Sign out") },
+      `Aerugo is being rolled out a team at a time. You're signed in as ${username}, and once your team is onboarded, its `
+      + "knowledge will be here. To ask about it, contact your Aerugo administrator.")));
 }

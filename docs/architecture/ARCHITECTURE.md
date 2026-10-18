@@ -75,7 +75,8 @@ Everything kept stays inside the company's own cloud project and region.
 ## 4. How a question gets answered
 
 1. **Ask**, in Teams, the web app, a phone, or the IDE.
-2. **Who's asking**: sign-in, and their team, role, and location from the directory.
+2. **Who's asking**: sign-in (during a pilot, only members of onboarded teams get in), and their team, role, and
+   location from the directory.
 3. **Find**: knowledge units first, then documents and the Atlas.
 4. **Filter**: only what this person may see, enforced in the database itself.
 5. **Fetch**: in pointer mode, the passages needed, live from the source.
@@ -146,7 +147,7 @@ right answers before anything touches real data. Already built: documents, permi
 Confluence, Jira, Drive, GitHub, Slack, Microsoft 365, Notion, catalogs, and directories, each syncing only what
 changed since its last sync (a full reconcile daily, and at once when a source expires its cursor) and surviving a
 source's rate limits; the web app, its sign-in sessions shared by every web server; the Map; the Terraform provider;
-Kubernetes manifests. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, G4 (the pilot path). A connector only adds raw material; the core
-turns it into knowledge, keeps it fresh, and learns from people, so every
-new connector and pack makes it smarter.
+Kubernetes manifests; onboarding as code, with a pilot that lets in only the teams onboarded so far (G4). Phase 0 is
+complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`), but for M10's real-vendor half,
+set aside; next, the foundation, starting with F9 and F10. A connector only adds raw material; the core turns it into
+knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it smarter.
