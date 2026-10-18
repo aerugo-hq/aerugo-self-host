@@ -44,7 +44,74 @@
     "version": "2026-10-2"
   },
   "migration": {
+    "answers": {
+      "archive-asked": true,
+      "backfill-carol": false,
+      "backfill-trap": true,
+      "before-retiring": true,
+      "checklist-current": true,
+      "dashboards-on-ord-load": true,
+      "decision-2025": true,
+      "decision-latest-first": true,
+      "edp-orders-readers": false,
+      "impact-cross-team": true,
+      "july-reconciliation": false,
+      "loader-not-archive": true,
+      "lookup-order-hist": true,
+      "migration-not-faq": true,
+      "migration-plan": true,
+      "owner-people": true,
+      "owner-ticket": true,
+      "rehearsal-length": false,
+      "retention-trap": true,
+      "rollback": false,
+      "runbook-2023-asked": true,
+      "runbook-current": true,
+      "runbook-on-call": true,
+      "ticket-412": true,
+      "window-and-rehearsal": true
+    },
     "cases": {
+      "archive-asked": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "backfill-carol": {
+        "first": null,
+        "found": 0,
+        "of": 1
+      },
+      "backfill-trap": {
+        "first": 3,
+        "found": 1,
+        "of": 1
+      },
+      "before-retiring": {
+        "first": 3,
+        "found": 2,
+        "of": 2
+      },
+      "checklist-current": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "customers-history": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "cutover-window": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "dashboards-on-ord-load": {
+        "first": 1,
+        "found": 2,
+        "of": 2
+      },
       "decision-2025": {
         "first": 1,
         "found": 2,
@@ -55,12 +122,42 @@
         "found": 1,
         "of": 1
       },
-      "impact-cross-team": {
-        "first": 2,
+      "dual-run-length": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "edp-orders-readers": {
+        "first": null,
+        "found": 0,
+        "of": 1
+      },
+      "exec-depends-on": {
+        "first": 1,
         "found": 2,
         "of": 2
       },
+      "exec-owner": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "impact-cross-team": {
+        "first": 3,
+        "found": 2,
+        "of": 2
+      },
+      "july-reconciliation": {
+        "first": null,
+        "found": 0,
+        "of": 2
+      },
       "lineage-downstream": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "loader-not-archive": {
         "first": 1,
         "found": 1,
         "of": 1
@@ -70,9 +167,19 @@
         "found": 1,
         "of": 1
       },
-      "migration-plan": {
+      "mart-built-from": {
         "first": 1,
-        "found": 2,
+        "found": 1,
+        "of": 1
+      },
+      "migration-not-faq": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "migration-plan": {
+        "first": 3,
+        "found": 1,
         "of": 2
       },
       "owner-people": {
@@ -90,12 +197,62 @@
         "found": 1,
         "of": 1
       },
+      "reconcile-threshold": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "reconciled-trap": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "rehearsal-length": {
+        "first": null,
+        "found": 0,
+        "of": 1
+      },
       "retention-legal": {
         "first": 1,
         "found": 1,
         "of": 1
       },
       "retention-trap": {
+        "first": 4,
+        "found": 1,
+        "of": 1
+      },
+      "returns-owner": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "review-legal": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "rollback": {
+        "first": null,
+        "found": 0,
+        "of": 2
+      },
+      "runbook-2023-asked": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      },
+      "runbook-current": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "runbook-on-call": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "standards-draft-asked": {
         "first": 2,
         "found": 1,
         "of": 1
@@ -104,11 +261,36 @@
         "first": 1,
         "found": 1,
         "of": 1
+      },
+      "ticket-412": {
+        "first": 1,
+        "found": 1,
+        "of": 2
+      },
+      "ticket-421": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "wave-2-planning": {
+        "first": 1,
+        "found": 2,
+        "of": 2
+      },
+      "wave-2-scope": {
+        "first": 1,
+        "found": 2,
+        "of": 2
+      },
+      "window-and-rehearsal": {
+        "first": 1,
+        "found": 1,
+        "of": 2
       }
     },
     "k": 10,
-    "mrr": 0.9167,
-    "recall": 1.0,
+    "mrr": 0.781,
+    "recall": 0.8488,
     "scenario": "migration"
   }
 }
