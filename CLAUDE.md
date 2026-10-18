@@ -31,14 +31,15 @@ from `main`.
 **Then build, in this order** (each item's design is in its plan):
 
 1. **Phase 0**, the production review's remaining findings, in its order: the permissions audit (P1 to P3), H1 with
-   H5, H2 with H6, H3 with M2, H4; then the mediums, M4 (unit tests) first.
-2. **The foundation**, `docs/ENTERPRISE_PLAN.md` F1 to F11, starting with F9 (the synthetic retailer) and F10 (the
+   H5, H2 with H6, H3 with M2, H4; then the mediums, M4 (unit tests) first. Done (its final report is below).
+2. **The pilot path**, G4 (`docs/ENTERPRISE_PLAN.md`): onboarding as code, with a pilot gate. Done (below).
+3. **The foundation**, `docs/ENTERPRISE_PLAN.md` F1 to F11, starting with F9 (the synthetic retailer) and F10 (the
    Atlas and its synthetic enterprise: `docs/ORG_INTELLIGENCE_PLAN.md` O1 and O2), since everything after is proven
    on them.
-3. **Capture**, C1 to C5.
-4. **Where people meet it**, D1 to D3.
-5. **The scenario packs**, P1 to P9 (P8 is `docs/ORG_INTELLIGENCE_PLAN.md` O3 to O26).
-6. **Deployment** last (`docs/BUILD_PLAN.md`, and the Helm chart and runner it names).
+4. **Capture**, C1 to C5.
+5. **Where people meet it**, D0 (the UI revamp's design, with a clickable prototype, after F1), then D1 to D3.
+6. **The scenario packs**, P1 to P9 (P8 is `docs/ORG_INTELLIGENCE_PLAN.md` O3 to O26).
+7. **Deployment** last (`docs/BUILD_PLAN.md`, and the Helm chart and runner it names).
 
 **How to work.** These aren't optional: the last build skipped some, and three review rounds went to finding what
 that cost.
@@ -1056,7 +1057,8 @@ Grafana 11 to 13) and some for the optional development tools L1 left unpinned. 
 digest or a patch release (an `ignore` of minor and major updates, in `.github/dependabot.yml`): a minor or major
 version is an upgrade to plan and prove as an item of its own, not a refresh. The development tools (Ollama and the
 observability stack) aren't proposed at all. Configuration only; the file parses, and Dependabot applies it on its
-next weekly run. The thirteen open pull requests are left for the user to keep or close.
+next weekly run. The thirteen open pull requests are left for the user to keep or close. CI on pull request 54: smoke
+169 passed, 17 skipped, 0 failed; the golden set and the scenario at their baselines; no leak and no regression.
 **Phase 0 report, final, 2026-10-18.** The production review's findings are built, each on its own branch and pull
 request, proven red then green, recorded above, and merged after CI passed (pull requests 23 to 54). The first report
 (pull request 25) listed what was left; all of it is done, but the half of M10 set aside by decision.
@@ -1094,13 +1096,60 @@ Desktop's cluster no longer starts (its image predates M6's settings), for `make
 one-node cluster.
 *Next:* G4, designed and approved (`team.yaml` in the onboarding repository, members by identity-provider group, the
 admission setting enforced in the API and MCP, the not-onboarded page), then F9 and F10.
+G4 (onboarding as code, with a pilot gate; decided to come right after Phase 0). A company starts with a few teams (say
+EDW and EDP) and adds the rest a wave at a time, each wave a reviewed pull request in its onboarding repository.
+Admission (migration 0056: `org_admission`, one row per org, `org` or `teams`, read through `kl.admission_mode`, a
+security-definer function, since the gate runs before any org context): `org` lets in anyone signed in, as before;
+`teams`, a pilot, lets in only members of an onboarded team in any role (an admin or curator is a member) or its
+auditors, and org admins. `GET` and `PUT /v1/admin/admission` (org admins; audited as `org.admission`, its Terraform
+manager noted). The gate is in `auth.authenticate` (`kl/admission.py`, `admit`), so every authenticated route has it,
+and in the MCP server's `_as_caller`; service accounts always pass (an org admin registers each). Someone left out
+gets a 403 that says why; `GET /v1/whoami` (on `signed_in`, before admission) tells them only their username and
+`admitted: false`, and matches identities only for people let in. A process trusts the mode it read for 30 seconds
+(the one that changes it forgets at once), an admission for a minute, and a refusal never, so a wave's members get in
+at their next request. When OpenFGA or Postgres can't answer, the request gets a 503 with `Retry-After`, never an
+admission. Groups, a correction to the approved design: it assumed OpenFGA knew who is in each group, but only the dev
+seed tells it (`user:<u> member group:<g>`), so in production a team granted to a group never reached its members (the
+final Phase 0 report's finding). Each authenticated request now makes OpenFGA's group membership match the token's
+`groups` claim (`sync_groups`: groups joined written, groups left deleted, an unchanged set compared at most every five
+minutes), so leaving a group in the identity provider takes effect at the next token; a service account's grants stay
+its own. The web app: someone left out sees "Your team isn't on Aerugo yet", who they're signed in as, whom to ask,
+and Sign out, and nothing else (`NotOnboarded` in `page.js`). The dev realm adds the group `pilot` and nora, in it
+and on no team (production's realm keeps no people). Terraform (terraform-provider-aerugo, pull request 9):
+`aerugo_admission` (`mode` changes in place; removing it sets `org`; imports as `admission`), and `examples/onboarding`
+gains `teams/<team>/team.yaml` (the team, its discoverability, and its admins, curators, members, and auditors, each
+`group:<name or id>` or `user:<username>`, checked by the module) beside `sources.yaml`, and `org.yaml`
+(`admission: teams`); `CODEOWNERS` gives every `team.yaml` and `org.yaml` to the platform team; deletion protection
+stays on, so removing a `team.yaml` never purges a team. `docs/runbooks/pilot-onboarding.md`: the identity provider's
+app assignment (Entra's "assignment required", Okta's assignments, Google's SAML app per group), groups into
+Keycloak's token per provider (an Advanced Claim to Group mapper per group, sync mode Force), starting, waves, people
+joining and leaving, ending, and checking. Checks: smoke's `a_pilot_lets_in_only_onboarded_teams` (a team admin can't
+set the mode and a bad mode is refused; during the pilot nora gets 403 from search and MCP and a bare whoami while
+alice and olivia get in; a team granted to `group:pilot` lets nora in and OpenFGA holds her group from the token;
+revoking it refuses her again; `org` lets her back in), the browser test
+`test_during_a_pilot_someone_on_no_team_sees_why_and_nothing_else`, 7 unit tests (`tests/test_admission.py`), and the
+provider's `TestAccAdmission`. Red first: on the stack before G4, nora, in `pilot`, with a team granted to
+`group:pilot`, got a 404 from search and no workspaces (the group gap); with G4 she gets in and OpenFGA holds the
+tuple. The gate itself had nothing to fail against before G4 (no admission endpoint). Proof on a fresh stack with CI's
+settings, at 67e8e90: `make pins` passed; `make unit` 71 passed; `make smoke` 169 passed, 15 skipped, 3 failed: the two
+optional web checks ran against web servers an earlier stack had left up (both pass against the rebuilt ones), and
+Drive's check searched in the moment between a file's row and its grant (the API logged alice's post-check, denying it,
+8 ms before the worker wrote the grant: fail closed, no leak; the check passed alone three times in three; its wait is
+fixed on its own branch); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario`
+Recall@10 85%, MRR 0.78 over 43 counted cases, no leak, no regression; `make e2e` 38 passed (the pilot's test new);
+`make test-web` 7 passed; the lint at 0 errors and 43 warnings. The provider: build, vet, and 13 acceptance tests
+passed (the route's skipped), and its CI; the example plans 8 resources and refuses a malformed member. Not built: an
+admission page in the app (the API and Terraform set it); signing someone out when they leave a group (they keep it
+until their next sign-in through the identity provider, as the runbook says); checking that a `team.yaml`'s group
+exists in the identity provider (a plan can't see it); Entra group ids shown as names.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
-this file says: G4 (the pilot path), then the foundation in `docs/ENTERPRISE_PLAN.md`, F9 and F10 first.
+this file says: G4 (the pilot path) is done, recorded above; next, the foundation in `docs/ENTERPRISE_PLAN.md`, F9 and
+F10 first.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

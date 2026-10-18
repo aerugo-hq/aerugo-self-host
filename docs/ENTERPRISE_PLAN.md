@@ -236,7 +236,7 @@ Phase 0 first, as `docs/ORG_INTELLIGENCE_PLAN.md` says (the production review's 
 and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review after each phase.
 
 ### The pilot path (decided 2026-10-17: right after Phase 0, before F9 and F10)
-- [ ] **G4.** Onboarding as code, with a pilot gate, so a company can start with two teams (say EDW and EDP) and add
+- [x] **G4.** Onboarding as code, with a pilot gate, so a company can start with two teams (say EDW and EDP) and add
       the rest a wave at a time: each team's folder in the onboarding repository declares the team, its admins, and
       its members by directory group (joining or leaving the group is the onboarding; no pull request per person);
       a pilot setting lets in only members of onboarded teams, beside the identity provider's own app assignment
