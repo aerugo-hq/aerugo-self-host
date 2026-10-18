@@ -169,7 +169,7 @@ services:
       # Notion API addresses Notion connections may use (S6); the fake one exists only while smoke runs.
       KL_NOTION_API_BASES: ${KL_NOTION_API_BASES:-https://api.notion.com/v1,http://fake-llm:8080/notion/v1}
       # Slack Web API addresses Slack connections may use (S4); the fake one exists only while smoke runs.
-      KL_SLACK_API_BASES: ${KL_SLACK_API_BASES:-https://slack.com/api,http://fake-llm:8080/slack/api}
+      KL_SLACK_API_BASES: ${KL_SLACK_API_BASES:-https://slack.com/api,http://fake-llm:8080/slack/api,http://fake-llm:8080/retail-slack/api}
       # Microsoft Graph addresses Entra directories may use (S3); the fake one exists only while smoke runs.
       KL_MICROSOFT_GRAPH_BASES: ${KL_MICROSOFT_GRAPH_BASES:-https://graph.microsoft.com,http://fake-llm:8080/microsoft}
       # Data catalogs (S7): Google's, Databricks', AWS's, and Purview's own addresses are always allowed; the fakes
@@ -190,10 +190,10 @@ services:
       KL_AZURE_LOGIN_BASE: ${KL_AZURE_LOGIN_BASE:-http://fake-llm:8080/azure-login}
       KL_AZURE_KEY_VAULT_BASE: ${KL_AZURE_KEY_VAULT_BASE:-http://fake-llm:8080/azkv/{vault}}
       # Jira addresses besides Jira Cloud sites (ADR 0011); the fake ones (two sites) exist only while smoke runs.
-      KL_JIRA_API_BASES: ${KL_JIRA_API_BASES:-http://fake-llm:8080/jira,http://fake-llm:8080/jira-b}
+      KL_JIRA_API_BASES: ${KL_JIRA_API_BASES:-http://fake-llm:8080/jira,http://fake-llm:8080/jira-b,http://fake-llm:8080/retail-jira}
       # Okta addresses besides Okta orgs (ADR 0011: directories); the fake one exists only while smoke runs.
       KL_OKTA_API_BASES: ${KL_OKTA_API_BASES:-http://fake-llm:8080/okta}
-      KL_CONFLUENCE_API_BASES: ${KL_CONFLUENCE_API_BASES:-http://fake-llm:8080/confluence}   # the fake exists only while smoke runs
+      KL_CONFLUENCE_API_BASES: ${KL_CONFLUENCE_API_BASES:-http://fake-llm:8080/confluence,http://fake-llm:8080/retail-confluence}   # the fake exists only while smoke runs
       # GCP Secret Manager references (ADR 0011): the projects a reference may name, and, in dev only, the fake Secret
       # Manager and metadata server smoke runs. In production leave the two addresses unset: Google's own are the default.
       KL_GCP_SECRET_PROJECTS: ${KL_GCP_SECRET_PROJECTS:-acme-dev}
@@ -245,6 +245,7 @@ services:
     environment:
       <<: *api-env
       OTEL_SERVICE_NAME: kl-smoke   # so its own database connections are never counted as the API's (H1)
+      KL_KEYCLOAK_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin-dev-only}   # the synthetic retailer's loader makes its people (F9)
       KL_API_URL: http://api:8000
       KL_TOKEN_URL: http://keycloak:8080/realms/acme/protocol/openid-connect/token
       KL_APP_DATABASE_URL: postgresql://kl_app:${KL_APP_PASSWORD:-app-dev-only}@postgres:5432/kl

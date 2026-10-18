@@ -75,11 +75,14 @@ JIRA: dict = {"projects": {}}
 JIRA_AUTH = "jira-bot@acme.test:smoke-jira-token"
 # A second site at /jira-b, set through POST /jira-b/setup: another company's Jira, whose project and issue keys may be
 # the same as the first's, as two real sites' can be.
-JIRA_SITES = {"jira": JIRA, "jira-b": {"projects": {}}}
+JIRA_SITES = {"jira": JIRA, "jira-b": {"projects": {}}, "retail-jira": {"projects": {}}}  # retail-jira: the synthetic retailer's (F9)
 # A fake Confluence Cloud (S1): spaces, their pages and blog posts, and who may read each (the space's grants, each page's
 # restrictions, and groups' members), which smoke sets through POST /confluence/setup. It answers the calls the
 # connector makes, at Confluence's own paths (/confluence/wiki/...).
 CONFLUENCE: dict = {"spaces": {}, "groups": {}, "users": {}}
+# The synthetic retailer (F9) has its own site, at /retail-confluence, set through POST /retail-confluence/setup, so loading
+# it never replaces the migration scenario's content (each setup replaces its site's whole state).
+CONFLUENCE_SITES = {"confluence": CONFLUENCE, "retail-confluence": {"spaces": {}, "groups": {}, "users": {}}}
 CONFLUENCE_AUTH = "confluence-bot@acme.test:smoke-confluence-token"
 # Service accounts and shared folders (ADR 0011): smoke mints an account's key through POST /google/service-account (its
 # token_uri points somewhere unreachable, so a worker that followed it would fail) and sets folders through POST
@@ -124,6 +127,9 @@ GRAPH_REQUESTS: list = []
 # with an opaque cursor, and, when smoke asks (throttle), answers one history call with 429 and Retry-After.
 SLACK: dict = {"team": {"id": "T0SMOKE", "name": "Acme", "url": "https://acme-smoke.slack.com"}, "users": [], "channels": {},
                "throttle": False}
+# The synthetic retailer's own workspace (F9), at /retail-slack, as the retailer's Confluence site is.
+SLACK_SITES = {"slack": SLACK, "retail-slack": {"team": {"id": "T0RETAIL", "name": "Acme Outfitters", "url": "https://acme-outfitters.slack.com"},
+                                                "users": [], "channels": {}, "throttle": False}}
 SLACK_TOKEN = "xoxb-smoke-slack-token"
 SLACK_PAGE = 2
 # A fake Notion (S6): the pages and data sources shared with an integration (and some that aren't), with their blocks,
@@ -373,29 +379,29 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if self.path.startswith("/slack/api/"):
-            return self._slack(urlparse(self.path))
+        site = self.path.split("/")[1]
+        if site in SLACK_SITES and self.path.startswith(f"/{site}/api/"):
+            return self._slack(urlparse(self.path), SLACK_SITES[site])
         if self.path.startswith("/notion/v1/"):
             return self._notion("GET", urlparse(self.path), {})
         if self.path.startswith("/google/admin/directory/v1/"):
             return self._admin(urlparse(self.path))
         if self.path == "/google/oauth2/v3/certs":  # the keys Google signs ID tokens with
             return self._json(200, ci_jwks())
-        site = self.path.split("/")[1]
         if site in JIRA_SITES and self.path == f"/{site}/searches":  # the JQL each search asked for since its setup (H6)
             return self._json(200, JIRA_SITES[site].get("searches", []))
         if site in JIRA_SITES and self.path.startswith(f"/{site}/rest/api/3/"):
             return self._jira(urlparse(self.path), JIRA_SITES[site])
-        if self.path.startswith("/confluence/wiki/download/attachments/"):  # an attachment's bytes (Q7)
+        if site in CONFLUENCE_SITES and self.path.startswith(f"/{site}/wiki/download/attachments/"):  # an attachment's bytes (Q7)
             import base64
             if self.headers.get("Authorization") != "Basic " + base64.b64encode(CONFLUENCE_AUTH.encode()).decode():
                 return self._json(401, {"message": "Unauthorized"})
             aid = urlparse(self.path).path.rsplit("/", 1)[-1]
-            found = next((a for s in CONFLUENCE["spaces"].values() for kind in ("pages", "blogposts") for c in s.get(kind, [])
+            found = next((a for s in CONFLUENCE_SITES[site]["spaces"].values() for kind in ("pages", "blogposts") for c in s.get(kind, [])
                           for a in c.get("attachments", []) if isinstance(a, dict) and a.get("id") == aid), None)
             return self._bytes(found["text"].encode()) if found else self._json(404, {})
-        if self.path.startswith("/confluence/wiki/"):
-            return self._confluence(urlparse(self.path))
+        if site in CONFLUENCE_SITES and self.path.startswith(f"/{site}/wiki/"):
+            return self._confluence(urlparse(self.path), site)
         if self.path.startswith("/okta/api/v1/users"):
             if self.headers.get("Authorization") != f"SSWS {OKTA_TOKEN}":
                 return self._json(401, {"errorCode": "E0000011", "errorSummary": "Invalid token provided"})
@@ -690,15 +696,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _confluence(self, url):
+    def _confluence(self, url, site: str = "confluence"):
         import base64
         if self.headers.get("Authorization") != "Basic " + base64.b64encode(CONFLUENCE_AUTH.encode()).decode():
             return self._json(401, {"message": "Unauthorized"})
         params = parse_qs(url.query)
         q = {k: v[0] for k, v in params.items()}
-        rest = url.path[len("/confluence/wiki/"):]
+        rest, state = url.path[len(f"/{site}/wiki/"):], CONFLUENCE_SITES[site]
         parts = rest.split("/")
-        spaces, groups, users = CONFLUENCE["spaces"], CONFLUENCE["groups"], CONFLUENCE["users"]
+        spaces, groups, users = state["spaces"], state["groups"], state["users"]
         by_id = {str(s["id"]): (k, s) for k, s in spaces.items()}
         content = {str(c["id"]): c for s in spaces.values() for kind in ("pages", "blogposts") for c in s.get(kind, [])}
         person = lambda a: {"accountId": a, "accountType": "atlassian", "email": (users.get(a) or {}).get("email"),
@@ -717,7 +723,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[:3] == ["api", "v2", "spaces"] and parts[3] in by_id:
             key, s = by_id[parts[3]]
             if parts[4] in ("pages", "blogposts"):  # newest-modified first when asked (H6), and each listing recorded
-                CONFLUENCE.setdefault("listings", []).append({"space": key, "kind": parts[4], "sort": q.get("sort")})
+                state.setdefault("listings", []).append({"space": key, "kind": parts[4], "sort": q.get("sort")})
                 listed = s.get(parts[4], [])
                 if q.get("sort") == "-modified-date":
                     listed = sorted(listed, key=lambda c: c.get("modified", "2026-01-01T00:00:00.000Z"), reverse=True)
@@ -797,12 +803,12 @@ class Handler(BaseHTTPRequestHandler):
             return page_of(spec.get("blocks") or spec.get("children") or [])
         self._json(404, {"object": "error", "code": "invalid_request_url"})
 
-    def _slack(self, url):
+    def _slack(self, url, state: dict = SLACK):
         """The Web API methods the connector calls, at Slack's own paths, each answering as Slack does."""
         if self.headers.get("Authorization") != f"Bearer {SLACK_TOKEN}":
             return self._json(200, {"ok": False, "error": "invalid_auth"})
-        method, q = url.path[len("/slack/api/"):], {k: v[0] for k, v in parse_qs(url.query).items()}
-        team, channels = SLACK["team"], SLACK["channels"]
+        method, q = url.path.split("/api/", 1)[1], {k: v[0] for k, v in parse_qs(url.query).items()}
+        team, channels = state["team"], state["channels"]
         start = int((q.get("cursor") or "c:0")[2:])
 
         def page(key, items, **more):
@@ -817,7 +823,7 @@ class Handler(BaseHTTPRequestHandler):
             return page("channels", [{"id": cid, "name": c["name"], "is_private": c.get("private", False), "is_member": c.get("bot_member", True),
                                       "is_ext_shared": c.get("shared", False), "is_shared": c.get("shared", False)} for cid, c in channels.items()])
         if method == "users.list":
-            return page("members", SLACK["users"])
+            return page("members", state["users"])
         if channel is None:
             return self._json(200, {"ok": False, "error": "channel_not_found"})
         if method == "conversations.info":
@@ -829,8 +835,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "conversations.members":
             return page("members", channel.get("members", []))
         if method == "conversations.history":
-            if SLACK.get("throttle"):
-                SLACK["throttle"] = False
+            if state.get("throttle"):
+                state["throttle"] = False
                 self.send_response(429)
                 self.send_header("Retry-After", "1")
                 self.send_header("Content-Length", "0")
@@ -838,7 +844,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             oldest = float(q.get("oldest") or 0)
             if q.get("cursor") is None:
-                SLACK.setdefault("history_calls", []).append({"channel": q.get("channel"), "oldest": oldest})  # H6
+                state.setdefault("history_calls", []).append({"channel": q.get("channel"), "oldest": oldest})  # H6
             top = sorted((m for m in channel.get("messages", []) if float(m["ts"]) > oldest), key=lambda m: -float(m["ts"]))
             return page("messages", [{k: v for k, v in m.items() if k != "replies"} for m in top], has_more=False)
         if method == "conversations.replies":
@@ -1079,10 +1085,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if path.startswith("/notion/v1/"):
             return self._notion("POST", urlparse(self.path), self._body())
-        if path == "/slack/setup":  # smoke sets the fake Slack workspace's people and channels
-            body = self._body()
-            SLACK.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle")),
-                          "history_calls": SLACK.get("history_calls", [])})
+        if path.endswith("/setup") and path.split("/")[1] in SLACK_SITES:  # a fake Slack workspace's people and channels
+            body, state = self._body(), SLACK_SITES[path.split("/")[1]]
+            state.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle")),
+                          "history_calls": state.get("history_calls", [])})
             return self._json(200, {})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))
@@ -1126,12 +1132,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/okta/setup":  # smoke sets the fake Okta's users
             OKTA["users"] = self._body()["users"]
             return self._json(200, {})
-        if path == "/confluence/setup":  # smoke sets the fake Confluence's spaces, pages, groups, and people
-            listings = CONFLUENCE.get("listings", [])
-            CONFLUENCE.clear()
-            CONFLUENCE.update({"spaces": {}, "groups": {}, "users": {}, **self._body(), "listings": listings})
+        if path.endswith("/setup") and path.split("/")[1] in CONFLUENCE_SITES:  # a fake Confluence site's spaces, pages, groups, and people
+            state = CONFLUENCE_SITES[path.split("/")[1]]
+            listings = state.get("listings", [])
+            state.clear()
+            state.update({"spaces": {}, "groups": {}, "users": {}, **self._body(), "listings": listings})
             return self._json(200, {})
-        if path in ("/jira/setup", "/jira-b/setup"):  # smoke sets a fake Jira site's projects, issues, and who may see each
+        if path.endswith("/setup") and path.split("/")[1] in JIRA_SITES:  # a fake Jira site's projects, issues, and who may see each
             site = JIRA_SITES[path.split("/")[1]]
             site.clear()
             site.update({"projects": {}, **self._body()})

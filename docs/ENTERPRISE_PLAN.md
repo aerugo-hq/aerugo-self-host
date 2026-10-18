@@ -252,7 +252,7 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 - [ ] **F6.** Lifecycle: review cadences, staleness, effective dates, retirement; owners told.
 - [ ] **F7.** Question sets per team, a baseline, CI holding to it.
 - [ ] **F8.** Context: the person's team, role, and location from the directory, used by every answer.
-- [ ] **F9.** The synthetic retailer: the generator, its truth, its fakes for every capture source; `make company`.
+- [x] **F9.** The synthetic retailer: the generator, its truth, its fakes for every capture source; `make company`.
 - [ ] **F10.** The Atlas (`ORG_INTELLIGENCE_PLAN` O1 and O2): the systems graph and its synthetic enterprise.
 - [ ] **F11.** Storage modes: index, pointer, and live only, per source; pointer mode fetching passages live with the
       asker's permission and keeping no text anywhere (smoke proves nothing of a pointer-mode source's text is in the
