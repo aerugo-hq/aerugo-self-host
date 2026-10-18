@@ -1300,8 +1300,17 @@ def teams_and_members_without_sql():
 
 
 @check
+def everyone_signed_in_reads_what_a_source_shares_with_the_whole_company():
+    """The org's people: signing in makes someone a member of the org, so a document a source shares with the whole company reaches them: nora, on no team, finds the seed's handbook (readable by org:acme) and nothing else of the seed's; a service account never becomes one (the service accounts' check says so)"""
+    from .authz import fga
+    found = search_ids("nora")
+    assert found == {"handbook"}, f"nora, signed in, should find the handbook the whole company may read, and nothing else: {sorted(found)}"
+    assert fga.read({"user": "user:nora", "relation": "member", "object": "org:acme"}), "signing in didn't make nora a member of the org"
+
+
+@check
 def a_pilot_lets_in_only_onboarded_teams():
-    """G4, onboarding a team at a time: with admission `teams` (a pilot), someone on no team is refused by the API and the MCP server alike, and whoami tells them only that they aren't in; a team member and an org admin get in; only an org admin changes it; giving a team to the group the identity provider puts them in lets them in at once (their token's groups reach OpenFGA), and taking it away shuts them out again; with admission `org`, everyone signed in gets in, as before"""
+    """G4, onboarding a team at a time: with admission `teams` (a pilot), someone on no team is refused by the API and the MCP server alike, even as a member of the org whose commons is granted to everyone, and whoami tells them only that they aren't in; a team member and an org admin get in; only an org admin changes it; giving a team to the group the identity provider puts them in lets them in at once (their token's groups reach OpenFGA), and taking it away shuts them out again; with admission `org`, everyone signed in gets in, as before"""
     import uuid
     from . import admission as admission_mode
     from .authz import fga
@@ -1318,6 +1327,8 @@ def a_pilot_lets_in_only_onboarded_teams():
     try:
         assert admission("teams", "alice") == 403, "a team admin changed who gets in"
         assert admission("everyone") == 422, "an unknown mode was accepted"
+        assert search("nora").status_code == 200, "admission is org, yet nora was refused"  # she signs in: a member of the org
+        assert fga.read({"user": "user:nora", "relation": "member", "object": "org:acme"}), "signing in didn't make nora a member of the org"
         assert admission("teams") == 200
         assert api("GET", "/v1/admin/admission", "olivia").json()["mode"] == "teams"
         time.sleep(admission_mode.MODE_SECONDS + 2)  # every process, the API's and the MCP server's, has read the new mode
@@ -1337,7 +1348,7 @@ def a_pilot_lets_in_only_onboarded_teams():
         assert api("PUT", f"/v1/workspaces/{ws}/members", "olivia", json={"principal": "group:pilot", "role": "member"}).status_code == 200
         assert search("nora").status_code == 200, "a member of an onboarded team's group was refused"
         assert fga.read({"user": "user:nora", "relation": "member", "object": "group:pilot"}), "her token's group never reached OpenFGA"
-        assert api("GET", "/v1/whoami", "nora").json()["workspaces"] == [ws]
+        assert ws in api("GET", "/v1/whoami", "nora").json()["workspaces"], "her group's team isn't among her teams"  # beside commons, the whole org's
         assert api("DELETE", f"/v1/workspaces/{ws}/members", "olivia", params={"principal": "group:pilot", "role": "member"}).status_code == 200
         wait(lambda: search("nora").status_code == 403, 75, "taking the team away didn't shut her out again")
 
@@ -6626,6 +6637,7 @@ def service_accounts_act_only_once_registered_and_only_as_granted():
         assert svc("GET", "/v1/usage").status_code == 200, "an org-admin service account couldn't do what org admins do"
         docs = svc("GET", "/v1/documents")
         assert docs.status_code == 200 and docs.json()["documents"] == [], "a service account read documents nobody granted it"
+        assert not fga.read({"user": user, "relation": "member", "object": "org:acme"}), "a service account became a member of the org"
         r = api("PATCH", f"/v1/service-accounts/{TERRAFORM_CLIENT}", "olivia", json={"org_admin": False})
         assert r.status_code == 200 and r.json()["org_admin"] is False
         assert svc("GET", "/v1/usage").status_code == 403, "org admin outlived its removal"
