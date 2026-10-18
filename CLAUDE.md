@@ -1005,12 +1005,22 @@ manifests and the GCP overlay carry the same digests, kept in step by hand. Left
 development tools (Ollama, whose version is a setting, and the observability stack `make obs` starts). Red first:
 against `main`'s files the check listed 15 unpinned references and failed; green on L1's. Proof: every pinned image
 built from exactly its digest (the build log names each `FROM ...@sha256`), the three service images and Caddy pulled
-by digest; the full loop is CI's run on the pull request.
+by digest; the full loop is CI's run on the pull request. CI on pull request 37: the pin check passed; unit 64
+passed; smoke 169 passed, 17 skipped, 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario at its
+baseline (Recall@10 85%, MRR 0.78); no leak and no regression.
+L4 (Slack Enterprise Grid, documented). `docs/connectors/slack.md` now says what a channel shared between sibling
+workspaces of a Grid org reaches: a connection is one workspace's bot, and only that workspace's own members read a
+channel (`slack.readers_of`: a member's team must be the connected workspace's, and a shared channel never reaches the
+whole org), so members of the sibling workspaces get no access to it through Aerugo. That fails closed, by design:
+Aerugo can't tell a sibling workspace from another company's. And connecting each sibling workspace doesn't open it,
+since a channel is indexed once, by the first connection that reads it (connections own their documents, migration
+0040). Documentation only: checked against the code it describes; no test, since no behavior changed. Not built:
+Grid org-level apps, which would see every workspace's members.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), and L1 are done; next, L2 to L4; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, and L4 are done; next, L2 and L3; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
