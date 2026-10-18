@@ -26,6 +26,9 @@ jobs:
       - name: The Python and TypeScript clients' tests
         run: make sdk-test
 
+      - name: The web app's unit tests (L3)
+        run: make test-web
+
   smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 40

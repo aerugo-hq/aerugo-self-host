@@ -19,6 +19,9 @@ up: env
 pins:   # L1: every image Aerugo ships is pinned by digest
 >sh scripts/check-pinned-images.sh
 
+test-web:   # L3: the web app's unit tests, on Node's built-in runner (no dependencies)
+>docker compose --profile tools run --rm lock-web node --test "lib/*.test.mjs"
+
 unit:
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm --no-deps smoke python -m pytest -q -p no:cacheprovider tests
