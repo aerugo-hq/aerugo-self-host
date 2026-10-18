@@ -298,7 +298,7 @@ services:
   web: &web
     build: ./services/web
     profiles: ["web"]
-    environment:
+    environment: &web-env
       KL_API_URL: http://api:8000
       KL_WEB_URL: http://localhost:3000   # must match the kl-web redirect URI in deploy/keycloak/realm-acme.json
       KL_OIDC_PUBLIC_ISSUER: http://localhost:${KL_KEYCLOAK_PORT:-8081}/realms/acme
@@ -319,6 +319,15 @@ services:
     <<: *web
     profiles: ["e2e"]
     ports: []
+
+  # A third, for the browser tests only (M9): it gives the API a millisecond, so every call it makes runs out of time.
+  web-c:
+    <<: *web
+    profiles: ["e2e"]
+    ports: []
+    environment:
+      <<: *web-env
+      KL_WEB_API_TIMEOUT_SECONDS: "0.001"
 
   e2e:   # browser tests (slice D5): `make e2e` runs Chromium through the web app as people use it
     build: ./services/e2e

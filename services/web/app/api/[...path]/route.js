@@ -1,7 +1,7 @@
 // The browser calls /api/<path>; this server adds the signed-in user's token and calls the API's /v1/<path>.
 // Anonymous requests stop here with 401 and never reach the API.
 import { NextResponse } from "next/server";
-import { API_URL, SESSION_COOKIE, WEB_URL, accessToken } from "../../../lib/session.js";
+import { API_TIMEOUT_MS, API_URL, SESSION_COOKIE, WEB_URL, accessToken } from "../../../lib/session.js";
 
 export const dynamic = "force-dynamic";
 const MAX_UPLOAD = 51 * 1024 * 1024; // the API takes exports up to 50 MB; a form adds a little
@@ -37,28 +37,47 @@ async function forward(request, { params }) {
     return NextResponse.json({ detail: "sign-in is unavailable right now" }, { status: 503, headers: { "Retry-After": "5" } });
   }
   if (!token) return NextResponse.json({ detail: "not signed in" }, { status: 401 });
-  const init = { method: request.method, cache: "no-store", headers: { Authorization: `Bearer ${token}` } };
-  if (request.method !== "GET") {
+  // M9: the API gets API_TIMEOUT_MS to answer, body included, and a request's body passes through as it arrives,
+  // never held here whole: counted on the way and cut off past MAX_UPLOAD, whether or not its length was declared.
+  const init = { method: request.method, cache: "no-store", signal: AbortSignal.timeout(API_TIMEOUT_MS),
+                 headers: { Authorization: `Bearer ${token}` } };
+  let tooLarge = false;
+  if (request.method !== "GET" && request.body) {
+    if (Number(request.headers.get("content-length") || 0) > MAX_UPLOAD) return overLimit();
     const type = request.headers.get("content-type") || "";
-    if (type.startsWith("multipart/form-data")) {
-      // A file upload (an import): passed through byte for byte with its boundary, after a size check so an
-      // oversized file is refused before it's buffered.
-      if (Number(request.headers.get("content-length") || 0) > MAX_UPLOAD) {
-        return NextResponse.json({ detail: "the file is over 50 MB" }, { status: 413 });
-      }
-      init.body = await request.arrayBuffer();
-      init.headers["Content-Type"] = type;
-    } else {
-      init.body = await request.text();
-      init.headers["Content-Type"] = "application/json";
-    }
+    let seen = 0;
+    init.body = request.body.pipeThrough(new TransformStream({
+      transform(chunk, controller) {
+        seen += chunk.byteLength;
+        if (seen > MAX_UPLOAD) {
+          tooLarge = true;
+          controller.error(new Error("over the upload limit"));
+        } else {
+          controller.enqueue(chunk);
+        }
+      },
+    }));
+    init.duplex = "half"; // a streamed request body
+    // A file upload (an import) keeps its multipart boundary; anything else is the app's JSON.
+    init.headers["Content-Type"] = type.startsWith("multipart/form-data") ? type : "application/json";
   }
-  const r = await fetch(`${API_URL}/v1/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`, init);
-  return new NextResponse(await r.text(), {
-    status: r.status,
-    headers: { "Content-Type": r.headers.get("content-type") || "application/json", "Cache-Control": "no-store" },
-  });
+  try {
+    const r = await fetch(`${API_URL}/v1/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`, init);
+    return new NextResponse(await r.text(), {
+      status: r.status,
+      headers: { "Content-Type": r.headers.get("content-type") || "application/json", "Cache-Control": "no-store" },
+    });
+  } catch (e) {
+    if (tooLarge) return overLimit();
+    if (e.name === "TimeoutError") {
+      return NextResponse.json({ detail: "the platform didn't answer in time; try again" }, { status: 504 });
+    }
+    console.error(`the API couldn't be reached: ${e.name}`);
+    return NextResponse.json({ detail: "the platform couldn't be reached; try again" }, { status: 502 });
+  }
 }
+
+const overLimit = () => NextResponse.json({ detail: "the file is over 50 MB" }, { status: 413 });
 
 export const GET = forward;
 export const POST = forward;

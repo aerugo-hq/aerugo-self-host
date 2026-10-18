@@ -50,7 +50,7 @@ kind-down:
 # the web app, and a second web server (web-b, H3) built from the same code. Failures leave screenshots and traces
 # in services/e2e/results.
 e2e: env
->docker compose --profile web --profile e2e up -d --build web web-b
+>docker compose --profile web --profile e2e up -d --build web web-b web-c
 >docker compose --profile web --profile e2e build e2e
 >docker compose --profile web --profile e2e run --rm e2e
 
