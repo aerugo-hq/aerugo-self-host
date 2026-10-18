@@ -1,0 +1,109 @@
+"""Who gets in, and in which groups (G4).
+
+Groups: a person's groups come from their signed token (the identity provider's groups, through Keycloak), so the
+token is the truth for which groups they're in. OpenFGA has to hold it too, or a team granted to a group would refuse
+the group's members: each authenticated request makes OpenFGA's `user:<u> member group:<g>` tuples match the token,
+writing the groups joined and deleting the groups left, checked at most every SYNC_SECONDS for an unchanged set. A
+person leaving a group in the identity provider loses it at their next token.
+
+Admission: an org admin chooses `org` (anyone signed in, as before) or `teams` (a pilot: only members of an onboarded
+team, in any role, and org admins), read through kl.admission_mode (migration 0056). Service accounts always pass: an
+org admin registers each one.
+
+Both fail closed: when OpenFGA or Postgres can't answer, the request gets a 503, never an admission or a skipped
+removal. Nothing here grants a document; it only narrows who gets in and keeps group membership current."""
+import logging
+import time
+
+import httpx
+import psycopg
+from fastapi import HTTPException
+
+from . import config
+from .auth import Caller
+from .authz import fga
+
+log = logging.getLogger("kl.admission")
+SYNC_SECONDS = 300      # an unchanged set of groups is compared with OpenFGA at most this often
+MODE_SECONDS = 30       # how long a process trusts the mode it read; one that changes it forgets at once
+ADMITTED_SECONDS = 60   # how long an admission holds; a refusal is never kept, so onboarding takes effect at once
+CACHE_LIMIT = 10_000    # ponytail: each cache is emptied whole when full; an LRU if a deployment outgrows it
+_synced: dict[str, tuple[frozenset[str], float]] = {}
+_admitted: dict[str, float] = {}
+_mode: tuple[str, float] = ("org", 0.0)
+
+
+def _remember(cache: dict, key: str, value) -> None:
+    if len(cache) >= CACHE_LIMIT:
+        cache.clear()
+    cache[key] = value
+
+
+def group_changes(user: str, held: set[str], token_groups: set[str]) -> tuple[set, set]:
+    """The tuples to write and to delete so OpenFGA holds exactly the token's groups for this user (`held`: the groups
+    OpenFGA has them in now)."""
+    member = lambda group: (user, "member", f"group:{group}")
+    return {member(g) for g in token_groups - held}, {member(g) for g in held - token_groups}
+
+
+def sync_groups(caller: Caller) -> None:
+    if caller.service:  # an automation account's grants are its own, never a group's
+        return
+    groups = frozenset(caller.groups)
+    seen = _synced.get(caller.fga_user)
+    if seen and seen[0] == groups and seen[1] > time.monotonic():
+        return
+    held = {t["object"].split(":", 1)[1] for t in fga.read({"user": caller.fga_user, "relation": "member", "object": "group:"})}
+    writes, deletes = group_changes(caller.fga_user, held, set(groups))
+    if writes or deletes:
+        fga.write(writes=writes, deletes=deletes)
+        _admitted.pop(caller.fga_user, None)  # their teams may have changed with their groups
+        log.info("a person's groups now match their token: %d joined, %d left", len(writes), len(deletes))
+    _remember(_synced, caller.fga_user, (groups, time.monotonic() + SYNC_SECONDS))
+
+
+def mode() -> str:
+    global _mode
+    if _mode[1] <= time.monotonic():
+        from .db import connect  # here, so the MCP server reaches the database only when it authenticates someone
+        with connect() as conn:
+            row = conn.execute("SELECT kl.admission_mode(%s) AS mode", (config.ORG_SLUG,)).fetchone()
+        _mode = (row["mode"], time.monotonic() + MODE_SECONDS)
+    return _mode[0]
+
+
+def forget_mode() -> None:
+    """This process just changed the mode: read it again on the next request. Other processes see it within MODE_SECONDS."""
+    global _mode
+    _mode = ("org", 0.0)
+
+
+def admitted(caller: Caller) -> bool:
+    if caller.service or mode() == "org":
+        return True
+    until = _admitted.get(caller.fga_user)
+    if until and until > time.monotonic():
+        return True
+    ok = (bool(fga.list_objects(caller.fga_user, "member", "workspace"))     # any team role: admins and curators are members
+          or bool(fga.list_objects(caller.fga_user, "auditor", "workspace"))
+          or fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}"))
+    if ok:
+        _remember(_admitted, caller.fga_user, time.monotonic() + ADMITTED_SECONDS)
+    return ok
+
+
+def unavailable(e: Exception) -> HTTPException:
+    log.warning("who gets in couldn't be checked (%s)", type(e).__name__)
+    return HTTPException(503, "sign-in can't be checked right now; try again shortly", headers={"Retry-After": "5"})
+
+
+def admit(caller: Caller) -> Caller:
+    """Bring the caller's groups up to date, then refuse anyone the org's admission leaves out (403)."""
+    try:
+        sync_groups(caller)
+        ok = admitted(caller)
+    except (httpx.HTTPError, psycopg.Error, RuntimeError) as e:
+        raise unavailable(e)
+    if not ok:
+        raise HTTPException(403, "your team isn't onboarded to Aerugo yet: ask your Aerugo administrator")
+    return caller

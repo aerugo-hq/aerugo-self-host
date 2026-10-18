@@ -18,6 +18,7 @@ from pydantic import AnyHttpUrl, ValidationError
 
 from . import config
 from . import main as api
+from .admission import admit
 from .auth import caller_from_claims, decode_token
 
 AUDIENCE = os.environ.get("KL_MCP_AUDIENCE", "kl-mcp")
@@ -64,9 +65,10 @@ def _token() -> str:
 
 
 def _as_caller(raw: str, fn):
-    """Run fn(caller) for the token's user; API refusals become tool errors with the same messages."""
+    """Run fn(caller) for the token's user, once the org's admission lets them in (G4); API refusals become tool errors
+    with the same messages."""
     try:
-        return fn(caller_from_claims(decode_token(raw, AUDIENCE), config.ORG_SLUG))
+        return fn(admit(caller_from_claims(decode_token(raw, AUDIENCE), config.ORG_SLUG)))
     except HTTPException as e:
         raise ValueError(e.detail if isinstance(e.detail, str) else "request refused")
 

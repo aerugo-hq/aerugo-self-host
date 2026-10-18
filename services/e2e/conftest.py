@@ -15,7 +15,7 @@ import pytest
 
 WEB = "http://localhost:3000"
 KEYCLOAK_PORT = int(os.environ.get("KL_KEYCLOAK_PORT", "8081"))
-PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "olivia")}
+PASSWORDS = {u: f"{u}-dev-only" for u in ("alice", "bob", "carol", "dave", "olivia", "nora")}
 WEB_B = "http://localhost:3001"  # a second web server beside the first (H3): a session must live in neither alone
 WEB_C = "http://localhost:3002"  # a third, whose calls to the API run out of time at once (M9)
 FORWARDS = {3000: (os.environ.get("KL_E2E_WEB", "web"), 3000),
@@ -83,11 +83,13 @@ def _forwarded_and_ready():
             time.sleep(2)
 
 
-def sign_in(page, user: str) -> None:
-    """Sign in as a person does: the app sends the browser to Keycloak, which sends it back signed in."""
+def sign_in(page, user: str, admitted: bool = True) -> None:
+    """Sign in as a person does: the app sends the browser to Keycloak, which sends it back signed in. Someone the org's
+    admission leaves out (G4) lands on the page saying so, without the app's navigation."""
     page.goto(f"{WEB}/auth/login")
     page.locator("#username").fill(user)
     page.locator("#password").fill(PASSWORDS[user])
     page.locator("#kc-login").click()
     page.wait_for_url(f"{WEB}/**", timeout=60_000)
-    page.get_by_role("link", name="Map", exact=True).wait_for(timeout=60_000)  # exact: Home also offers "Open the map"
+    if admitted:
+        page.get_by_role("link", name="Map", exact=True).wait_for(timeout=60_000)  # exact: Home also offers "Open the map"

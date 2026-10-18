@@ -262,6 +262,28 @@ def test_an_upload_past_the_limit_is_cut_off_without_being_held_whole(page):
     assert answer.status == 413 and detail == "the file is over 50 MB", f"{answer.status} {detail}"
 
 
+def test_during_a_pilot_someone_on_no_team_sees_why_and_nothing_else(page, browser):
+    admin = browser.new_page()  # olivia, the org admin, in a browser of her own
+    sign_in(admin, "olivia")
+    mode = lambda value: admin.request.put(f"{WEB}/api/admin/admission", headers={"Origin": WEB}, data={"mode": value})
+    try:
+        assert mode("teams").status == 200  # G4: a pilot; nora is on no team
+        sign_in(page, "nora", admitted=False)
+        notice = page.get_by_text("Your team isn't on Aerugo yet")
+        for _ in range(20):  # each API process reads the mode within half a minute
+            if notice.is_visible():
+                break
+            page.wait_for_timeout(2000)
+            page.reload()
+        expect(notice).to_be_visible()
+        expect(page.get_by_text("You're signed in as nora")).to_be_visible()
+        expect(page.get_by_role("link", name="Map", exact=True)).to_have_count(0)  # none of the app's navigation
+        expect(page.get_by_role("link", name="Sign out")).to_be_visible()
+    finally:
+        assert mode("org").status == 200
+        admin.close()
+
+
 def test_every_page_carries_a_content_security_policy_with_a_fresh_nonce(page):
     policies = [page.request.get(f"{WEB}/").headers.get("content-security-policy", "") for _ in range(2)]  # M1
     nonces = [re.search(r"'nonce-([A-Za-z0-9+/=]+)'", p) for p in policies]
