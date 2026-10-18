@@ -1015,12 +1015,27 @@ whole org), so members of the sibling workspaces get no access to it through Aer
 Aerugo can't tell a sibling workspace from another company's. And connecting each sibling workspace doesn't open it,
 since a channel is indexed once, by the first connection that reads it (connections own their documents, migration
 0040). Documentation only: checked against the code it describes; no test, since no behavior changed. Not built:
-Grid org-level apps, which would see every workspace's members.
+Grid org-level apps, which would see every workspace's members. CI on pull request 51: unit 64 passed; smoke 169 passed,
+17 skipped, 0 failed; the golden set and the scenario at their baselines; no leak and no regression.
+L2 (the web app's lint in CI). Builds skipped ESLint (`next.config.mjs`, `ignoreDuringBuilds`), so the web app was
+never linted. `make lint-web` runs ESLint with Next's rules (`eslint.config.mjs`, `next/core-web-vitals` through
+`FlatCompat`) in the npm tool image, `node_modules` kept out of the tree, and CI runs it beside the clients' tests.
+Errors fail it; warnings are held to today's 43 (`--max-warnings 43`), all `react-hooks/exhaustive-deps`, each a
+choice of when an effect runs, so they're left for whoever next changes that code (D0's redesign will) rather than
+changed blindly, which could make an effect loop; a new warning fails the run and the ceiling only comes down. The two
+config files that exported an anonymous value now name it. New dev dependencies, pinned in the lockfile: `eslint`
+9.39.5, `eslint-config-next` 15.5.27 (matching `next`; 15.5.28 was four days old), `@eslint/eslintrc` 3.3.7; the
+lockfile's 72 production packages are unchanged. They never ship: the web image is now two stages, a build with every
+package and a runtime with only the production ones and the built app (`next.config.mjs`, `public`, `.next`), so no
+development tool and no source is in what runs. Red first: a probe that calls a hook conditionally failed the lint
+(an error), and one adding a single missed dependency failed it too ("too many warnings (maximum: 43)"); green
+without them. Proof: the runtime image holds no `eslint` package, and `make e2e` 37 passed against it; the full loop is
+CI's run on the pull request. Not built: fixing the 43 warnings.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
-M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, and L4 are done; next, L2 and L3; then deployment (E in the build plan), then Q.
+M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, and L2 are done; next, L3; then deployment (E in the build plan), then Q.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
