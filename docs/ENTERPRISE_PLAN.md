@@ -245,7 +245,8 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 
 ### Foundation
 - [x] **F1.** Knowledge units, perspectives, and conflicts: the tables, row-level security from evidence, the API.
-- [ ] **F2.** Extraction: units proposed from documents, tickets, and threads, held to the claim checks.
+- [x] **F2.** Extraction: units proposed from documents, tickets, and threads, held to the claim checks. (Decided
+      2026-10-19: from pages and tickets; chat threads wait for C1 and C2's channel opt-in.)
 - [ ] **F3.** Consolidation: merging, superseding, contradiction detection, conflicts to owners.
 - [ ] **F4.** Answers from units first: scope, trust, freshness; procedures as checklists; contacts resolved; perspectives shown.
 - [ ] **F5.** The learning loop: feedback and corrections to owners; gaps from questions; routing to experts; answers kept with consent.
