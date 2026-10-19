@@ -499,7 +499,7 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
                 log.warning("reranker failed (%s); keeping fusion's order", type(e).__name__)
                 telemetry.set_attributes(s, failed=type(e).__name__)
     returned = returned[:limit]
-    with scoped(org_id, caller.principals) as conn:  # the hops from what passed, each page authorized on its own
+    with scoped(org_id, caller.principals, teams=sorted(member_of)) as conn:  # the hops from what passed, each page authorized on its own
         alerting.signal(conn, "withheld", "rerank", withheld)
         hubs = [r["external_key"] for r in returned if r.get("tier") in CURATED]
         if hubs and len(returned) < limit and not focus:
