@@ -32,6 +32,7 @@ from psycopg_pool import PoolTimeout
 from . import alerting, compiler, config, google_identity, imports, manifests, okf, originals, pipelines, telemetry
 from .auth import Caller, authenticate, signed_in
 from .authz import fga
+from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .connections_api import router as connections_router
 from .db import connect, resolve_org_id, scoped
 from .auth import SERVICE_PREFIX
@@ -68,6 +69,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="knowledge-layer API", version="0.1.0", lifespan=lifespan)
 app.include_router(connections_router)
+app.include_router(atlas_router)
 app.include_router(webhooks_router)
 app.include_router(hooks_router)
 
@@ -417,7 +419,7 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
         dropped.append(row["external_key"])
         log.warning("ACL drift: index allowed %s for %s, authz engine denied", row["external_key"], caller.username)
 
-    with scoped(org_id, caller.principals) as conn:  # the channels and the post-check
+    with scoped(org_id, caller.principals, teams=sorted(member_of)) as conn:  # the channels and the post-check
         with telemetry.span("retrieve.lexical") as s:
             lexical = sorted(conn.execute(SEARCH_SQL, {"q": q, "targets": targets}).fetchall(),
                              key=lambda r: r["rank"], reverse=True) if words else []
@@ -497,7 +499,7 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
                 log.warning("reranker failed (%s); keeping fusion's order", type(e).__name__)
                 telemetry.set_attributes(s, failed=type(e).__name__)
     returned = returned[:limit]
-    with scoped(org_id, caller.principals) as conn:  # the hops from what passed, each page authorized on its own
+    with scoped(org_id, caller.principals, teams=sorted(member_of)) as conn:  # the hops from what passed, each page authorized on its own
         alerting.signal(conn, "withheld", "rerank", withheld)
         hubs = [r["external_key"] for r in returned if r.get("tier") in CURATED]
         if hubs and len(returned) < limit and not focus:
@@ -2881,27 +2883,20 @@ def push_lineage(ws: str, body: LineageIn, caller: Caller = Depends(authenticate
     require_workspace_admin(caller, ws)
     org_id = resolve_org_id(config.ORG_SLUG)
     edges = 0
-    with scoped(org_id, caller.principals) as conn:
-        team = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:  # the Atlas records only for a team its transaction names
+        team = conn.execute("SELECT id::text AS id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
         if not team:
             raise HTTPException(404, "workspace not found")
+        asset = lambda kind, node: atlas_record(conn, kind, node.namespace, node.name, "observed", "lineage", team["id"])  # noqa: E731
 
-        def asset(kind: str, node: LineageNode):
-            return conn.execute(
-                """INSERT INTO assets (org_id, workspace_id, kind, namespace, name) VALUES (%s, %s, %s, %s, %s)
-                   ON CONFLICT (workspace_id, kind, namespace, name) DO UPDATE SET last_seen = now() RETURNING id""",
-                (org_id, team["id"], kind, node.namespace, node.name)).fetchone()["id"]
-
-        def link(source, target) -> int:
-            conn.execute("""INSERT INTO lineage_edges (org_id, workspace_id, source_id, target_id) VALUES (%s, %s, %s, %s)
-                            ON CONFLICT (source_id, target_id) DO UPDATE SET last_seen = now()""",
-                         (org_id, team["id"], source, target))
+        def link(source, target, kinds) -> int:
+            atlas_connect(conn, source, target, "observed", "lineage", team["id"], kinds)
             return 1
 
         for event in body.events:
             job = asset("job", event.job)
-            edges += sum(link(asset("dataset", d), job) for d in event.inputs)
-            edges += sum(link(job, asset("dataset", d)) for d in event.outputs)
+            edges += sum(link(asset("dataset", d), job, ("dataset", "job")) for d in event.inputs)
+            edges += sum(link(job, asset("dataset", d), ("job", "dataset")) for d in event.outputs)
         audit(conn, org_id, caller.username, "lineage.push", [ws], {"events": len(body.events), "edges": edges})
     return {"events": len(body.events), "edges": edges}
 
@@ -2946,8 +2941,9 @@ def lineage_impact(namespace: str = Query(min_length=1, max_length=200), name: s
     lineage from teams the caller is on, so it can't pass through, or reveal, another team's pipeline. An asset the
     caller can't see is a 404, like any other hidden thing."""
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
-        nodes, edges = visible_lineage(conn, sorted(memberships(caller)))
+    mine = sorted(memberships(caller))
+    with scoped(org_id, caller.principals, teams=mine) as conn:
+        nodes, edges = visible_lineage(conn, mine)
         start = asset_id(kind, namespace, name)
         if start in nodes:
             downstream, frontier, hops = {}, [start], 0
@@ -3626,7 +3622,7 @@ def knowledge_map(scope: str = "org", as_of: str | None = None, limit: int = Que
             raise HTTPException(422, "as_of must be an ISO 8601 timestamp")
         when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with scoped(org_id, caller.principals, teams=sorted(memberships(caller))) as conn:  # lineage needs the teams (F10a)
         targets = resolve_targets(conn, caller, scope)
         rows = conn.execute(GRAPH_NODES_SQL, {"targets": targets, "limit": limit}).fetchall()
         # One authorization query for the whole map instead of a check per node. OpenFGA caps list results

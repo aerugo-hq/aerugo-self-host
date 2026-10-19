@@ -297,7 +297,7 @@ Phase 0 comes first: the platform must be sound before it's widened. Then each i
       incremental syncs); H4 (the claim checker). Proven, and recorded.
 
 ### Phase 1: the foundation
-- [ ] **O1.** The Atlas: the data model (section 5) with row-level security from evidence; `assets` and
+- [x] **O1.** The Atlas: the data model (section 5) with row-level security from evidence; `assets` and
       `lineage_edges` moved in (views kept); `atlas/` queries (find, path, impact, neighbors) with depth and fan-out
       limits; an API for them; smoke: a stranger sees no node or edge whose evidence they can't see.
 - [ ] **O2.** The synthetic enterprise: the generator, its ground truth, and fakes serving it; a `make enterprise`

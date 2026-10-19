@@ -3867,8 +3867,10 @@ def team_rows_stay_in_their_team_and_the_change_feed_keeps_ninety_days():
     with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
         team_id = conn.execute("INSERT INTO kl.workspaces (org_id, slug, name, discoverability) VALUES (%s, %s, 'P1 test', 'private') "
                                "RETURNING id", (org, team)).fetchone()["id"]
-        asset = conn.execute("INSERT INTO kl.assets (org_id, workspace_id, kind, namespace, name) VALUES (%s, %s, 'dataset', 'edw', %s) "
-                             "RETURNING id", (org, team_id, f"P1_{tag}")).fetchone()["id"]
+        asset = conn.execute("INSERT INTO kl.atlas_nodes (org_id, kind, namespace, name) VALUES (%s, 'dataset', 'edw', %s) "
+                             "RETURNING id", (org, f"P1_{tag}")).fetchone()["id"]
+        conn.execute("INSERT INTO kl.atlas_evidence (org_id, node_id, tier, source, team_id) VALUES (%s, %s, 'observed', 'smoke', %s)",
+                     (org, asset, team_id))  # the team's report: the team's purge takes it, and the node with it
         conn.execute("INSERT INTO kl.asset_owners (org_id, workspace_id, asset_id, email, source) VALUES (%s, %s, %s, 'owner@acme.test', %s)",
                      (org, team_id, asset, f"smoke-{tag}"))
         doc = conn.execute("INSERT INTO kl.documents (org_id, source_kind, source_uri, source_version, external_key, title, content_hash, "
@@ -5811,7 +5813,7 @@ def search_follows_lineage_only_through_the_askers_teams():
             fga.write(deletes=doomed)
         with psycopg.connect(OWNER_DB) as conn:
             conn.execute("DELETE FROM kl.documents WHERE external_key = ANY(%s)", (list(pages),))
-            conn.execute("DELETE FROM kl.assets WHERE namespace = 'q4' AND name LIKE %s", (f"%{tag}",))
+            conn.execute("DELETE FROM kl.atlas_nodes WHERE namespace = 'q4' AND name LIKE %s", (f"%{tag}",))
 
 
 @check
@@ -5896,6 +5898,94 @@ def a_team_exports_its_curated_pages_as_an_okf_repository():
 
 
 @check
+def the_atlas_shows_each_node_and_edge_only_to_who_may_see_its_evidence():
+    """F10a, the Atlas: a team's lineage becomes nodes, edges, and evidence shown only to that team's members; a node two teams report shows to both, each with only its own evidence and edges, so an edge one team reported never reaches the other, nor the node at its far end; a hidden node is a 404 to read, impact, and path, and find never counts it; the API records only for a team its transaction names and never chooses source readers, and can't write the tables at all; a team's purge takes the nodes only it reported"""
+    import uuid
+    from .authz import fga
+    tag, ns = uuid.uuid4().hex[:8], "atlas"
+    name = lambda what: f"{what}_{tag}"  # noqa: E731
+    event = lambda job, inp, out: {"job": {"namespace": ns, "name": name(job)}, "inputs": [{"namespace": ns, "name": name(inp)}],  # noqa: E731
+                                   "outputs": [{"namespace": ns, "name": name(out)}]}
+    find = lambda user: {n["name"]: n["id"] for n in api("GET", "/v1/atlas/nodes", user, params={"q": tag}).json()["nodes"]}  # noqa: E731
+    temp = f"atlas-{tag}"
+    try:
+        assert api("POST", "/v1/workspaces/payments/lineage", "alice", json={"events": [event("LOAD", "src", "shared")]}).status_code == 200
+        assert api("POST", "/v1/workspaces/finance/lineage", "olivia", json={"events": [event("REPORT", "shared", "mart")]}).status_code == 200
+        alice, bob, carol = find("alice"), find("bob"), find("carol")
+        assert set(alice) == {name("LOAD"), name("src"), name("shared")}, f"payments' member should see payments' nodes: {sorted(alice)}"
+        assert set(bob) == {name("REPORT"), name("shared"), name("mart")}, f"finance's member should see finance's nodes: {sorted(bob)}"
+        assert len(carol) == 5, f"someone on both teams should see both teams' nodes: {sorted(carol)}"
+        assert find("dave") == {}, "someone on neither team found a node"
+        shared, src, mart = carol[name("shared")], carol[name("src")], carol[name("mart")]
+
+        def page(user, node):
+            r = api("GET", f"/v1/atlas/nodes/{node}", user)
+            return r.json() if r.status_code == 200 else r.status_code
+        mine = page("bob", shared)
+        assert {e["node"]["name"] for e in mine["edges"]} == {name("REPORT")}, f"payments' edge reached finance: {mine['edges']}"
+        assert {x["team"] for x in mine["evidence"]} == {"finance"}, f"payments' evidence reached finance: {mine['evidence']}"
+        assert {e["node"]["name"] for e in page("alice", shared)["edges"]} == {name("LOAD")}, "finance's edge reached payments"
+        assert {e["node"]["name"] for e in page("carol", shared)["edges"]} == {name("LOAD"), name("REPORT")}
+        assert page("bob", src) == 404 and page("dave", shared) == 404, "a hidden node was shown"
+        assert page("bob", "not-a-node") == 404
+
+        def impact(user, node, depth=6):
+            r = api("GET", "/v1/atlas/impact", user, params={"node": node, "depth": depth})
+            return [(n["name"], n["hops"]) for n in r.json()["downstream"]] if r.status_code == 200 else r.status_code
+        assert impact("alice", src) == [(name("LOAD"), 1), (name("shared"), 2)], "the walk went through finance's lineage"
+        assert impact("carol", src) == [(name("LOAD"), 1), (name("shared"), 2), (name("REPORT"), 3), (name("mart"), 4)]
+        assert impact("carol", src, 2) == [(name("LOAD"), 1), (name("shared"), 2)], "the walk went past its depth"
+        assert impact("bob", src) == 404, "a hidden node's impact was answered"
+
+        def path(user, a, b):
+            r = api("GET", "/v1/atlas/path", user, params={"from": a, "to": b})
+            return [(e["src"]["name"], e["dst"]["name"]) for e in r.json()["edges"]] if r.status_code == 200 else r.status_code
+        assert path("carol", src, mart) == [(name("src"), name("LOAD")), (name("LOAD"), name("shared")),
+                                            (name("shared"), name("REPORT")), (name("REPORT"), name("mart"))]
+        assert path("bob", src, mart) == 404 and path("alice", src, mart) == 404, "a path reached a hidden end"
+        assert path("bob", shared, mart) == [(name("shared"), name("REPORT")), (name("REPORT"), name("mart"))]
+
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            org = str(conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()["id"])
+            teams = {r["slug"]: str(r["id"]) for r in conn.execute("SELECT id, slug FROM kl.workspaces WHERE slug IN ('payments', 'finance')")}
+
+        def records(team, readers=()):
+            with psycopg.connect(APP_DB) as conn:  # as the API: alice's transaction, naming payments
+                conn.execute("SELECT set_config('kl.org_id', %s, false), set_config('kl.principals', 'user:alice,org:acme', false), "
+                             "set_config('kl.teams', 'payments', false)", (org,))
+                try:
+                    conn.execute("SELECT kl.atlas_node('dataset', %s, %s, 'observed', 'smoke', %s, %s)", (ns, name("fence"), team, list(readers)))
+                    return True
+                except psycopg.Error:
+                    return False
+        assert not records(teams["finance"]), "the API recorded for a team its transaction doesn't name"
+        assert not records(teams["payments"], ["org:acme"]), "the API recorded with source readers of its choosing"
+        assert records(teams["payments"]), "the API couldn't record for the team its transaction names"
+        with psycopg.connect(APP_DB) as conn:
+            try:
+                conn.execute("INSERT INTO kl.atlas_nodes (org_id, kind, namespace, name) VALUES (%s, 'dataset', %s, %s)", (org, ns, name("direct")))
+                raise AssertionError("the API wrote the Atlas's tables directly")
+            except psycopg.errors.InsufficientPrivilege:
+                pass
+
+        assert api("POST", "/v1/workspaces", "olivia", json={"slug": temp, "name": "Atlas purge", "discoverability": "private"}).status_code == 201
+        assert api("POST", f"/v1/workspaces/{temp}/lineage", "olivia", json={"events": [event("ONLY", "shared", "only")]}).status_code == 200
+        doomed = {(t["user"], t["relation"], t["object"]) for t in fga.read({"object": f"workspace:{temp}"})}
+        if doomed:
+            fga.write(deletes=doomed)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.workspaces WHERE slug = %s", (temp,))
+            left = {r[0] for r in conn.execute("SELECT name FROM kl.atlas_nodes WHERE namespace = %s AND name LIKE %s", (ns, f"%{tag}"))}
+        assert name("only") not in left and name("ONLY") not in left, f"a purged team's nodes stayed: {sorted(left)}"
+        assert name("shared") in left, "a node another team still reports went with the purged team"
+        print(f"      atlas: 5 nodes, each team seeing its own 3; hidden nodes 404 to read, impact, and path; writes fenced; purge clean")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.atlas_nodes WHERE namespace = %s AND name LIKE %s", (ns, f"%{tag}"))
+            conn.execute("DELETE FROM kl.workspaces WHERE slug = %s", (temp,))
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid
@@ -5927,7 +6017,7 @@ def lineage_shows_only_to_its_own_team():
             assert api("GET", "/v1/lineage/impact", user, params=impact).status_code == 404, f"{user} walked another team's lineage"
     finally:
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
-            conn.execute("DELETE FROM kl.assets WHERE namespace = 'smoke' AND name LIKE %s", (f"%{tag}",))
+            conn.execute("DELETE FROM kl.atlas_nodes WHERE namespace = 'smoke' AND name LIKE %s", (f"%{tag}",))
 
 
 @check

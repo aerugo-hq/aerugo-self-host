@@ -12,6 +12,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
+from . import atlas
 from .markdown import parse as parse_markdown
 from .sync_github import team_for
 from .sync_items import Item, record_identities, sync_container
@@ -66,18 +67,16 @@ def sections_of(e: Entry) -> tuple[str, list[tuple[str | None, str]]]:
 
 def record_assets(conn, org_id, team, entries: list[Entry], lineage: list[tuple[tuple[str, str], tuple[str, str]]],
                   source: str) -> dict:
-    """The entries' assets, lineage, and owners for a team (K3's tables): upserted, their owners from this source
-    replaced. Assets aren't removed when an entry goes, as pushed lineage's aren't: their last_seen says when."""
+    """The entries' assets, lineage, and owners for a team, recorded in the Atlas as this source's declarations (F10a),
+    their owners from this source replaced. Nodes aren't removed when an entry goes, as pushed lineage's aren't: their
+    evidence's observed_at says when it was last declared."""
     ids: dict[tuple[str, str], str] = {}
 
     def asset(namespace: str, name: str) -> str | None:
         if not NAME.fullmatch(name) or not 1 <= len(namespace) <= 200:
             return None
         if (namespace, name) not in ids:
-            ids[(namespace, name)] = str(conn.execute(
-                """INSERT INTO assets (org_id, workspace_id, kind, namespace, name) VALUES (%s, %s, 'dataset', %s, %s)
-                   ON CONFLICT (workspace_id, kind, namespace, name) DO UPDATE SET last_seen = now() RETURNING id""",
-                (org_id, team, namespace, name)).fetchone()["id"])
+            ids[(namespace, name)] = atlas.record(conn, "dataset", namespace, name, "declared", source, str(team))
         return ids[(namespace, name)]
     edges = 0
     with conn.transaction():
@@ -86,8 +85,7 @@ def record_assets(conn, org_id, team, entries: list[Entry], lineage: list[tuple[
         for (sns, sname), (tns, tname) in lineage:
             s, t = asset(sns, sname), asset(tns, tname)
             if s and t and s != t:
-                conn.execute("""INSERT INTO lineage_edges (org_id, workspace_id, source_id, target_id) VALUES (%s, %s, %s, %s)
-                                ON CONFLICT (source_id, target_id) DO UPDATE SET last_seen = now()""", (org_id, team, s, t))
+                atlas.connect(conn, s, t, "declared", source, str(team), ("dataset", "dataset"))
                 edges += 1
         owned = [(ids[(e.namespace, e.name)], o) for e in entries if (e.namespace, e.name) in ids for o in e.owners]
         conn.execute("DELETE FROM asset_owners WHERE source = %s AND workspace_id = %s", (source, team))
