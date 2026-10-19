@@ -1270,16 +1270,61 @@ the optional web checks, whose web servers weren't recreated after that reset): 
 unchanged; the scenario Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24 of 25, no leak; the retailer
 Recall@10 100%, MRR 0.86 over 47 counted questions, Ask right for 24 of 24, everyone opening exactly what the truth
 says, no leak; the retailer run again against its new baseline: no regression. Not built: the keyword channel's
-all-words rule (F4, Q2), and a boost per tier (gold and silver count the same).
+all-words rule (F4, Q2), and a boost per tier (gold and silver count the same). CI on pull request 62: unit 90
+passed; smoke 171 passed, 17 skipped, 0 failed; the golden set, the scenario (Recall@10 94%, MRR 0.81), and the
+retailer (Recall@10 100%, MRR 0.87) at their new baselines, no leak, no regression.
+F10a, the Atlas (`docs/ORG_INTELLIGENCE_PLAN.md` O1; F10 split into the Atlas, then the synthetic enterprise, by
+decision 2026-10-18). Migration 0057: `atlas_nodes` (a dataset, job, table, repo, dashboard..., known by its kind,
+namespace, and name), `atlas_edges` (reads, writes, feeds, calls, and the plan's other kinds, in the direction data or
+control flows, with a confidence), and `atlas_evidence` (who said so: its tier, its source, where, the source's own
+readers, and the team that reported it, when one did). A node's or edge's readers are the union of its evidence's,
+kept by a trigger (`kl.atlas_follow_evidence`), which also removes one whose last evidence goes, so a team's purge
+takes the nodes only it reported and leaves the ones another team still reports. Row-level security shows a node to a
+reader of a source it came from or a member of a team that reported it (`kl.atlas_visible`: the transaction's
+principals, or `kl.current_teams()`, the teams the API checked in OpenFGA), and an edge only when both its ends are
+visible too, so no walk passes through, or reveals, a hidden node (invariant 15). Writes go only through
+`kl.atlas_node` and `kl.atlas_edge` (security definer): an upsert under row-level security that met another team's
+hidden node would fail, and in failing say the node exists. They let the API record only for a team its transaction
+names, never with source readers of its choosing, and the worker for its org (`kl.atlas_may_record`); the API can't
+write the tables at all. K3's lineage moved in: each asset row became a node (one per asset, however many teams
+reported it) with an evidence row per team (source `k3`), each lineage edge an edge (`reads` from a dataset into a
+job, `writes` from a job into a dataset, otherwise `feeds`), and `asset_owners` now names nodes; `assets` and
+`lineage_edges` are views of their old shape (a row per node and reporting team, under the caller's own row-level
+security), so the map, impact, search's lineage walk (Q4), and who to ask read them unchanged, and those three now
+name the caller's teams in their transaction. On the stack it ran on, 39 asset rows became 35 nodes (four datasets two
+teams both reported), 16 edges, and 55 evidence rows, and the views gave back exactly 39 and 16. The lineage push
+records through the functions (tier `observed`, source `lineage`), catalogs and manifests too (tier `declared`, their
+connection or pipeline as the source). `kl/atlas.py`: `GET /v1/atlas/nodes` (find, by namespace and name),
+`/v1/atlas/nodes/{id}` (a node, the evidence for it the caller may see, and its visible edges), `/v1/atlas/impact`
+(downstream, nearest first), and `/v1/atlas/path` (the fewest edges joining two nodes, either way along each), each in
+the caller's transaction with their teams, audited; a hidden node is a 404, and nothing counts what it left out.
+Walks are breadth first in Python (`walk`, `shortest_path`), at most six hops and 2,000 nodes, each hop one query of at
+most 5,000 edges, so a dense graph can't make one unbounded. Smoke:
+`the_atlas_shows_each_node_and_edge_only_to_who_may_see_its_evidence` (Payments and Finance each report lineage
+through one shared dataset: each team's member sees its own three nodes, someone on both sees five, someone on neither
+none; at the shared node each sees only its own edges and evidence; a hidden node is a 404 to read, impact, and path;
+impact and paths stop at the other team's edges; the API is refused recording for a team its transaction doesn't name
+or with readers it chose, and writing the tables directly; a purged team's nodes go, the shared one stays). Unit:
+`tests/test_atlas.py` (5: impact nearest first through a cycle, its depth and node limits, paths either way, no path
+past its depth, and a walk that never passes an edge it wasn't given). Red first: with the nodes' policy loosened to the
+org alone (K3's), the check failed (Payments' member saw Finance's nodes); with the policy restored, it passed. Found by
+the first full loop: retrieval runs its hops in a second transaction (H5: no model call inside one), which didn't name
+the caller's teams, so under the Atlas's row-level security search's lineage walk saw no lineage at all; Q4's check
+failed on the fresh stack (fail closed: nothing leaked), and passed once that transaction named them too. Proof on a fresh stack with CI's settings, at 8835bc6: `make pins` passed; `make unit` 95 passed; `make smoke` 174
+passed, 15 skipped, 0 failed (the web servers recreated first); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no
+regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24 of 25, no leak, no
+regression; `make eval-company` everyone opening exactly what the truth says, Recall@10 100%, MRR 0.85 over 47 counted
+questions, Ask right for 24 of 24, no leak, no regression; `make e2e` 38 passed; `make test-web` 7 passed. Not built: aliases (`atlas_aliases`, with O13's resolution, which fills them), usage, profiles, reviews,
+playbook runs, assessments, and change requests (each with its own item), the Atlas screen (O3), MCP tools for the
+Atlas (O17), and a node's `gone_at` (when an analyzer's source stops listing it, O4 on).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
-this file says: G4 (the pilot path) and F9 (the synthetic retailer) are done, recorded above; next, F10 (the Atlas, on
-the same retailer); the ranking fix F9 found (curated pages outranking the source that answers) is done, recorded
-above.
+this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, and F10a (the Atlas) are
+done, recorded above; next, F10b (the synthetic enterprise, on the same retailer).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
