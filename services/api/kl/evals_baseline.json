@@ -1,4 +1,64 @@
 {
+  "atlas": {
+    "by_source": {
+      "bigquery-jobs": [
+        0,
+        14
+      ],
+      "controlm": [
+        0,
+        73
+      ],
+      "datahub": [
+        18,
+        18
+      ],
+      "dbql": [
+        0,
+        18
+      ],
+      "dbt": [
+        14,
+        14
+      ],
+      "github": [
+        0,
+        57
+      ],
+      "lineage-edp": [
+        8,
+        8
+      ],
+      "lineage-edw": [
+        8,
+        8
+      ],
+      "looker": [
+        0,
+        2
+      ],
+      "microstrategy": [
+        0,
+        3
+      ]
+    },
+    "duplicates": [
+      "table:edw.inv_daily",
+      "table:edw.item",
+      "table:edw.sales_txn",
+      "table:edw.store"
+    ],
+    "edges": [
+      48,
+      175
+    ],
+    "nodes": [
+      43,
+      113
+    ],
+    "repos": 40,
+    "set": "atlas"
+  },
   "company": {
     "answers": {
       "allocation-fewer-units": true,
@@ -92,6 +152,11 @@
         "found": 1,
         "of": 1
       },
+      "first-wave": {
+        "first": 4,
+        "found": 1,
+        "of": 1
+      },
       "first-week": {
         "first": 1,
         "found": 1,
@@ -123,6 +188,11 @@
         "of": 1
       },
       "injury-what-to-do": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
+      "inv-daily-late": {
         "first": 1,
         "found": 1,
         "of": 1
@@ -264,7 +334,7 @@
       }
     },
     "k": 10,
-    "mrr": 0.8582,
+    "mrr": 0.8486,
     "recall": 1.0,
     "scenario": "company"
   },
