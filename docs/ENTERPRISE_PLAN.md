@@ -253,7 +253,7 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 - [ ] **F7.** Question sets per team, a baseline, CI holding to it.
 - [ ] **F8.** Context: the person's team, role, and location from the directory, used by every answer.
 - [x] **F9.** The synthetic retailer: the generator, its truth, its fakes for every capture source; `make company`.
-- [ ] **F10.** The Atlas (`ORG_INTELLIGENCE_PLAN` O1 and O2): the systems graph and its synthetic enterprise.
+- [x] **F10.** The Atlas (`ORG_INTELLIGENCE_PLAN` O1 and O2): the systems graph and its synthetic enterprise.
 - [ ] **F11.** Storage modes: index, pointer, and live only, per source; pointer mode fetching passages live with the
       asker's permission and keeping no text anywhere (smoke proves nothing of a pointer-mode source's text is in the
       database, a cache, a log, or a stored answer); the admin's choice shown per source; answer quality measured per mode.

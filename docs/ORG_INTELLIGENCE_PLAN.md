@@ -260,13 +260,16 @@ gets browser tests.
 
 ## 11. Evaluation: the synthetic enterprise, and seniors' questions
 
-- **The synthetic enterprise** (O2): a generator (`scripts/enterprise/`) that builds a realistic company with known
+- **The synthetic enterprise** (O2): a generator (`kl/enterprise.py`, on the synthetic retailer) that builds a realistic company with known
   answers: domains (inventory, orders, finance...), a few thousand repos (services, pipelines, libraries,
   infrastructure, some deprecated, some vendored), a Control-M export with folders, jobs, conditions, and scripts, a
   warehouse's schemas and query history (with heavy, light, and unused tables, and literals to be stripped), dbt
   projects, BI dashboards, docs and tickets that mention it all, owners, incidents, and the ground truth: every real
   edge, every system's members, every table's usage rank, the right migration waves. Its size is a parameter
-  (`--repos 2000`); its fakes serve it through the connectors (the fakes in `fake_llm.py`, or a sibling).
+  (`--repos 2000`); its fakes serve it through the connectors (the fakes in `fake_llm.py`, or a sibling). O2 built the
+  estate and all of its truth, and what the sources built so far send (OpenLineage, a dbt manifest, DataHub); each
+  later item renders its own source's fixtures (a Control-M export, query history, repositories, dashboards) from the
+  same truth, shaped by the vendor's current documentation, as section 2 says.
 - **Seniors' questions** (`kl/architect/eval/*.yaml`): per domain, a question, the facts a right answer contains, the
   evidence it must cite, what it must not reveal to whom, and the playbook it exercises. Graded automatically (facts
   present, evidence cited, nothing forbidden), and some by people. Held to a baseline, as `kl/evals.py` is.
@@ -300,7 +303,7 @@ Phase 0 comes first: the platform must be sound before it's widened. Then each i
 - [x] **O1.** The Atlas: the data model (section 5) with row-level security from evidence; `assets` and
       `lineage_edges` moved in (views kept); `atlas/` queries (find, path, impact, neighbors) with depth and fan-out
       limits; an API for them; smoke: a stranger sees no node or edge whose evidence they can't see.
-- [ ] **O2.** The synthetic enterprise: the generator, its ground truth, and fakes serving it; a `make enterprise`
+- [x] **O2.** The synthetic enterprise: the generator, its ground truth, and fakes serving it; a `make enterprise`
       target to load it at a chosen size; the measures (section 11) as `make atlas-eval`.
 - [ ] **O3.** The Atlas screen and entity pages (repo, table, job, system) on what exists, with the evidence panel.
 

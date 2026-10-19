@@ -1316,15 +1316,83 @@ regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, 
 regression; `make eval-company` everyone opening exactly what the truth says, Recall@10 100%, MRR 0.85 over 47 counted
 questions, Ask right for 24 of 24, no leak, no regression; `make e2e` 38 passed; `make test-web` 7 passed. Not built: aliases (`atlas_aliases`, with O13's resolution, which fills them), usage, profiles, reviews,
 playbook runs, assessments, and change requests (each with its own item), the Atlas screen (O3), MCP tools for the
-Atlas (O17), and a node's `gone_at` (when an analyzer's source stops listing it, O4 on).
+Atlas (O17), and a node's `gone_at` (when an analyzer's source stops listing it, O4 on). CI on pull request 63: unit
+95 passed; smoke 172 passed, 17 skipped, 0 failed; the golden set hit@1 1.0, MRR 1.0, found@5 1.0; the scenario
+(Recall@10 94%, MRR 0.81, Ask right for 24 of 25) and the retailer (Recall@10 100%, MRR 0.86, Ask right for 24 of 24)
+at their baselines, no leak and no regression.
+F10b, the synthetic enterprise (`docs/ORG_INTELLIGENCE_PLAN.md` O2; the second half of F10). The retailer gained its
+data teams: EDW (Enterprise data warehouse) and EDP (Enterprise data platform), with Ravi Menon (head of data), Greta
+Lund (EDW lead), generated developers and engineers (appended last, so everyone generated before keeps their name),
+and two who sign in, nia (EDP) and otto (EDW); a DATA Confluence space and Jira project both teams read (the
+migration's plan and waves, INV_DAILY's runbook, wave 1's ticket, and July's INV_DAILY incident, the pages at fixed
+ids so the store pages' count never moves them); four facts; and three questions (nia's first wave, otto's late
+INV_DAILY, and gus's stale allocation report, whose answer is only in DATA-31, which he can't read). Checked against
+main's generator at three sizes and two seeds: every earlier person, document, and reader is unchanged.
+`kl/enterprise.py` builds the estate from the retailer (`build(world, repos)`, the same every time): the EDW's 18
+Teradata tables (staging loaded by Control-M from the source systems' extracts, core, and reports, two of which nobody
+reads), their Control-M jobs and the conditions between them, the nightly exports to Cloud Storage for the migration;
+Composer jobs loading them into the EDP, the edp-dbt project's staging models and marts; MicroStrategy and Looker
+dashboards; and repositories (15 core, then generated up to the size, each named only by its number, so a size never
+renames one). The truth: every real node and edge (113 and 175 at 40 repositories), each edge with the sources that
+reveal it and each node with the name each loaded source knows it by (an EDW table is `teradata` / `edw.sales_txn` to
+DataHub but `teradata://edw.acme.test:1025` to OpenLineage: two nodes until O13), usage per table and its rank,
+systems, owners, the migration's waves (a table never before what it's built from; only what nobody reads retires),
+what replaces what, and what the data teams' pages name (`MENTIONS`, for O15); `problems` holds it to itself, and
+`python -m kl.enterprise --repos N` prints it. Sources (`SOURCES`): loaded now, the EDW's exports' OpenLineage (EDW),
+Composer's (EDP), the edp-dbt manifest from CI (EDP), and the EDW's DataHub (EDW); waiting, Control-M (O10),
+Teradata's query log (O9), BigQuery's jobs (O7), MicroStrategy and Looker (O24), and GitHub (O4, O5). Their fixtures
+come with those items, each shaped by the vendor's documentation then, as the plan says. Render functions give each
+loaded source what it sends (`lineage_events`, `dbt_manifest`, `datahub_tables`); the fake DataHub serves a platform
+of its own beside smoke's tables (`/datahub/setup`). The handover between the teams is the export bucket: both report
+its files, each seeing only its own edges there, so no one on one team sees the whole path from the EDW to a mart.
+`kl/enterprise_eval.py` loads it (the retailer through kl.company_eval, the two lineage pushes as a team admin, the
+manifest through a pipeline registered to EDP with its workload token, and DataHub connected for EDW), then checks:
+the Atlas holds exactly the nodes and edges the loaded sources reveal, by their names, with the right teams (an
+invented or missing one fails); nia, otto, and gus each open exactly the nodes a team of theirs reported, every node
+in the Atlas tried (the scenario's lineage too), and see exactly the truth's edges; impact from four starting points,
+as each, reaches exactly what the truth's visible edges reach, hop for hop, and a start they can't see is a 404; and
+the measures (section 11): real nodes and edges found, per source, and real nodes found under more than one name, held
+to an "atlas" baseline (a source finding less, or more duplicates, fails). `make enterprise`, `make atlas-eval`; `make
+eval-baseline` records it fourth; CI runs it after the retailer. Unit: `tests/test_enterprise.py` (13). Red first:
+with the lineage and dbt renderers mutated (no outputs, no dependencies), exactly their 3 tests failed and 105 passed;
+on the stack, with the Atlas's node policy loosened to the org alone (as owner, `ALTER POLICY`), the evaluation failed
+(nia, otto, and gus each opened all 47 nodes, and 8 of 12 impact checks answered 200 where the truth says 404), then,
+restored exactly (`pg_policies` compared), passed; and with a stray lineage event pushed for EDP, it failed with 2
+invented nodes and 2 invented edges. Found while building: run on their own, the new targets used a stale fake (only
+`make smoke` built and recreated it), so they build it too and recreate it when it changed; and the stray event showed
+the edge check calling an edge nia's own team reported a leak, so a leak is now an edge shown to someone whose teams
+didn't report it or don't see both its ends (per the database), and what the Atlas holds beyond the truth is
+exactness's to report. Found by the proof: nia's "Which tables move to the EDP in the first wave?" finds the migration
+page fourth, behind the migration scenario's own curated pages in Commons (its "EDW to EDP migration program", the
+cutover calendar, a returns migration), which the retailer's people can read: two fictional companies' EDP programs
+share the one org, and the question matches by meaning alone (the keyword channel's all-words rule, F4's and Q2's);
+recorded as found at #4. Proof on a fresh stack with CI's settings, at 84dd9f0: `make pins` passed; `make unit` 108
+passed; `make smoke` 174 passed, 15 skipped, 0 failed (the web servers recreated first); the golden set hit@1 1.0, MRR
+1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24
+of 25, no leak, no regression; `make eval-company` everyone opening exactly what the truth says (nia and otto 17
+documents each), Recall@10 100%, MRR 0.86 over 49 counted questions (first-wave at #4, inv-daily-late at #1, the two
+new), Ask right for 24 of 24, no leak, no regression; `make atlas-eval` the Atlas holding exactly the 47 nodes and 48
+edges the loaded sources reveal, among the 82 it held (the scenario's too), nia seeing 21 nodes and 22 edges, otto 30
+and 26, gus none, every node tried as each, 12 impact checks right hop for hop, real nodes found 43 of 113 and real
+edges 48 of 175 (lineage-edw 8, DataHub 18, lineage-edp 8, dbt 14; Control-M's 73, the query logs' 32, the dashboards'
+5, and GitHub's 57 waiting on their items), 4 EDW tables under two names; `make e2e` 38 passed; `make test-web` 7
+passed; the lint at 0 errors and 43 warnings. The baselines, recorded on a second fresh stack in CI's order (its smoke
+174 passed, 0 failed): the golden set and the scenario unchanged; the retailer's only change its two new questions
+(MRR 0.86 to 0.85, all of it first-wave's #4); the Atlas's first; then `make eval-company` and `make atlas-eval`
+against them: no regression. Not built: the fixtures of the sources still waiting (a Control-M export, query history
+with literals, repositories, dashboards), each with its item and shaped by the vendor's documentation then; the EDP's
+own catalog (Dataplex) beside dbt; someone on both data teams in the evaluation (smoke's F10a check proves both);
+incidents in the estate (O25); seniors' questions (O20); and measuring usage ranks, systems, and waves, which wait for
+O7, O15, and O18 to conclude them.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
 findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, H2 with H6, H4, H6b, H3 with M2, and
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
-this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, and F10a (the Atlas) are
-done, recorded above; next, F10b (the synthetic enterprise, on the same retailer).
+this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
+F10b (the synthetic enterprise) are done, recorded above; next, the rest of the foundation, F1 first (knowledge
+units, perspectives, and conflicts).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

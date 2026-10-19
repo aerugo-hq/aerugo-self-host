@@ -1,6 +1,6 @@
 # Recipes start with ">" instead of a tab (.RECIPEPREFIX, GNU make 3.82+), so editors can't break them.
 .RECIPEPREFIX = >
-.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario company eval-company eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
+.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario company eval-company enterprise atlas-eval eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
 
 # The local model `make llm` downloads for Ask. About 1 GB; make llm LLM_MODEL=qwen2.5:3b for better answers (about 2 GB).
 LLM_MODEL ?= qwen2.5:1.5b
@@ -105,8 +105,23 @@ eval-company: env
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm smoke python -m kl.company_eval
 
-# Record the evaluation sets' scorecards as their baseline (slices K1, Q1, and F9): the golden set on the plain seed first,
-# then the scenario, which it loads, then the synthetic retailer, which it loads. From then on, make eval, make eval-scenario, and smoke fail when a case gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
+# The synthetic enterprise (F10b, kl.enterprise): the retailer's data estate, its EDW moving to the EDP, with known truth.
+# enterprise loads it, the retailer too (its data people sign in as nia and otto); atlas-eval loads it and scores the
+# Atlas: exactly what its sources reveal, each person seeing exactly what the truth says, and no source finding less
+# than its baseline. Each builds the fakes too (DataHub serves the EDW), recreating them only when they changed. The
+# Atlas keeps what it was told, so run it on a fresh stack; and before make smoke afterwards, make reset && make up.
+enterprise: env
+>docker compose --profile smoke build smoke fake-llm
+>docker compose --profile smoke up -d fake-llm
+>docker compose --profile smoke run --rm smoke python -m kl.enterprise_eval --load-only
+
+atlas-eval: env
+>docker compose --profile smoke build smoke fake-llm
+>docker compose --profile smoke up -d fake-llm
+>docker compose --profile smoke run --rm smoke python -m kl.enterprise_eval
+
+# Record the evaluation sets' scorecards as their baseline (slices K1, Q1, F9, and F10b): the golden set on the plain seed
+# first, then the scenario, which it loads, then the synthetic retailer, then its enterprise, which each load. From then on, make eval, make eval-scenario, and smoke fail when a case gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
 # with a permission leak, or one that fails, is never recorded: the baseline you had stays.
 # Each step reads the file the step before it wrote (mounted over the image's copy, which is as it was built), so a step
 # never puts back another set's old scorecard.
@@ -118,6 +133,8 @@ eval-baseline: env
 >docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.evals --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 >docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.company_eval --record > services/api/kl/evals_baseline.tmp
+>mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
+>docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.enterprise_eval --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 
 # The clients (slice A2): the Python and TypeScript clients' own tests, against stand-ins for the API, in pinned images.
