@@ -11,10 +11,16 @@ Loading, every run (each step only adds what's missing, so a run again changes n
 4. Its connections, one per team and source, made by the org admin, and its directory (removed and made again: the
    fake mints a new app each time it starts). Each source carries only its own permissions.
 5. Each person signs in once (`/v1/whoami`), which links them to their accounts in each source by their email.
+6. Its facts as knowledge units (F1), each written through the API by someone who signs in, curates their own team, and
+   can read all of its evidence (preferring the team whose space holds it), and confirmed; the returns policy's two
+   versions on one topic; and the planner's version of sell-through as a perspective, with its conflict. A fact no
+   one who signs in can fully read (two stores' bike keys) is named, not loaded; sensitive facts never are.
 
-Then three checks:
+Then four checks:
 
 - Readers: each person can open exactly the documents the truth says, no more (a leak) and no fewer.
+- Units: each person reads exactly the units whose evidence they can all read, listed and by id, and a perspective and
+  its conflict only when they read both sides.
 - Retrieval: each question, asked as its person, scored as kl.evals scores the migration scenario (found, first
   right page, Recall@10, MRR), held to its own baseline ("company" in kl/evals_baseline.json); a forbidden page in
   the results is a leak. Questions waiting on a slice (F8, C1 to C3) are shown, not counted.
@@ -30,9 +36,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
@@ -163,7 +171,94 @@ def wait_synced(made: list[tuple[str, str]], started: datetime) -> None:
         raise SystemExit(f"these didn't sync in ten minutes: {', '.join(sorted(waiting))}")
 
 
-def load(world: company.World) -> None:
+@dataclass(frozen=True)
+class UnitSpec:
+    fact: company.Fact
+    topic: str
+    writer: str          # who signs in, curates their own team, and reads all of the topic's evidence
+    team: str
+    valid_from: str = ""
+
+
+def unit_plan(world: company.World) -> tuple[list[UnitSpec], list[str]]:
+    """Each fact to load as a unit, older versions before what supersedes them, and the facts no one who signs in can
+    fully read. A topic's writer reads every version's and perspective's evidence, from the team whose space holds the
+    current version's first piece when someone there can."""
+    loaded = {d.name for d in world.docs if d.source in company.LOADED}
+    facts = {f.id: f for f in world.facts if f.status != "sensitive" and set(f.evidence) <= loaded}
+    older = {f.supersedes: f.id for f in facts.values() if f.supersedes}
+    topic = {fid: older.get(fid, fid).lower() for fid in facts}  # a topic is lowercase; the truth's ids keep their case
+    personas = [p for p in world.people if p.username]
+    seen = {p.username: world.visible(p.username) for p in personas}
+    plan, nobody = [], []
+    for current in (f for f in facts.values() if f.id not in older):
+        versions = ([facts[current.supersedes]] if current.supersedes else []) + [current]
+        evidence = {e for f in versions for e in f.evidence} | {e for fid, *_, ev in company.PERSPECTIVES if fid == current.id for e in ev}
+        able = [p for p in personas if evidence <= seen[p.username]]
+        if not able:
+            nobody.append(current.id)
+            continue
+        first = world.doc(current.evidence[0])
+        home = world.container(first.source, first.container).team
+        writer = next((p for p in able if p.team == home), able[0])
+        for f in versions:
+            after = next((v.valid_until for v in versions if v.id == f.supersedes), "")
+            plan.append(UnitSpec(f, topic[f.id], writer.username, writer.team,
+                                 (date.fromisoformat(after) + timedelta(days=1)).isoformat() if after else ""))
+    return plan, nobody
+
+
+def unit_body(world: company.World, spec: UnitSpec) -> dict:
+    places = {p.code for p in world.places}
+    where = [s for s in spec.fact.scope if s in places or re.fullmatch(r"[A-Z]{2}", s)]
+    return {"kind": spec.fact.kind, "topic": spec.topic, "title": (spec.fact.id[0].upper() + spec.fact.id[1:]).replace("-", " "),
+            "text": spec.fact.text, "evidence": [{"document": world.doc(e).key} for e in spec.fact.evidence],
+            "scope": {"places": where, "roles": [s for s in spec.fact.scope if s not in where]},
+            **({"valid_until": spec.fact.valid_until} if spec.fact.valid_until else {}),
+            **({"valid_from": spec.valid_from} if spec.valid_from else {})}
+
+
+def load_units(world: company.World) -> dict[str, str]:
+    """The facts as units, through the API as their writers; a run again finds what's there and adds nothing. Returns
+    each fact's unit id."""
+    plan, _ = unit_plan(world)
+    for writer, team in sorted({(s.writer, s.team) for s in plan}):
+        r = api("PUT", f"/v1/workspaces/{team}/members", ADMIN, json={"principal": f"user:{writer}", "role": "curator"})
+        if r.status_code != 200:
+            raise SystemExit(f"{writer} as {team}'s curator: {r.status_code} {r.text[:200]}")
+    ids: dict[str, str] = {}
+    for spec in plan:
+        body = unit_body(world, spec) | ({"supersedes": ids[spec.fact.supersedes]} if spec.fact.supersedes else {})
+        there = api("GET", "/v1/units", spec.writer, params={"topic": spec.topic}).json()["units"]
+        found = [u["id"] for u in there if u["title"] == body["title"]]  # each fact's title is its own, versions included
+        if found:
+            ids[spec.fact.id] = found[0]
+            continue
+        r = api("POST", f"/v1/workspaces/{spec.team}/units", spec.writer, json=body)
+        if r.status_code != 201:
+            raise SystemExit(f"the unit for {spec.fact.id}: {r.status_code} {r.text[:200]}")
+        ids[spec.fact.id] = r.json()["id"]
+        if spec.fact.status != "superseded" and api("POST", f"/v1/units/{ids[spec.fact.id]}/confirm", spec.writer).status_code != 200:
+            raise SystemExit(f"{spec.writer} couldn't confirm the unit for {spec.fact.id}")
+    writers = {s.fact.id: s.writer for s in plan}
+    for fid, kind, holder, context, text, evidence in company.PERSPECTIVES:
+        unit, writer = ids[fid], writers[fid]
+        detail = api("GET", f"/v1/units/{unit}", writer).json()
+        pid = next((p["id"] for p in detail["perspectives"] if p["holder"]["name"] == holder), None)
+        if not pid:
+            r = api("POST", f"/v1/units/{unit}/perspectives", writer, json={"holder_kind": kind, "holder": holder, "context": context,
+                                                                           "text": text, "evidence": [{"document": world.doc(e).key} for e in evidence]})
+            if r.status_code != 201:
+                raise SystemExit(f"the perspective on {fid}: {r.status_code} {r.text[:200]}")
+            pid = r.json()["id"]
+        if not any(c["other"]["id"] == pid for c in detail["conflicts"]):
+            r = api("POST", f"/v1/units/{unit}/conflicts", writer, json={"perspective": pid, "note": f"{holder}'s version differs."})
+            if r.status_code != 201:
+                raise SystemExit(f"the conflict on {fid}: {r.status_code} {r.text[:200]}")
+    return ids
+
+
+def load(world: company.World) -> dict[str, str]:
     wrong = company.problems(world)
     if wrong:
         raise SystemExit("the company's truth is inconsistent:\n  " + "\n  ".join(wrong))
@@ -176,6 +271,7 @@ def load(world: company.World) -> None:
         r = api("GET", "/v1/whoami", p.username)
         if r.status_code != 200 or not r.json().get("admitted"):
             raise SystemExit(f"{p.username} couldn't sign in: {r.status_code} {r.text[:200]}")
+    return load_units(world)
 
 
 # ------------------------------------------------------------------ checking
@@ -201,6 +297,43 @@ def readers_check(world: company.World) -> tuple[list[str], list[str]]:
         missing += [f"{p.username} can't open {loaded[k]} ({k})" for k in sorted(want - got)]
         mark = "LEAK" if got - want else ("miss" if want - got else "ok")
         print(f"  {mark:4}  {p.username:5} {p.title:28} opens {len(got)} of the company's {len(loaded)} documents; the truth says {len(want)}")
+    return leaks, missing
+
+
+def units_check(world: company.World, ids: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Each person's units against the truth, listed and by id: a unit shows exactly when they can read all of its
+    evidence; the perspective and its conflict exactly when they also read the perspective's. Returns (leaks, missing)."""
+    plan, nobody = unit_plan(world)
+    evidence = {s.fact.id: set(s.fact.evidence) for s in plan}
+    by_id = {uid: fid for fid, uid in ids.items()}
+    leaks, missing = [], []
+    print(f"\nWhat each person reads of the company's {len(ids)} knowledge units, against the truth\n")
+    for p in (p for p in world.people if p.username):
+        seen = world.visible(p.username)
+        want = {fid for fid, ev in evidence.items() if ev <= seen}
+        listed, offset = set(), 0
+        while offset is not None:
+            r = api("GET", "/v1/units", p.username, params={"limit": 100, "offset": offset})
+            assert r.status_code == 200, f"units as {p.username}: {r.status_code} {r.text[:200]}"
+            listed |= {by_id[u["id"]] for u in r.json()["units"] if u["id"] in by_id}
+            offset = r.json()["next_offset"]
+        opened = {fid for fid, uid in ids.items() if api("GET", f"/v1/units/{uid}", p.username).status_code == 200}
+        for how, got in (("listed", listed), ("opened", opened)):
+            leaks += [f"{p.username} {how} the unit for {fid}" for fid in sorted(got - want)]
+            missing += [f"{p.username} never {how} the unit for {fid}" for fid in sorted(want - got)]
+        for fid, *_, ev in company.PERSPECTIVES:
+            if fid in want:
+                detail = api("GET", f"/v1/units/{ids[fid]}", p.username).json()
+                should = set(ev) <= seen
+                for what, got in (("perspective", bool(detail["perspectives"])), ("conflict", bool(detail["conflicts"]))):
+                    if got and not should:
+                        leaks.append(f"{p.username} saw the {what} on {fid}")
+                    elif should and not got:
+                        missing.append(f"{p.username} can't see the {what} on {fid}")
+        mark = "LEAK" if (listed | opened) - want else ("miss" if want - (listed & opened) else "ok")
+        print(f"  {mark:4}  {p.username:5} {p.title:28} is shown {len(listed | opened)} of {len(ids)} units; the truth says {len(want)}")
+    if nobody:
+        print(f"  Not loaded, since no one who signs in can read all of their evidence: {', '.join(nobody)}")
     return leaks, missing
 
 
@@ -267,12 +400,14 @@ def main(argv: list[str]) -> int:
     seed, stores = arg("--seed", DEFAULT[0]), arg("--stores", DEFAULT[1])
     world = company.build(seed, stores)
     api_ready()
-    load(world)
+    ids = load(world)
     if "--load-only" in argv:
         print(f"{company.COMPANY} is loaded ({stores} stores, seed {seed}): sign in as ana, cora, kai, or another of its people "
               "(password: <name>-dev-only).")
         return 0
     leaks, missing = readers_check(world)
+    unit_leaks, unit_missing = units_check(world, ids)
+    leaks, missing = leaks + unit_leaks, missing + unit_missing
     card, retrieval_leaks = score(world, out)
     problems = [f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
     if problems:

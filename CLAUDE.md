@@ -1383,7 +1383,66 @@ against them: no regression. Not built: the fixtures of the sources still waitin
 with literals, repositories, dashboards), each with its item and shaped by the vendor's documentation then; the EDP's
 own catalog (Dataplex) beside dbt; someone on both data teams in the evaluation (smoke's F10a check proves both);
 incidents in the estate (O25); seniors' questions (O20); and measuring usage ranks, systems, and waves, which wait for
-O7, O15, and O18 to conclude them.
+O7, O15, and O18 to conclude them. CI on pull request 64: unit 108 passed; smoke 172 passed, 17 skipped, 0 failed; the golden set, the scenario, and the retailer (Recall@10 100%, MRR 0.85, nia and otto opening exactly their 17 documents) at their baselines; the Atlas exact with no leak and no regression.
+F1, knowledge units, perspectives, and conflicts (`docs/ENTERPRISE_PLAN.md` section 5; the plan approved 2026-10-19).
+Migration 0058: `knowledge_units` (one piece of knowledge: its kind, fact, procedure, policy, contact, decision,
+definition, answer, or lesson; a topic its versions share; title and text; a structure per kind, a procedure's steps
+with role, condition, and form, a contact's role and how to reach it, a definition's term; scope by teams, roles, and
+places, which F8 matches people to; owner team and role; trust, confirmed, documented, observed, or inferred;
+confidence; status, proposed, confirmed, stale, superseded, or retired; validity and what superseded it; review
+cadence; and its evidence as document ids with the section in each), `unit_perspectives` (another team's, role's, or
+person's version, with its own evidence), and `unit_conflicts` (a unit against another unit or a perspective on it,
+with which side was kept, the resolution, and who and when). A unit is readable only by someone who can read every
+piece of its evidence, since its text is derived from all of it (invariant 16), unlike the Atlas, where any piece
+shows a node. Its evidence is on its own row, so `kl.evidence_readable` (running as the caller, so the documents' own
+row-level security decides) needs no other table's rows: a document that's deleted, or whose readers narrow, hides the
+unit at once rather than widening it to the readers of what's left, and a unit can't exist without evidence. A
+perspective needs its own evidence and its unit; a conflict, both of its sides, since naming one reveals the other.
+The API writes only for the team its transaction names (`kl.teams`, after OpenFGA says the caller curates it) and only
+what the caller's own row-level security reads; the worker writes within its org (F2). `kl.subject_columns` gains
+`resolved_by`, so a data-subject erasure pseudonymizes whoever resolved a conflict (who wrote a unit or perspective,
+and who opened a conflict, were already found by name), which also reaches `privacy_flags.resolved_by`, missed until
+now. `kl/units.py`: `GET /v1/units` (by kind, team, status, topic, and title) and `GET /v1/units/{id}` (its evidence,
+perspectives, conflicts, and versions on its topic, each shown only when its own evidence is readable too),
+post-checked through the documents list's own gates (a team the caller can reach, row-level security, OpenFGA with
+drift logged and alerted, and the audience rule), audited, a hidden unit a 404 and never counted; `POST
+/v1/workspaces/{ws}/units` (the team's curators and admins, citing only what they can read: proposed and documented;
+with `supersedes`, the next version on the same team's topic, the old one ending the day before), `/confirm` and
+`/retire` (the owner team's curators), perspectives (the owner team's), conflicts (a curator of either side), and
+their resolution (the first unit's owner team records which side was kept and why; nothing is overwritten).
+`resolve_targets` and `audience_allows` moved from `main.py` to `kl/policy.py`, unchanged, for the units module to
+share. The retailer: its facts become units (`unit_plan`, `load_units` in kl.company_eval), each topic written through
+the API by someone who signs in, is made curator of their own team, and can read every version's and perspective's
+evidence, preferring the team whose space holds it (Kai the recall playbook, Fay the returns policy), then confirmed;
+the returns policy's 2025 and 2026 versions on one topic (`Fact.supersedes`); the planner's version of sell-through as
+a perspective with its conflict (`PERSPECTIVES`); sensitive facts never; and the two stores' bike keys, which no one
+who signs in can read, named instead of loaded: 47 units. `units_check`: each of the 14 people is shown exactly the
+units whose evidence they can all read, listed and opened (10 to 25 of the 47), and the perspective and its conflict
+only with both sides (gus, not dara or cora). Smoke: `a_knowledge_unit_shows_only_to_who_can_read_all_its_evidence`
+(alice and carol read a unit from Payments' runbook and the handbook, bob and dave neither it nor its conflict, though
+both read the handbook's own unit; writes refused for a member, another team, unreadable or missing or no evidence,
+and a procedure with no steps; a version superseded; as the API's role, the database hides it from a reader of the
+handbook alone and refuses a write for another team or citing what the caller can't read; a unit whose evidence is
+gone is hidden from everyone; erasure lists all four of the units' person-naming columns). Unit: `tests/test_units.py`
+(15). Red first: the smoke check against F10b's API failed (no units); with `shown` mutated to any piece, exactly its
+unit test failed; with only the database's policy loosened to any piece, the smoke check's direct database assertion
+failed while the API's post-check still hid the unit (each layer stands alone); with both loosened, the retailer's
+check found 50 leaks (the returns policy, from the handbook and the contact center's weekly page, shown to 13 people
+who can't read the second); each restored exactly (`pg_policies` compared) and green; and the erasure assertion failed
+on the stack that applied 0058 before `resolved_by` joined it. Found while building: the loader matched an existing
+unit to its fact by status, so a still-proposed 2025 version was taken for the current one, which was never written;
+it now matches by title, each fact's own. Under the any-piece mutation, opening a unit whose evidence you can't read
+failed (its evidence list names each document) instead of leaking: closed, but by accident, and only reachable under
+the mutation; a person's line now counts everything they were shown, so a leak can't read as a match. Proof on a fresh
+stack with CI's settings, at 6f635f1: `make pins` passed; `make unit` 123 passed; `make smoke` 175 passed, 15 skipped,
+0 failed (the web servers recreated first); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make
+eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24 of 25, no leak, no regression; `make
+eval-company` everyone opening exactly the documents and being shown exactly the units the truth says, Recall@10 100%,
+MRR 0.85 over 49 counted questions, Ask right for 24 of 24, no leak, no regression; `make atlas-eval` exact, no leak,
+no regression; `make e2e` 38 passed; `make test-web` 7 passed; the lint at 0 errors and 43 warnings. No baseline
+changed: units don't reach search yet. Not built: extraction (F2), consolidation (F3), answers from units (F4), units
+in MCP and the change feed (with F4), the Knowledge screen and a unit's page (D1), Atlas nodes as evidence (P8), and
+resolving a contact's role to its current holder (F8).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1391,8 +1450,8 @@ findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, 
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
-F10b (the synthetic enterprise) are done, recorded above; next, the rest of the foundation, F1 first (knowledge
-units, perspectives, and conflicts).
+F10b (the synthetic enterprise), and F1 (knowledge units) are done, recorded above; next, F2 (extraction:
+units proposed from documents, tickets, and threads, held to the claim checks).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

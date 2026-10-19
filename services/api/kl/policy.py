@@ -1,4 +1,5 @@
-"""Policy helpers shared by every API module: workspace membership and admin checks, and audit."""
+"""Policy helpers shared by every API module: workspace membership and admin checks, where to look, the audience
+rule, and audit."""
 import re
 
 from fastapi import HTTPException
@@ -32,3 +33,31 @@ def require_workspace_admin(caller: Caller, ws: str) -> None:
 def require_org_admin(caller: Caller) -> None:
     if not fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}"):
         raise HTTPException(403, "org admin required")
+
+
+def resolve_targets(conn, caller: Caller, scope: str) -> list[str]:
+    """Workspaces to look in. Scope is not permission: RLS and the post-check still decide visibility."""
+    member_of = memberships(caller)
+    rows = conn.execute("SELECT slug, discoverability FROM workspaces").fetchall()
+    searchable = {r["slug"] for r in rows if r["discoverability"] == "org" or r["slug"] in member_of}
+    if scope == "org":
+        return sorted(searchable)
+    targets = sorted({s.strip() for s in scope.split(",") if s.strip()})
+    if not targets or any(not SLUG.fullmatch(s) or s not in searchable for s in targets):
+        raise HTTPException(404, "workspace not found")  # 404, not 403: existence isn't disclosed
+    return targets
+
+
+def audience_allows(caller: Caller, audience: str | None, member_of) -> bool:
+    """A curated concept's x-kl.audience, checked on top of its readers (RLS and OpenFGA), so the
+    narrower rule wins. Deny by default: an audience this code doesn't understand admits nobody."""
+    if audience is None:
+        return True
+    kind, _, name = audience.partition("/")
+    if kind == "org":
+        return not name
+    if kind == "workspace":
+        return name in member_of
+    if kind == "group":
+        return name in caller.groups
+    return False

@@ -43,7 +43,8 @@ Bottom to top. Built today is marked (built); everything else is to build.
 - **Connectors and capture:** documents (Confluence, Drive, SharePoint, Notion: built), tickets and chat (Jira,
   Slack: built), Teams capture, meetings, and handovers, code (GitHub, at thousands of repos: built, to scale),
   warehouses, catalogs (built), and usage logs, schedulers and ETL (Control-M, Airflow).
-- **Stores:** documents and their index in Postgres with pgvector (built), knowledge units, the Atlas graph (built:
+- **Stores:** documents and their index in Postgres with pgvector (built), knowledge units (built: each readable only
+  by someone who can read all of its evidence, with perspectives and conflicts), the Atlas graph (built:
   nodes, edges, and their evidence, each shown only to who may see its evidence), usage,
   permissions in OpenFGA (built), credentials in OpenBao or a cloud secret manager (built).
 - **Pipelines** (the worker): indexing (built), extraction of knowledge units, consolidation (merge, supersede,
@@ -152,7 +153,8 @@ Kubernetes manifests; onboarding as code, with a pilot that lets in only the tea
 synthetic retailer (F9), a company with known right answers that comes in through the connectors, on which everything
 after is proven; the Atlas's graph (F10a), where today's lineage now lives, each node and edge shown only to who
 may see its evidence; and the retailer's data estate (F10b), its warehouse moving to a new platform, with the truth
-of every node and edge, so each engineering item after it is measured against what's really there. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, the foundation's knowledge core (F1). A connector only adds raw material;
+of every node and edge, so each engineering item after it is measured against what's really there; and knowledge units
+(F1), the store the foundation's pipelines fill, each shown only to someone who can read all of its evidence. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
+but for M10's real-vendor half, set aside; next, extraction (F2): units proposed from documents, tickets, and threads. A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.

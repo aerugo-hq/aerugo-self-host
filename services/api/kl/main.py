@@ -33,6 +33,7 @@ from . import alerting, compiler, config, google_identity, imports, manifests, o
 from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
+from .units import router as units_router
 from .connections_api import router as connections_router
 from .db import connect, resolve_org_id, scoped
 from .auth import SERVICE_PREFIX
@@ -46,7 +47,7 @@ from .gateway import GatewayError, build_prompt, chat
 from .links import identifier_names
 from .managed import forget_managed, managed_header, managed_info, note_managed
 from .people import who_to_ask
-from .policy import SLUG, audit, memberships, require_org_admin, require_workspace_admin
+from .policy import SLUG, audience_allows, audit, memberships, require_org_admin, require_workspace_admin, resolve_targets
 from .providers import probe
 from .ranking import current_first, fuse, prefer_curated
 from .rerank import POOL as RERANK_POOL, RerankError, rerank as rerank_rows
@@ -70,6 +71,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="knowledge-layer API", version="0.1.0", lifespan=lifespan)
 app.include_router(connections_router)
 app.include_router(atlas_router)
+app.include_router(units_router)
 app.include_router(webhooks_router)
 app.include_router(hooks_router)
 
@@ -243,19 +245,6 @@ def vector_candidates(conn, vectors: list[tuple[dict, list[float]]]) -> list[dic
     return sorted(found, key=lambda r: r["distance"])
 
 
-def resolve_targets(conn, caller: Caller, scope: str) -> list[str]:
-    """Workspaces to look in. Scope is not permission: RLS and the post-check still decide visibility."""
-    member_of = memberships(caller)
-    rows = conn.execute("SELECT slug, discoverability FROM workspaces").fetchall()
-    searchable = {r["slug"] for r in rows if r["discoverability"] == "org" or r["slug"] in member_of}
-    if scope == "org":
-        return sorted(searchable)
-    targets = sorted({s.strip() for s in scope.split(",") if s.strip()})
-    if not targets or any(not SLUG.fullmatch(s) or s not in searchable for s in targets):
-        raise HTTPException(404, "workspace not found")  # 404, not 403: existence isn't disclosed
-    return targets
-
-
 CURATED = ("silver", "gold")
 
 # Exact lookup by concept id, alias, or title: an explicit request for one concept goes first.
@@ -373,21 +362,6 @@ JOIN workspaces w           ON w.id = wd.workspace_id
 WHERE s.external_key = ANY(%(keys)s) AND w.slug = ANY(%(targets)s)
 ORDER BY d.id, c.ordinal
 """
-
-
-def audience_allows(caller: Caller, audience: str | None, member_of) -> bool:
-    """A curated concept's x-kl.audience, checked on top of its readers (RLS and OpenFGA), so the
-    narrower rule wins. Deny by default: an audience this code doesn't understand admits nobody."""
-    if audience is None:
-        return True
-    kind, _, name = audience.partition("/")
-    if kind == "org":
-        return not name
-    if kind == "workspace":
-        return name in member_of
-    if kind == "group":
-        return name in caller.groups
-    return False
 
 
 def retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: int,

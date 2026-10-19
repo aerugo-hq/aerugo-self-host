@@ -190,6 +190,7 @@ class Fact:
     valid_until: str = ""             # a superseded fact's last day
     status: str = "current"           # current | superseded | sensitive
     contradicted_by: tuple[str, ...] = ()
+    supersedes: str = ""              # the fact it replaced, on the same topic (F1 loads both as versions)
 
 
 @dataclass(frozen=True)
@@ -761,7 +762,8 @@ def _facts(places: tuple[Place, ...]) -> tuple[Fact, ...]:
     stores = [p for p in places if p.kind == "store"]
     return (
         Fact("returns-window", "policy", "Customers have 45 days to return an item with a receipt or an order that can be looked up, from 1 March 2026.",
-             ("returns-2026", "cc-weekly-changes"), contradicted_by=("returns-2025", "returns-reminder-2025")),
+             ("returns-2026", "cc-weekly-changes"), contradicted_by=("returns-2025", "returns-reminder-2025"),
+             supersedes="returns-window-2025"),
         Fact("returns-window-2025", "policy", "Customers had 60 days to return an item with a receipt.", ("returns-2025", "returns-reminder-2025"),
              valid_until="2026-02-28", status="superseded"),
         Fact("no-receipt", "policy", "Without a receipt, store credit at the lowest price in 45 days, up to $50; above $50 a store leader approves.",
@@ -841,6 +843,15 @@ def _facts(places: tuple[Place, ...]) -> tuple[Fact, ...]:
         Fact("inv-daily-lesson", "lesson", "On 22 July 2026 the WMS extract came at 04:10 and the allocation report was stale until "
              "07:15; the extract now runs at 01:00.", ("DATA-31",)),
     )
+
+
+# Versions others hold of a fact (F1's perspectives), each opening a conflict with it: (fact, holder kind, holder,
+# context, their version, its evidence). The planner's thread is read by Merchandising alone, the glossary by
+# district leaders too, so a district leader reads the definition but neither the planner's version nor the conflict.
+PERSPECTIVES = (
+    ("sell-through", "role", "Merchandise planner", "the store review deck",
+     "Sell-through is units sold over units on hand.", ("merch-sellthrough-2025",)),
+)
 
 
 def _questions() -> tuple[Question, ...]:
@@ -926,6 +937,9 @@ def problems(world: World) -> list[str]:
     facts = {f.id for f in world.facts}
     personas = {p.username for p in world.people if p.username}
     out = [f"fact {f.id}: no page {e}" for f in world.facts for e in f.evidence if e not in names]
+    out += [f"fact {f.id} supersedes {f.supersedes}, which isn't a fact" for f in world.facts if f.supersedes and f.supersedes not in facts]
+    out += [f"a perspective on {fact} names what isn't there" for fact, *_, evidence in PERSPECTIVES
+            if fact not in facts or any(e not in names for e in evidence)]
     for q in world.questions:
         if q.asker not in personas:
             out.append(f"{q.id}: {q.asker} doesn't sign in")
