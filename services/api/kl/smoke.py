@@ -6119,6 +6119,120 @@ def a_knowledge_unit_shows_only_to_who_can_read_all_its_evidence():
 
 
 @check
+def extraction_proposes_units_only_from_what_a_team_opted_in():
+    """F2, extraction: a team's model proposes knowledge units only once its admin opts in, with a model from the team's own registry, and only from documents whose classification that model may receive (another team's, and one it may not, are never sent); each proposal is held to the claim checker against the section it cites and to the sensitive gate, so an unsupported or a sensitive one is never stored; a proposal's evidence is its one document, so it reaches exactly that document's readers; a changed document's proposals are replaced while a unit someone confirmed stays; the status counts only documents its reader can open; and opting out stops it"""
+    import uuid
+    from .pipelines import document_key
+    tag = uuid.uuid4().hex[:8]
+    name, repo = f"ex-{tag}", f"acme/extract-{tag}"
+
+    def mint():
+        return httpx.post(f"{FAKE_CI}/token", json={"repository": repo}, timeout=10).json()["token"]
+
+    def push(body):
+        r = httpx.post(f"{API}/v1/workspaces/payments/documents", json=body, timeout=30, headers={"Authorization": f"Bearer {mint()}"})
+        assert r.status_code == 202, f"push: {r.status_code} {r.text[:200]}"
+        url, deadline = f"{API}/v1/workspaces/payments/documents/pushes/{r.json()['push']}", time.monotonic() + 120
+        while time.monotonic() < deadline:
+            state = httpx.get(url, headers={"Authorization": f"Bearer {mint()}"}, timeout=10).json()
+            if state["status"] != "queued":
+                assert state["status"] == "done", f"the push failed: {state}"
+                return
+            time.sleep(1)
+        raise AssertionError("the worker never applied the push")
+
+    def runbook(minutes):
+        return {"key": "runbooks/settlement.md", "title": f"Settlement restart {tag}", "classification": "internal",
+                "uri": f"https://github.com/{repo}/blob/main/runbooks/settlement.md", "readers": ["group:payments"],
+                "markdown": (f"# Settlement restart {tag}\n\n## Restart\nRestart the settlement worker {tag} from the admin console, "
+                             f"then confirm the queue drains within {minutes} minutes.\n\n## Watch\nThe settlement queue {tag} is watched "
+                             "by the payments on-call. make-an-unsupported-unit\n\n## Cover\nJamie Doe had surgery on Tuesday, so Lee "
+                             f"covers the settlement queue {tag}.")}
+    secret = {"key": "runbooks/keys.md", "title": f"Settlement keys {tag}", "classification": "confidential",
+              "uri": f"https://github.com/{repo}/blob/main/runbooks/keys.md", "readers": ["group:payments"],
+              "markdown": f"# Settlement keys {tag}\n\n## Keys\nThe settlement signing keys {tag} rotate every quarter."}
+
+    def proposals(user):
+        return api("GET", "/v1/units", user, params={"q": tag, "status": "proposed", "limit": 100}).json()["units"]
+
+    def detail(user, uid):
+        return api("GET", f"/v1/units/{uid}", user)
+
+    def sent():
+        return " ".join(json.dumps(r) for r in httpx.get(f"{FAKE_LLM}/requests", timeout=10).json())
+
+    def until(test, seconds=150):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(2)
+        return test()
+
+    def state(key):
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return conn.execute("SELECT s.outcome, s.content_hash = d.content_hash AS current, s.proposed, s.unsupported, s.sensitive "
+                                "FROM kl.extraction_state s JOIN kl.documents d ON d.id = s.document_id "
+                                "JOIN kl.workspaces w ON w.id = s.workspace_id WHERE d.external_key = %s AND w.slug = 'payments'",
+                                (key,)).fetchone()
+    try:
+        ensure_fake_models()
+        r = api("POST", "/v1/workspaces/payments/pipelines", "alice", json={"name": name, "issuer": FAKE_CI, "repository": repo})
+        assert r.status_code == 201, f"register: {r.status_code} {r.text[:200]}"
+        pid = r.json()["id"]
+        book, keys = document_key(pid, "runbooks/settlement.md"), document_key(pid, "runbooks/keys.md")
+        push({"upserts": [runbook("ten"), secret]})
+        reset_fake()
+        assert api("PUT", "/v1/workspaces/payments/extraction", "carol", json={"model": "smoke-fake"}).status_code == 403, \
+            "a member who isn't an admin opted the team in"
+        assert api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": "local-nope"}).status_code == 422, \
+            "a model outside the team's registry was chosen"
+        r = api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": "smoke-fake"})
+        assert r.status_code == 200, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: (state(book) or {}).get("outcome") == "done" and (state(keys) or {}).get("outcome") is not None), \
+            f"extraction didn't reach the team's documents: {state(book)} {state(keys)}"
+        assert state(keys)["outcome"] == "skipped_classification", f"a confidential document wasn't skipped: {state(keys)}"
+        mine = proposals("alice")
+        restart = [u for u in mine if "Restart" in u["title"]]
+        assert restart, f"no proposal from the runbook's steps: {[u['title'] for u in mine]}"
+        got = detail("alice", restart[0]["id"]).json()
+        assert [e["document"] for e in got["evidence"]] == [book] and got["trust"] == "inferred" and got["status"] == "proposed", got
+        assert "drains within ten minutes" in got["text"], got["text"]
+        texts = " ".join(detail("alice", u["id"]).json()["text"] for u in mine)
+        assert "2031" not in texts, "a proposal its section doesn't support was stored"
+        assert "surgery" not in texts, "a proposal about one person's health was stored"
+        assert state(book)["unsupported"] >= 1 and state(book)["sensitive"] >= 1, f"the checks' drops weren't counted: {state(book)}"
+        log = sent()
+        assert f"signing keys {tag}" not in log, "a confidential document reached a model allowed only public and internal content"
+        with psycopg.connect(OWNER_DB) as conn:
+            fin = conn.execute("SELECT title FROM kl.documents WHERE external_key = 'fin-close'").fetchone()[0]
+        assert fin not in log, "a document of a team that didn't opt in reached its model"
+        assert detail("carol", restart[0]["id"]).status_code == 200, "a reader of the runbook can't read its proposal"
+        assert detail("bob", restart[0]["id"]).status_code == 404 and not proposals("bob"), "a proposal reached someone outside its document's readers"
+        status = api("GET", "/v1/workspaces/payments/extraction", "alice").json()
+        assert status["model"] == "smoke-fake" and status["documents"]["skipped_classification"] >= 1 and status["dropped"]["sensitive"] >= 1, status
+        assert api("GET", "/v1/workspaces/payments/extraction", "carol").status_code == 403, "a member read the team's extraction status"
+
+        assert api("POST", f"/v1/units/{restart[0]['id']}/confirm", "alice").status_code == 200
+        push({"upserts": [runbook("fifteen")]})
+        assert until(lambda: (state(book) or {}).get("current") and (state(book) or {}).get("outcome") == "done"), "a changed document wasn't extracted again"
+        now = {u["id"]: detail("alice", u["id"]).json()["text"] for u in proposals("alice")}
+        assert any("fifteen minutes" in t for t in now.values()), f"the changed document's new proposal is missing: {now}"
+        assert not any("ten minutes" in t for t in now.values()), "a changed document's old proposal stayed"
+        kept = detail("alice", restart[0]["id"]).json()
+        assert kept["status"] == "confirmed" and "ten minutes" in kept["text"], "a confirmed unit went with its document's proposals"
+
+        assert api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": None}).status_code == 200
+        assert api("GET", "/v1/workspaces/payments/extraction", "alice").json()["model"] is None
+        print(f"      extraction: proposals from the runbook alone, unsupported and sensitive ones dropped, the confidential one never sent")
+    finally:
+        api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": None})
+        api("DELETE", f"/v1/workspaces/payments/pipelines/{name}", "alice")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.knowledge_units WHERE created_by = 'extraction'")
+            conn.execute("DELETE FROM kl.extraction_state WHERE workspace_id = (SELECT id FROM kl.workspaces WHERE slug = 'payments')")
+        reset_fake()
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid

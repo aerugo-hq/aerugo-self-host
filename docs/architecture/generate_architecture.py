@@ -129,7 +129,7 @@ layers = [
                                        ("Incident mode, onboarding paths", S_NEW), ("Migrations", S_NEW),
                                        ("Change agent (pull requests)", S_NEW), ("Review queue, gaps", S_BUILT)]),
     ("Pipelines: how it understands (the worker)", 450, [("Indexing: chunks, embeddings", S_BUILT),
-                                                          ("Extraction: knowledge units", S_NEW),
+                                                          ("Extraction: knowledge units", S_BUILT),
                                                           ("Consolidation: merge, supersede, conflicts", S_NEW),
                                                           ("Analyzers: code, SQL lineage, usage, jobs", S_NEW),
                                                           ("Profiles and systems", S_NEW),

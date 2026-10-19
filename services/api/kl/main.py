@@ -34,6 +34,8 @@ from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .units import router as units_router
+from .extraction import router as extraction_router
+from .gateway import month_usage
 from .connections_api import router as connections_router
 from .db import connect, resolve_org_id, scoped
 from .auth import SERVICE_PREFIX
@@ -72,6 +74,7 @@ app = FastAPI(title="knowledge-layer API", version="0.1.0", lifespan=lifespan)
 app.include_router(connections_router)
 app.include_router(atlas_router)
 app.include_router(units_router)
+app.include_router(extraction_router)
 app.include_router(webhooks_router)
 app.include_router(hooks_router)
 
@@ -712,15 +715,6 @@ def rate_limit(org_id: str, caller: Caller, route: str, team: str | None) -> Non
     if over:
         telemetry.rate_limited(route)
         raise HTTPException(429, over, headers={"Retry-After": str(left)})
-
-
-def month_usage(conn, endpoint_id) -> int:
-    """Tokens a model has used this calendar month (UTC)."""
-    return int(conn.execute(
-        """SELECT coalesce(sum(coalesce(prompt_tokens, 0) + coalesce(completion_tokens, 0)), 0) AS used
-           FROM model_usage
-           WHERE endpoint_id = %s AND at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'""",
-        (endpoint_id,)).fetchone()["used"])
 
 
 def seconds_to_next_month() -> int:

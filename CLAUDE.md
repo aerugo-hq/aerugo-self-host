@@ -1442,7 +1442,61 @@ MRR 0.85 over 49 counted questions, Ask right for 24 of 24, no leak, no regressi
 no regression; `make e2e` 38 passed; `make test-web` 7 passed; the lint at 0 errors and 43 warnings. No baseline
 changed: units don't reach search yet. Not built: extraction (F2), consolidation (F3), answers from units (F4), units
 in MCP and the change feed (with F4), the Knowledge screen and a unit's page (D1), Atlas nodes as evidence (P8), and
-resolving a contact's role to its current holder (F8).
+resolving a contact's role to its current holder (F8). CI on pull request 65: unit 123 passed; smoke 173 passed, 17 skipped, 0 failed; the golden set, the scenario, the retailer (every person shown exactly their units), and the Atlas at their baselines; no leak and no regression.
+F2, extraction (`docs/ENTERPRISE_PLAN.md` section 5; approved 2026-10-19: from pages and tickets only, chat threads
+waiting for C1's and C2's channel opt-in, and quality measured once with the local model). Migration 0059:
+`team_extraction` (the model a team chose from its own registry: a team's own rows, written only in its own
+transactions and only with its own models, as `team_media`'s) and `extraction_state` (each document's last pass per
+team: its version, the outcome, how many proposals were kept and dropped and why, and the tokens, never the text); the
+worker may now meter its own model calls (`model_usage`) and raise alerts (`signals`). `kl/extraction.py`: the
+worker's pass (`run`, a `units.extract` job queued at most once a minute while any team has opted in, and at once when
+one does; 25 documents a pass, another queued while more wait) takes the documents whose content changed since the
+team's last pass (or whose model changed, or whose classification the model now allows), never a chat thread
+(`CHAT_SOURCES`: Slack, Teams, meetings), never one personal-data detection flagged; it sends each only when the
+team's model may receive its classification (invariant 7) and its monthly budget isn't spent (`month_usage`, moved to
+`kl/gateway.py` so the worker needn't import the API; a spent budget stops that team's pass and raises its alert),
+with no transaction open during the call (H5), as numbered sections (`sections_of`: at most 40, and 12,000
+characters); and it holds the reply (`checked`) to F1's units (kind, topic, structure, lengths), the sensitive gate
+(one person's health, performance, discipline, or pay, and personal-data detection), and the claim checker: every
+sentence and structured value stated by the section it cites, H4's numbers and negations included. At most 10 survive
+per document, stored as proposed, inferred units owned by the team, each citing its one document and section, so F1's
+rule gives each exactly that document's readers; a changed document's unconfirmed proposals are replaced, and a unit
+someone confirmed stays (F6 reviews it). The reply is untrusted: readers, owner, trust, and status are the platform's,
+and a person confirms each unit. `GET`/`PUT /v1/workspaces/{ws}/extraction` (team admins): the model, and the passes'
+outcomes counted only over documents the caller can open, so the status reveals nothing they can't read; choosing a
+model starts a pass, and none turns it off. The fake model extracts mechanically (`extraction_reply`: a fact per
+section from its first sentence, and an unsupported one where a section asks), measuring the pipeline, never quality.
+Smoke: `extraction_proposes_units_only_from_what_a_team_opted_in` (only after the team's admin opts in, with its own
+model; the runbook's steps proposed, cited to the runbook alone; the planted unsupported claim and the one about a
+person's surgery dropped and counted; the confidential document never sent to a model allowed only public and
+internal, nor another team's document, per the fake model's own request log; carol reads the proposal and bob gets a
+404; a changed document's proposal replaced while the confirmed one stays; the status counted, and refused to a
+member; opting out). Unit: `tests/test_extraction.py` (10). The retailer (`extraction_check` in kl.company_eval, in
+CI): Stores and Product quality opt in with the fake model, and 23 proposals come from 16 pages and tickets, none
+outside them (pages and tickets as the truth records them, never as the code under test lists chat), each person shown
+exactly the proposals whose document they can open (0 to 21 of the 23). Quality, measured with the local model: not
+yet. Ollama couldn't download qwen2.5:1.5b on this machine's network (its download broke off part-way, unexpected EOF,
+on two tries, max retries exceeded the first time); `make eval-extraction` (kl/extraction_eval.py: every retailer team
+opted in to the local model, the proposals scored against the 42 facts with a page or ticket for recall, and as a
+lower bound for precision, reported and never gated) is ready for when it can. Red first: the smoke check against F1's
+API failed (no extraction); with the sensitive gate off and the claim check skipped, exactly their 3 unit tests
+failed; and with the worker allowed to send Slack threads (built into the worker only), the retailer's check found 16
+proposals citing chat threads; restored, all green. Found while building: passes queued every five minutes left a
+changed document waiting up to five, so smoke's re-extraction check failed at two and a half; they now run once a
+minute (one finding nothing due is one query); and the retailer's check first took which sources are chat from the
+code it tests, so a bug there would have hidden itself; it now reads the truth. Also, this machine's Docker Desktop
+failed to start after a reboot: a crashed backend leaves socket files Windows can't open, rename, or delete; its run
+folder and secrets-engine folder were moved aside, nothing deleted. Proof on a fresh stack with CI's settings, at
+c7aa8f1: `make pins` passed; `make unit` 133 passed; `make smoke` 176 passed, 15 skipped, 0 failed (the web servers
+recreated first); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 94%,
+MRR 0.81 over 43 counted cases, no leak, no regression; `make eval-company` everyone opening exactly the documents and
+shown exactly the units and the proposals the truth says, Recall@10 100%, MRR 0.85 over 49 counted questions, no leak,
+no regression; `make atlas-eval` exact, no leak, no regression; `make e2e` 38 passed; `make test-web` 7 passed; the
+lint at 0 errors and 43 warnings. No baseline changed: proposals don't reach search or Ask. Not built: chat threads
+(C1, C2, with their channels' opt-in), a document longer than 12,000 characters read past that (sent in parts later,
+if long documents matter), merging proposals across documents and teams (F3), answers from confirmed units (F4),
+staleness when a confirmed unit's document changes (F6), the calibrated claim threshold for proposals (the default's
+used; answers use the calibrated one), and a screen for proposals (D1).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1450,8 +1504,8 @@ findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, 
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
-F10b (the synthetic enterprise), and F1 (knowledge units) are done, recorded above; next, F2 (extraction:
-units proposed from documents, tickets, and threads, held to the claim checks).
+F10b (the synthetic enterprise), F1 (knowledge units), and F2 (extraction) are done, recorded above; next, F3
+(consolidation: merging, superseding, contradiction detection, conflicts to owners).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, catalogs, config, confluence, curator, dataplex, datahub, directory, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
+from . import alerting, catalogs, config, confluence, curator, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -48,7 +48,7 @@ LEASE_SECONDS = float(os.environ.get("KL_JOB_LEASE_SECONDS", "120"))  # how long
 # attempts. KL_JOB_LIMITS changes any of them ("connection.sync=480,import.apply=180").
 DEFAULT_LIMIT_MINUTES = 30.0
 LIMIT_MINUTES = {"connection.sync": 240.0, "connection.discover": 60.0, "embeddings.backfill": 240.0, "knowledge.seed": 60.0,
-                 "workspace.purge": 120.0, "import.apply": 120.0, "retention.apply": 60.0}
+                 "workspace.purge": 120.0, "import.apply": 120.0, "retention.apply": 60.0, "units.extract": 60.0}
 OVERRAN_EXIT = 3  # the worker's exit status when a job ran past its limit
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -245,6 +245,14 @@ CONNECTION_FAILED_SQL = """UPDATE connections SET status = CASE WHEN status = 'd
 
 
 # ------------------------------------------------------------------ handlers
+def handle_units_extract(conn, job) -> dict:
+    """F2: one extraction pass; while documents still wait and this pass got through some, another is queued at once."""
+    result = extraction.run(conn)
+    if result.get("more") and (result.get("documents") or result.get("skipped_classification") or result.get("skipped_personal")):
+        conn.execute("INSERT INTO jobs (org_id, kind) VALUES (kl.current_org(), 'units.extract')")
+    return result
+
+
 def handle_noop(conn, job) -> dict:
     return {"ok": True}
 
@@ -700,7 +708,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,
             "pipeline.push": handle_pipeline_push, "pipeline.retire": handle_pipeline_retire, "manifest.apply": handle_manifest_apply,
-            "import.apply": handle_import_apply, "import.retire": handle_import_retire}
+            "import.apply": handle_import_apply, "import.retire": handle_import_retire, "units.extract": handle_units_extract}
 RETENTION_SQL = ("INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'retention.apply' WHERE NOT EXISTS "
                  "(SELECT 1 FROM jobs WHERE kind = 'retention.apply' AND created_at > now() - interval '1 hour')")
 
@@ -886,6 +894,10 @@ def main() -> None:
                             alerting.evaluate(conn, RESYNC_MINUTES)
                         except Exception as e:  # noqa: BLE001 - alerting must never stop the scheduler either
                             log.warning("alerts not evaluated: %s", type(e).__name__)
+                        try:  # extraction (F2): a pass a minute while any team has opted in
+                            conn.execute(extraction.QUEUE_SQL)
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("extraction not scheduled: %s", type(e).__name__)
                         try:  # retention (slice I2): at most one run an hour, as a job like any other
                             conn.execute(RETENTION_SQL)
                         except Exception as e:  # noqa: BLE001

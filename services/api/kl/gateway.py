@@ -98,3 +98,12 @@ def chat(provider: str, model: str, base_url: str | None, api_key: str | None,
     except httpx.HTTPError as e:
         raise GatewayError(f"model unreachable ({type(e).__name__})")
     raise GatewayError(f"chat provider {provider!r} isn't supported yet")
+
+
+def month_usage(conn, endpoint_id) -> int:
+    """Tokens a model has used this calendar month (UTC)."""
+    return int(conn.execute(
+        """SELECT coalesce(sum(coalesce(prompt_tokens, 0) + coalesce(completion_tokens, 0)), 0) AS used
+           FROM model_usage
+           WHERE endpoint_id = %s AND at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'""",
+        (endpoint_id,)).fetchone()["used"])
