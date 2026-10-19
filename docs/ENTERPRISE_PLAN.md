@@ -244,7 +244,7 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
       each wave is a reviewed pull request whose plan shows what it connects.
 
 ### Foundation
-- [ ] **F1.** Knowledge units, perspectives, and conflicts: the tables, row-level security from evidence, the API.
+- [x] **F1.** Knowledge units, perspectives, and conflicts: the tables, row-level security from evidence, the API.
 - [ ] **F2.** Extraction: units proposed from documents, tickets, and threads, held to the claim checks.
 - [ ] **F3.** Consolidation: merging, superseding, contradiction detection, conflicts to owners.
 - [ ] **F4.** Answers from units first: scope, trust, freshness; procedures as checklists; contacts resolved; perspectives shown.

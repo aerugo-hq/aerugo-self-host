@@ -135,7 +135,7 @@ layers = [
                                                           ("Profiles and systems", S_NEW),
                                                           ("Learning loop: feedback, gaps, freshness", S_NEW)]),
     ("Stores: what it keeps", 610, [("Documents and index (Postgres, pgvector)", S_DB_BUILT),
-                                     ("Knowledge units", S_DB_NEW), ("Atlas graph", S_DB_BUILT), ("Usage", S_DB_NEW),
+                                     ("Knowledge units", S_DB_BUILT), ("Atlas graph", S_DB_BUILT), ("Usage", S_DB_NEW),
                                      ("Permissions (OpenFGA)", S_DB_BUILT), ("Credentials (OpenBao, Secret Manager)", S_DB_BUILT)]),
     ("Connectors and capture: how it reads", 770, [("Docs: Confluence, Drive, SharePoint, Notion", S_BUILT),
                                                     ("Tickets and chat: Jira, Slack", S_BUILT),
