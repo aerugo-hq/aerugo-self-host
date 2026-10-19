@@ -24,6 +24,17 @@ def fuse(ranked: list[tuple[str, list[dict]]], key: str = "external_key", k: int
             for doc, row in sorted(best.items(), key=lambda item: scores[item[0]], reverse=True)]
 
 
+def prefer_curated(rows: list[dict], boost: float, tiers: tuple[str, ...] = ("gold", "silver")) -> list[dict]:
+    """Curated knowledge wins a near tie: a curated page's fused score counts `boost` times, so it outranks evidence
+    that matches about as well as it does, and never evidence that clearly matches better. Each one moved is marked
+    `curated` among the channels that matched it, so the reason shows. It replaced a curated channel that gave every
+    curated page matching at all a second full vote, ranked among curated pages alone: a page the meaning channel found
+    sixteenth outranked the one it found first, the page that answered (found by F9's synthetic retailer)."""
+    out = [{**r, "score": r["score"] * boost, "matched": [*r["matched"], "curated"]} if r.get("tier") in tiers else r
+           for r in rows]
+    return sorted(out, key=lambda r: r["score"], reverse=True)  # stable: equal scores keep fusion's order
+
+
 def current_first(rows: list[dict], supersedes: list[tuple[str, str]], key: str = "external_key") -> list[dict]:
     """Superseded knowledge after what replaced it (slice K5). For each (newer, older) pair with both in rows and the
     older ranked first, the older moves to just after the newer; everything else keeps its order. Chains settle (C

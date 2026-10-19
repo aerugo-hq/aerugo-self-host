@@ -1235,6 +1235,42 @@ counted questions, Ask right for 8 of 24, recorded as the company's baseline (`e
 kinds of knowledge; a source joins when a pack needs its formats); the Teams and meeting fakes (C1, C3); per-team
 question files (F7); role and location in answers (F8; the directory already carries each person's title,
 department, and office).
+Ranking: a curated page wins only a near tie (found by F9; decided 2026-10-18 as its own item, before F10). Search
+fused its channels, then fused them again with a curated channel: every curated page that matched at all, ranked among
+curated pages alone, got a second full vote. A natural question rarely has every one of its words in one document, and
+the keyword channel asks for all of them, so many questions matched by meaning alone; there, a curated page the meaning
+channel found sixteenth outranked the page it found first. For jon's "Checkout errors are spiking. What's the
+runbook?", eight of the migration scenario's curated pages (the EDP standards, the cutover calendar) came before the
+runbook. `ranking.prefer_curated` replaces that channel: after fusion, a curated page's score counts `CURATED_BOOST`
+times (1.05, in `main.py`), so it wins a near tie with the evidence and never against evidence that matches better,
+and it's marked `curated` among the channels that matched it, as the search page's chip shows. Measured from a fresh
+stack per run (the golden set, the scenario, the retailer, in that order), against the old ranking: the golden set
+stayed at hit@1 1.0, MRR 1.0 either way; at 1.05 the scenario rose from Recall@10 85% to 94% and MRR 0.78 to 0.81, Ask
+right for 24 of 25 (from 20), and the retailer from MRR 0.34 to 0.85, Ask right for 24 of 24 (from 8); at 1.10, the
+scenario 95% and 0.80 with Ask 22 of 25, and the retailer 0.76, with one case worse instead of two. 1.05 was chosen for
+what people see in Ask. Six of M10's misses now find their source documents (`backfill-carol`,
+`july-reconciliation`, `rehearsal-length`, `rollback`, `ticket-412`, `window-and-rehearsal`: the first risk of Phase
+0's final report, partly closed). Two cases find less, both carol's about retiring ORD_LOAD, both matched only by
+meaning: `impact-cross-team` (kb-order-hist falls to #12) and `before-retiring` (kb-edp-standards to the edge of the
+top ten), each now behind source pages that are relevant (EDP-412, ORD_LOAD's retirement plan, and the rollback plan
+that re-enables ORD_LOAD) and some that aren't (EDP-421, about RET_LOAD; the retailer's public help-desk thread). The
+deeper cause is the keyword channel needing every word of a question, which F4 and Q2 address. The baselines were
+recorded again, deliberately, with these two named here. Found while recording them: `make eval-baseline` ran each
+step in the smoke image, whose baseline file is the one it was built with, so each step wrote the whole file from that
+copy plus its own set, and the last put back the others' old scorecards (with two sets, the scenario's step had always
+undone the golden set's fresh recording, unseen because the golden set's numbers never moved). Each step now reads the
+file the step before wrote (`BASELINE_FILE`, mounted over the image's copy). Unit: `tests/test_ranking.py` (4: a
+curated page that barely matches never outranks the page that answers; one wins a near tie and says why; evidence
+matching in two channels beats a curated page in one; with no curated page, the order is fusion's). Red first: with
+the boost made 2 (curated always wins), 3 of the 4 failed; the control run is the old ranking's measure. Proof on a
+fresh stack with CI's settings, at 12dabef: `make pins` passed; `make unit` 90 passed; `make smoke` 173 passed, 15
+skipped, 0 failed (the web servers recreated first); `make e2e` 38 passed; `make test-web` 7 passed. The baselines,
+re-recorded on another fresh stack in CI's order with the fixed `make eval-baseline` (its smoke 171 passed, 2 failed:
+the optional web checks, whose web servers weren't recreated after that reset): the golden set hit@1 1.0, MRR 1.0,
+unchanged; the scenario Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24 of 25, no leak; the retailer
+Recall@10 100%, MRR 0.86 over 47 counted questions, Ask right for 24 of 24, everyone opening exactly what the truth
+says, no leak; the retailer run again against its new baseline: no regression. Not built: the keyword channel's
+all-words rule (F4, Q2), and a boost per tier (gold and silver count the same).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1242,7 +1278,8 @@ findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, 
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
 this file says: G4 (the pilot path) and F9 (the synthetic retailer) are done, recorded above; next, F10 (the Atlas, on
-the same retailer), and, proposed, the ranking fix F9 found (curated pages outranking the source that answers).
+the same retailer); the ranking fix F9 found (curated pages outranking the source that answers) is done, recorded
+above.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

@@ -47,7 +47,7 @@ from .managed import forget_managed, managed_header, managed_info, note_managed
 from .people import who_to_ask
 from .policy import SLUG, audit, memberships, require_org_admin, require_workspace_admin
 from .providers import probe
-from .ranking import current_first, fuse
+from .ranking import current_first, fuse, prefer_curated
 from .rerank import POOL as RERANK_POOL, RerankError, rerank as rerank_rows
 from .vault import vault
 from .hooks import router as hooks_router
@@ -163,6 +163,7 @@ WHERE d.title_tsv @@ q.query
 ORDER BY d.id, c.ordinal
 """
 TITLE_WEIGHT = 1.5  # a title match beats a passing mention in another document's body
+CURATED_BOOST = 1.05  # a curated page outranks evidence matching about as well (within a twentieth), never evidence matching better
 
 # Vector channel (M2): nearest chunks for one embedding model, pre-filtered by RLS on chunk_embeddings'
 # own ACL array, then restricted to the target workspaces. {dims} is the model's integer dimension.
@@ -434,11 +435,9 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
                              key=lambda r: r["rank"], reverse=True) if names else []
             telemetry.set_attributes(s, names=len(names), rows=len(aliased))
         weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT}
-        base = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)], weights=weights)
-        # Curated knowledge gets its own channel: it wins when it matches as well as the evidence does,
-        # not when it barely matches.
-        candidates = fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased),
-                           ("curated", [r for r in base if r.get("tier") in CURATED])], weights=weights)
+        # Curated knowledge wins a near tie with the evidence, never when the evidence clearly matches better.
+        candidates = prefer_curated(fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)],
+                                         weights=weights), CURATED_BOOST)
         canonical = conn.execute(CANONICAL_SQL, {"q": q.strip().lower(), "targets": targets}).fetchall() if words else []
         if canonical:
             exact = {r["external_key"] for r in canonical}
