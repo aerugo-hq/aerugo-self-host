@@ -5986,6 +5986,139 @@ def the_atlas_shows_each_node_and_edge_only_to_who_may_see_its_evidence():
 
 
 @check
+def a_knowledge_unit_shows_only_to_who_can_read_all_its_evidence():
+    """F1, knowledge units: a unit is readable only by someone who can read every piece of its evidence, so its derived text never reaches the readers of one piece alone, in the list and by id, a hidden one a 404 and never counted; a perspective follows its own evidence and its unit, and a conflict shows only to someone who sees both sides; only the owner team's curators write, citing only what they can read; a new version supersedes the old on its topic; a unit whose evidence is gone is hidden from everyone; a data-subject erasure reaches everyone a unit names; and the database itself holds the reading and writing rules for the API's role"""
+    import uuid
+    tag = uuid.uuid4().hex[:8]
+    topic = f"smoke-{tag}"
+    steps = {"steps": [{"text": "Page the payments on-call", "role": "Payments on-call"}, {"text": "Post in the incident channel"}]}
+
+    def unit(**kw):
+        return {"kind": "procedure", "topic": topic, "title": f"Payments outage {tag}", "text": "Page the on-call, then post in the channel.",
+                "structure": steps, "evidence": [{"document": "pay-runbook", "section": "Escalation"}, {"document": "handbook"}], **kw}
+
+    def create(user, ws, body):
+        return api("POST", f"/v1/workspaces/{ws}/units", user, json=body)
+
+    def get(user, uid):
+        return api("GET", f"/v1/units/{uid}", user)
+
+    def listed(user, t=topic):
+        return {u["id"] for u in api("GET", "/v1/units", user, params={"topic": t}).json()["units"]}
+    try:
+        assert create("carol", "payments", unit()).status_code == 403, "a member who isn't a curator wrote a unit"
+        assert create("bob", "payments", unit()).status_code == 403, "another team's member wrote a unit"
+        assert create("alice", "payments", unit(evidence=[{"document": "fin-close"}])).status_code == 422, "a unit cited what its writer can't read"
+        assert create("alice", "payments", unit(evidence=[{"document": f"no-such-{tag}"}])).status_code == 422, "a unit cited what isn't there"
+        assert create("alice", "payments", unit(evidence=[])).status_code == 422, "a unit with no evidence was accepted"
+        assert create("alice", "payments", unit(structure={"steps": []})).status_code == 422, "a procedure with no steps was accepted"
+        r = create("alice", "payments", unit())
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        u1 = r.json()["id"]
+        r = create("olivia", "commons", {"kind": "definition", "topic": f"{topic}-term", "title": f"Outage {tag}", "text": "An outage is...",
+                                         "structure": {"term": "Outage"}, "evidence": [{"document": "handbook"}]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        u3 = r.json()["id"]
+
+        for user in ("alice", "carol"):  # both read the runbook and the handbook
+            got = get(user, u1)
+            assert got.status_code == 200, f"{user} can't read a unit whose evidence they read: {got.status_code}"
+            assert u1 in listed(user), f"{user}'s list lacks the unit"
+        detail = get("alice", u1).json()
+        assert {e["document"] for e in detail["evidence"]} == {"pay-runbook", "handbook"} and detail["structure"] == steps, detail
+        assert detail["status"] == "proposed" and detail["trust"] == "documented" and detail["owner"]["team"] == "payments", detail
+        for user in ("bob", "dave"):  # each reads the handbook, but not the runbook
+            assert get(user, u1).status_code == 404, f"{user} read a unit built partly from a page they can't read"
+            r = api("GET", "/v1/units", user, params={"topic": topic})
+            assert r.status_code == 200 and r.json()["units"] == [], f"{user}'s list showed or counted a hidden unit: {r.text[:200]}"
+            assert get(user, u3).status_code == 200, f"{user} can't read a unit from the handbook alone"
+        assert get("alice", str(uuid.uuid4())).status_code == 404 and get("alice", "not-a-unit").status_code == 404
+
+        r = api("POST", f"/v1/units/{u1}/perspectives", "carol", json={"holder_kind": "team", "holder": "finance", "text": "x",
+                                                                       "evidence": [{"document": "handbook"}]})
+        assert r.status_code == 403, "a member who isn't a curator added a perspective"
+        r = api("POST", f"/v1/units/{u1}/perspectives", "alice", json={"holder_kind": "role", "holder": "Finance controller",
+                                                                       "context": "month-end", "text": "Finance pages its own on-call first.",
+                                                                       "evidence": [{"document": "handbook"}]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert [p["holder"]["name"] for p in get("carol", u1).json()["perspectives"]] == ["Finance controller"]
+
+        assert api("POST", f"/v1/units/{u1}/conflicts", "carol", json={"unit": u3}).status_code == 403, "a member opened a conflict"
+        r = api("POST", f"/v1/units/{u1}/conflicts", "alice", json={"unit": u3, "note": "The two disagree on what an outage is."})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        c1 = r.json()["id"]
+        assert [c["id"] for c in get("alice", u3).json()["conflicts"]] == [c1], "the conflict didn't show on its other side"
+        for user in ("bob", "dave"):
+            assert get(user, u3).json()["conflicts"] == [], f"{user} saw a conflict whose other side they can't read"
+            assert api("POST", f"/v1/units/conflicts/{c1}/resolve", user, json={"kept": "unit", "resolution": "x"}).status_code == 404
+        assert api("POST", f"/v1/units/conflicts/{c1}/resolve", "carol", json={"kept": "unit", "resolution": "x"}).status_code == 403
+        r = api("POST", f"/v1/units/conflicts/{c1}/resolve", "alice", json={"kept": "both", "resolution": "Different audiences."})
+        assert r.status_code == 200 and get("alice", u1).json()["conflicts"][0]["kept"] == "both", r.text[:200]
+
+        r = create("alice", "payments", unit(title=f"Payments outage {tag}, 2026", valid_from="2026-10-01", supersedes=u1))
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        u2 = r.json()["id"]
+        old = get("alice", u1).json()
+        assert old["status"] == "superseded" and old["superseded_by"] == u2 and old["valid_until"] == "2026-09-30", old
+        assert [v["id"] for v in get("alice", u2).json()["versions"]] == [u1, u2], "the versions on a topic aren't listed"
+        assert create("alice", "payments", unit(supersedes=u1)).status_code == 422, "a superseded version was superseded again"
+        assert api("POST", f"/v1/units/{u2}/confirm", "carol").status_code == 403, "a member confirmed a unit"
+        r = api("POST", f"/v1/units/{u2}/confirm", "alice")
+        assert r.status_code == 200 and get("alice", u2).json()["trust"] == "confirmed", r.text[:200]
+        assert api("POST", f"/v1/units/{u3}/retire", "alice").status_code == 403, "another team's curator retired a unit"
+        assert api("POST", f"/v1/units/{u1}/confirm", "bob").status_code == 404, "a hidden unit's owner check answered"
+        assert api("POST", f"/v1/units/{u3}/retire", "olivia").status_code == 200 and get("bob", u3).json()["status"] == "retired"
+
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            org = str(conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()["id"])
+            teams = {r["slug"]: str(r["id"]) for r in conn.execute("SELECT id, slug FROM kl.workspaces WHERE slug IN ('payments', 'finance')")}
+            docs = {r["external_key"]: r for r in conn.execute(
+                "SELECT id::text AS id, external_key, acl_principals FROM kl.documents WHERE external_key IN ('pay-runbook', 'handbook', 'fin-close')")}
+        both = sorted(set(docs["pay-runbook"]["acl_principals"]) | set(docs["handbook"]["acl_principals"]))
+
+        def app(principals, team=""):
+            conn = psycopg.connect(APP_DB, autocommit=True)
+            conn.execute("SELECT set_config('kl.org_id', %s, false), set_config('kl.principals', %s, false), set_config('kl.teams', %s, false)",
+                         (org, ",".join(principals), team))
+            return conn
+
+        def sees(principals):
+            with app(principals) as conn:
+                return conn.execute("SELECT count(*) FROM kl.knowledge_units WHERE id = %s", (u1,)).fetchone()[0] == 1
+        assert sees(both), "the database hid a unit from someone who reads all its evidence"
+        assert not sees(docs["handbook"]["acl_principals"]), "the database showed a unit to a reader of only some of its evidence"
+
+        def writes(principals, team_slug, team_id, evidence):
+            with app(principals, team_slug) as conn:
+                try:
+                    conn.execute("INSERT INTO kl.knowledge_units (org_id, owner_team, kind, topic, title, body, trust, evidence, sections, created_by) "
+                                 "VALUES (%s, %s, 'fact', %s, 'x', 'x', 'documented', %s::uuid[], %s, 'smoke')",
+                                 (org, team_id, topic, evidence, [""] * len(evidence)))
+                    return True
+                except psycopg.Error:
+                    return False
+        assert not writes(both, "finance", teams["payments"], [docs["handbook"]["id"]]), "the API wrote for a team its transaction doesn't name"
+        assert not writes(both, "payments", teams["payments"], [docs["fin-close"]["id"]]), "the API wrote a unit citing what its caller can't read"
+        assert writes(both, "payments", teams["payments"], [docs["handbook"]["id"]]), "the API couldn't write for the team it names"
+
+        gone = str(uuid.uuid4())
+        with psycopg.connect(INGEST_DB, autocommit=True) as conn:
+            conn.execute("SELECT set_config('kl.org_id', %s, false)", (org,))
+            u4 = str(conn.execute("INSERT INTO kl.knowledge_units (org_id, owner_team, kind, topic, title, body, trust, evidence, sections, created_by) "
+                                  "VALUES (%s, %s, 'fact', %s, 'x', 'x', 'inferred', %s::uuid[], %s, 'smoke') RETURNING id",
+                                  (org, teams["payments"], f"{topic}-gone", [docs["handbook"]["id"], gone], ["", ""])).fetchone()[0])
+        assert get("alice", u4).status_code == 404 and not listed("alice", f"{topic}-gone"), "a unit whose evidence is gone was shown"
+        with psycopg.connect(OWNER_DB) as conn:
+            erased = {tuple(r) for r in conn.execute("SELECT tbl, col FROM kl.subject_columns()")}
+        assert {("knowledge_units", "created_by"), ("unit_perspectives", "created_by"), ("unit_conflicts", "opened_by"),
+                ("unit_conflicts", "resolved_by")} <= erased, "a data-subject erasure would leave someone's name on a unit"
+        print(f"      units: alice and carol read the unit, bob and dave neither it nor its conflict; writes fenced; a version superseded")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.knowledge_units WHERE topic LIKE %s", (f"{topic}%",))
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid
