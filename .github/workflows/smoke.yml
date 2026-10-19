@@ -61,6 +61,9 @@ jobs:
       - name: The synthetic retailer, F9 (each person opens exactly what its truth says; no leak; no regression)
         run: make eval-company
 
+      - name: The synthetic enterprise, F10b (the Atlas holds exactly what its sources reveal; each person sees exactly its truth; no regression)
+        run: make atlas-eval
+
       - name: Service logs
         if: failure()
         run: docker compose --profile smoke logs --no-color --tail=300

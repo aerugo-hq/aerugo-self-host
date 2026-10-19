@@ -151,6 +151,9 @@ GCP_TOKEN = "fake-gcp-workload-token"
 # "domain": bool (the company's domain may read it), "upstream": ["<db>.<table>"]}; "people": {email: Entra object id},
 # for Purview, which names people by id. Pages hold one table, so every client's paging is exercised.
 CATALOG: dict = {"tables": [], "people": {}}
+# DataHub's own platforms beside CATALOG's Snowflake (F10b: the synthetic enterprise's EDW, on Teradata), set through
+# POST /datahub/setup, so loading the enterprise never replaces smoke's tables, nor smoke the enterprise's.
+DATAHUB_PLATFORMS: dict = {}
 # Fake secret stores (G3): HashiCorp Vault (JWT login with the runner's identity token, then KV v2), AWS Secrets
 # Manager (behind the same STS and SigV4 as Glue), and Azure Key Vault (an Entra token by workload identity
 # federation), each holding the secrets smoke sets through POST /secret-stores as JSON strings.
@@ -614,8 +617,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"errors": [{"message": "unknown query"}]})
             given = (body.get("variables") or {}).get("input") or {}
             platform = ((given.get("orFilters") or [{"and": [{"values": ["urn:li:dataPlatform:snowflake"]}]}])[0]["and"][0]["values"][0])
-            urn = lambda name: f"urn:li:dataset:(urn:li:dataPlatform:snowflake,{name},PROD)"
-            mine = tables if platform == "urn:li:dataPlatform:snowflake" else []
+            named = platform.rsplit(":", 1)[1]
+            urn = lambda name: f"urn:li:dataset:(urn:li:dataPlatform:{named},{name},PROD)"
+            mine = DATAHUB_PLATFORMS[named] if named in DATAHUB_PLATFORMS else tables if named == "snowflake" else []
             found, following = page(mine, int(given.get("scrollId") or 0))
             return self._json(200, {"data": {"scrollAcrossEntities": {"nextScrollId": following, "searchResults": [{"entity": {
                 "urn": urn(t["name"]), "properties": {"description": t.get("description", "")}, "editableProperties": None,
@@ -1071,6 +1075,9 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             CATALOG.update({"tables": body.get("tables", []), "people": body.get("people", {})})
             return self._json(200, {"project": CATALOG_PROJECT, "databricks": DATABRICKS, "role": AWS["role"], "datahub_token": DATAHUB_TOKEN})
+        if path == "/datahub/setup":  # kl.enterprise_eval sets a DataHub platform's tables, in CATALOG's shape
+            DATAHUB_PLATFORMS.update(self._body().get("platforms", {}))
+            return self._json(200, {"datahub_token": DATAHUB_TOKEN})
         if path.startswith("/purview/") and path.endswith("/oauth2/v2.0/token"):  # Entra's token endpoint, for Purview's audience
             form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
             return self._json(*entra_token(path.split("/")[2].lower(), form, PURVIEW, "https://purview.azure.net/.default", PURVIEW_TOKEN))
