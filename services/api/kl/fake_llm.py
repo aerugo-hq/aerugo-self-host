@@ -1198,12 +1198,30 @@ class Handler(BaseHTTPRequestHandler):
         prompt = messages[-1].get("content", "") if messages else ""
         if "knowledge compiler" in system:
             content = compiler_draft(prompt)
+        elif "knowledge extractor" in system:
+            content = extraction_reply(prompt)
         elif "grade answers" in system:
             content = grade(prompt)
         else:
             content = MODE["answer"]
         self._json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
                          "usage": {"prompt_tokens": 100, "completion_tokens": 12}})
+
+
+def extraction_reply(prompt: str) -> str:
+    """An extractor's reply (F2), mechanical on purpose: a fact per section, its first sentence cited, titled by its
+    heading and the document; a section saying make-an-unsupported-unit also gets a sentence it doesn't state, so smoke
+    can prove such a proposal is dropped. It measures the pipeline, never the quality of extraction."""
+    title = re.search(r"^Document: (.+)$", prompt, re.M)
+    units = []
+    for n, heading, body in re.findall(r"^\[(\d+)\] ([^\n]*)\n(.*?)(?=\n\n\[\d+\] |\Z)", prompt, re.M | re.S):
+        first = re.split(r"(?<=[.!?])\s", body.strip(), maxsplit=1)[0].strip()
+        if len(first.split()) >= 3:
+            units.append({"kind": "fact", "topic": heading, "title": f"{heading} ({title.group(1) if title else ''})"[:200],
+                          "text": f"{first.rstrip('.')} [{n}]."})
+        if "make-an-unsupported-unit" in body:
+            units.append({"kind": "fact", "topic": heading, "title": f"{heading}: the move", "text": f"The queue moves to the 2031 platform on Friday [{n}]."})
+    return json.dumps({"units": units})
 
 
 def compiler_draft(prompt: str) -> str:

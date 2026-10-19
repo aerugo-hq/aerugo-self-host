@@ -16,11 +16,13 @@ Loading, every run (each step only adds what's missing, so a run again changes n
    versions on one topic; and the planner's version of sell-through as a perspective, with its conflict. A fact no
    one who signs in can fully read (two stores' bike keys) is named, not loaded; sensitive facts never are.
 
-Then four checks:
+Then five checks:
 
 - Readers: each person can open exactly the documents the truth says, no more (a leak) and no fewer.
 - Units: each person reads exactly the units whose evidence they can all read, listed and by id, and a perspective and
   its conflict only when they read both sides.
+- Extraction (F2): Stores and Product quality opt in with the fake model; every proposal cites one of their pages or
+  tickets, never a chat thread, and each person sees exactly the proposals whose document they can open.
 - Retrieval: each question, asked as its person, scored as kl.evals scores the migration scenario (found, first
   right page, Recall@10, MRR), held to its own baseline ("company" in kl/evals_baseline.json); a forbidden page in
   the results is a leak. Questions waiting on a slice (F8, C1 to C3) are shown, not counted.
@@ -43,9 +45,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
+import psycopg
+from psycopg.rows import dict_row
 
 from . import company, evals, smoke
-from .smoke import BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, TOKEN_URL, api, api_ready, ask_as
+from .smoke import BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, OWNER_DB, TOKEN_URL, api, api_ready, ask_as
 
 ADMIN = "olivia"  # the org admin makes the teams and connections
 KEYCLOAK = TOKEN_URL.split("/realms/")[0]
@@ -337,14 +341,72 @@ def units_check(world: company.World, ids: dict[str, str]) -> tuple[list[str], l
     return leaks, missing
 
 
-def model_for_stores() -> None:
-    """The fake model, registered for Stores, so Ask is checked for its people (and its key put back after a restart)."""
-    r = api("POST", f"/v1/workspaces/{ASK_TEAM}/models", ADMIN, json={
+def model_for_stores(team: str = ASK_TEAM) -> None:
+    """The fake model, registered for a team (Stores, so Ask is checked for its people), its key put back after a restart."""
+    r = api("POST", f"/v1/workspaces/{team}/models", ADMIN, json={
         "name": "smoke-fake", "provider": "openai_compatible", "model": "fake", "base_url": f"{FAKE_LLM}/v1", "api_key": "unused"})
     if r.status_code not in (201, 409):
-        raise SystemExit(f"the fake model for {ASK_TEAM}: {r.status_code} {r.text[:200]}")
-    httpx.post(f"{BAO_URL}/v1/secret/data/kl/acme/{ASK_TEAM}/models/smoke-fake", headers={"X-Vault-Token": BAO_TOKEN},
+        raise SystemExit(f"the fake model for {team}: {r.status_code} {r.text[:200]}")
+    httpx.post(f"{BAO_URL}/v1/secret/data/kl/acme/{team}/models/smoke-fake", headers={"X-Vault-Token": BAO_TOKEN},
                json={"data": {"api_key": "unused"}}, timeout=10).raise_for_status()
+
+
+EXTRACT_TEAMS = ("stores", "product-quality")  # F2: opted in with the fake model, which measures the pipeline, not quality
+TEAM_DOCUMENTS_SQL = """
+SELECT count(*) FILTER (WHERE s.content_hash = d.content_hash) AS read, count(*) AS of
+FROM kl.workspace_documents wd JOIN kl.workspaces w ON w.id = wd.workspace_id JOIN kl.documents d ON d.id = wd.document_id
+LEFT JOIN kl.extraction_state s ON s.workspace_id = w.id AND s.document_id = d.id
+WHERE w.slug = %s AND d.source_kind = ANY(%s)
+"""
+PROPOSALS_SQL = """
+SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team FROM kl.knowledge_units u
+JOIN kl.documents d ON d.id = u.evidence[1] JOIN kl.workspaces w ON w.id = u.owner_team
+WHERE u.created_by = 'extraction' AND u.status = 'proposed' AND w.slug = ANY(%s)
+"""
+
+
+def extraction_check(world: company.World) -> tuple[list[str], list[str]]:
+    """F2 on the retailer: two teams opt in with the fake model; every proposal cites one of their pages or tickets,
+    never a chat thread, and each person sees exactly the proposals whose document they can open. Which documents are
+    pages and tickets comes from the truth, never from the code under test. Returns (leaks, missing)."""
+    pages = sorted({d.source for d in world.docs if d.source in company.LOADED} - {"slack"})
+    for team in EXTRACT_TEAMS:
+        model_for_stores(team)
+        r = api("PUT", f"/v1/workspaces/{team}/extraction", ADMIN, json={"model": "smoke-fake"})
+        if r.status_code != 200:
+            raise SystemExit(f"extraction for {team}: {r.status_code} {r.text[:200]}")
+    deadline, counts = time.monotonic() + 600, {}
+    with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+        while time.monotonic() < deadline:
+            counts = {t: conn.execute(TEAM_DOCUMENTS_SQL, (t, pages)).fetchone() for t in EXTRACT_TEAMS}
+            if all(c["read"] == c["of"] for c in counts.values()):
+                break
+            time.sleep(5)
+        else:
+            raise SystemExit(f"extraction didn't read every page and ticket in ten minutes: {counts}")
+        found = conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall()
+    by_key = {d.key: d for d in world.docs}
+    outside = [p for p in found if p["external_key"] not in by_key or by_key[p["external_key"]].source not in pages]
+    leaks = [f"a proposal ({p['id']}) cites {p['external_key']}, which isn't a page or ticket" for p in outside]
+    missing = []
+    print(f"\nExtraction (F2), the fake model for {' and '.join(EXTRACT_TEAMS)}: {len(found)} proposals from "
+          f"{len({p['external_key'] for p in found})} documents, {len(outside)} of them outside pages and tickets; "
+          "who sees them, against the truth\n")
+    for person in (p for p in world.people if p.username):
+        seen = world.visible(person.username)
+        want = {p["id"] for p in found if p["external_key"] in by_key and by_key[p["external_key"]].name in seen}
+        got, offset = set(), 0
+        while offset is not None:
+            r = api("GET", "/v1/units", person.username, params={"status": "proposed", "limit": 100, "offset": offset})
+            assert r.status_code == 200, f"proposals as {person.username}: {r.status_code} {r.text[:200]}"
+            got |= {u["id"] for u in r.json()["units"]}
+            offset = r.json()["next_offset"]
+        got &= {p["id"] for p in found}
+        leaks += [f"{person.username} saw the proposal {i}" for i in sorted(got - want)]
+        missing += [f"{person.username} can't see the proposal {i}" for i in sorted(want - got)]
+        mark = "LEAK" if got - want else ("miss" if want - got else "ok")
+        print(f"  {mark:4}  {person.username:5} {person.title:28} is shown {len(got)} of the {len(found)} proposals; the truth says {len(want)}")
+    return leaks, missing
 
 
 def score(world: company.World, out) -> tuple[dict, list[str]]:
@@ -407,7 +469,8 @@ def main(argv: list[str]) -> int:
         return 0
     leaks, missing = readers_check(world)
     unit_leaks, unit_missing = units_check(world, ids)
-    leaks, missing = leaks + unit_leaks, missing + unit_missing
+    extract_leaks, extract_missing = extraction_check(world)
+    leaks, missing = leaks + unit_leaks + extract_leaks, missing + unit_missing + extract_missing
     card, retrieval_leaks = score(world, out)
     problems = [f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
     if problems:

@@ -1,6 +1,6 @@
 # Recipes start with ">" instead of a tab (.RECIPEPREFIX, GNU make 3.82+), so editors can't break them.
 .RECIPEPREFIX = >
-.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario company eval-company enterprise atlas-eval eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
+.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario company eval-company enterprise atlas-eval eval-extraction eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
 
 # The local model `make llm` downloads for Ask. About 1 GB; make llm LLM_MODEL=qwen2.5:3b for better answers (about 2 GB).
 LLM_MODEL ?= qwen2.5:1.5b
@@ -119,6 +119,13 @@ atlas-eval: env
 >docker compose --profile smoke build smoke fake-llm
 >docker compose --profile smoke up -d fake-llm
 >docker compose --profile smoke run --rm smoke python -m kl.enterprise_eval
+
+# Extraction's quality (F2), measured once with the local model (run make llm first; nothing sent to it leaves the
+# machine): every retailer team proposes units from its pages and tickets, scored against the truth's facts (recall,
+# and precision as a lower bound). Reported, never gated: CI's fake model measures the pipeline, not quality.
+eval-extraction: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm smoke python -m kl.extraction_eval
 
 # Record the evaluation sets' scorecards as their baseline (slices K1, Q1, F9, and F10b): the golden set on the plain seed
 # first, then the scenario, which it loads, then the synthetic retailer, then its enterprise, which each load. From then on, make eval, make eval-scenario, and smoke fail when a case gets worse. Run it deliberately, when a change made things better (eval-scenario says so), and commit the file. A run
