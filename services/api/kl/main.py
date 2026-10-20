@@ -34,6 +34,7 @@ from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .units import router as units_router
+from . import unit_answers
 from .extraction import router as extraction_router
 from .gateway import month_usage
 from .connections_api import router as connections_router
@@ -1993,6 +1994,9 @@ SYSTEM_PROMPT = (
 # reliably than one at the top, and an answer that cites nothing is marked low confidence.
 ANSWER_REMINDER = ("\n\nAnswer the question in your first sentence, then add detail only if it helps. Use only the sources "
                    "above, and put the source's number after each sentence that uses it, like [1].")
+# F4: said only when knowledge units are among the sources.
+UNITS_REMINDER = (" Sources marked as knowledge units were recorded and reviewed by their owners: prefer them. When one gives "
+                  "another view, or says who it applies to, say so and whose view each is.")
 MODEL_REF = re.compile(r"^([a-z0-9][a-z0-9-]{0,39})/([a-z0-9][a-z0-9-]{0,39})$")
 
 
@@ -2020,14 +2024,15 @@ def earlier_turns(conn, earlier: list[dict], model: str, allowed: set[str]) -> s
         return ""
     recent = earlier[-HISTORY_TURNS * 2:]
     keys = sorted({c["id"] for m in recent if m["role"] == "assistant" for c in m.get("citations") or []})
-    now = {r["external_key"]: r["classification"] for r in conn.execute(
+    now = {r["external_key"]: {r["classification"]} for r in conn.execute(
         "SELECT external_key, classification FROM documents WHERE external_key = ANY(%s)", (keys,))} if keys else {}
+    now |= unit_answers.classifications(conn, set(keys))  # F4: a unit's are all of its evidence's
     lines = []
     for m in recent:
         if m["role"] == "user":
             lines.append(f"Person: {m['content']}")
         elif (m.get("model") == model and not m.get("hidden")
-              and all(now.get(c["id"]) in allowed for c in m.get("citations") or [])):
+              and all((now.get(c["id"]) or {None}) <= allowed for c in m.get("citations") or [])):
             lines.append(f"You: {m['content']}")
     return "\n".join(lines)
 
@@ -2076,10 +2081,14 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
     with scoped(org_id, caller.principals) as conn:  # what the model may receive, and whether the budget allows it
         if any(narrow):  # E1: only the chosen sources and containers
             visible = narrowed(conn, visible, *narrow)[0][:max_sources]
+        # F4: the knowledge units that answer it lead, unless the asker chose the documents to answer from
+        units = [] if focus or any(narrow) else unit_answers.find(
+            conn, caller, f"{last_question} {question}".strip(), {"teams": memberships(caller), "roles": None, "places": None})
         history = earlier_turns(conn, earlier or [], model, allowed)
-        with telemetry.span("ask.egress") as s:
-            sources = [r for r in visible if r["classification"] in allowed]
-            withheld = [r["external_key"] for r in visible if r["classification"] not in allowed]
+        with telemetry.span("ask.egress") as s:  # a unit goes only when the model may receive every one of its evidence's
+            sources = [r for r in units if r["classifications"] <= allowed] + [r for r in visible if r["classification"] in allowed]
+            withheld = ([r["external_key"] for r in units if not r["classifications"] <= allowed]
+                        + [r["external_key"] for r in visible if r["classification"] not in allowed])
             telemetry.set_attributes(s, sources=len(sources), withheld=len(withheld))
         telemetry.withheld(len(withheld), "ask")
         alerting.signal(conn, "withheld", "ask", len(withheld))
@@ -2091,8 +2100,9 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         api_key = model_key(endpoint["credential_ref"])
         try:
             with telemetry.span("ask.model", provider=endpoint["provider"], model=endpoint["model"]) as s:
+                reminder = ANSWER_REMINDER + (UNITS_REMINDER if any(r.get("unit") for r in sources) else "")
                 answer, usage = chat(endpoint["provider"], endpoint["model"], endpoint["base_url"], api_key,
-                                     SYSTEM_PROMPT, with_history(history, build_prompt(question, sources) + ANSWER_REMINDER))
+                                     SYSTEM_PROMPT, with_history(history, build_prompt(question, sources) + reminder))
                 telemetry.set_attributes(s, prompt_tokens=usage.get("prompt_tokens") or 0,
                                          completion_tokens=usage.get("completion_tokens") or 0)
         except GatewayError as e:
@@ -2118,7 +2128,8 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
             "question": question, "model": model,
             "sources": [r["external_key"] for r in sources], "withheld_by_egress": withheld,
             "dropped_by_post_check": dropped, "usage": usage, "answer_chars": len(answer), "over_budget": bool(refused),
-            "follow_up": bool(earlier), "focus": focus or [], "mode": mode, "confidence": sure["level"]})
+            "follow_up": bool(earlier), "focus": focus or [], "mode": mode, "confidence": sure["level"],
+            "units": [r["unit"]["id"] for r in sources if r.get("unit")]})
     if refused:
         raise HTTPException(429, refused, headers={"Retry-After": str(seconds_to_next_month())})
     return {
@@ -2126,6 +2137,7 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         "citations": [{"n": n, "id": r["external_key"], "title": r["title"], "source": r["source_uri"], "source_kind": r.get("source_kind"),
                        "source_version": r["source_version"], "section": r["heading_path"], "cited": n in cited,
                        "classification": r["classification"],
+                       **({"unit": r["unit"]} if r.get("unit") else {}),
                        **({"passage": r["body"]} if include_passages else {})}
                       for n, r in enumerate(sources, 1)],
         "withheld_by_policy": len(withheld),
@@ -2181,6 +2193,9 @@ def openable(conn, org_id: str, caller: Caller, keys: set[str]) -> set[str]:
     check."""
     if not keys:
         return set()
+    units = {k for k in keys if k.startswith(unit_answers.PREFIX)}  # F4: a cited unit, by F1's rule, read again now
+    if units:
+        return unit_answers.visible(conn, caller, units) | openable(conn, org_id, caller, keys - units)
     docs = {r["external_key"] for r in conn.execute(
         """SELECT d.external_key FROM documents d
            WHERE d.external_key = ANY(%(keys)s) AND EXISTS (

@@ -28,7 +28,9 @@ Then six checks:
 - Retrieval: each question, asked as its person, scored as kl.evals scores the migration scenario (found, first
   right page, Recall@10, MRR), held to its own baseline ("company" in kl/evals_baseline.json); a forbidden page in
   the results is a leak. Questions waiting on a slice (F8, C1 to C3) are shown, not counted.
-- Ask, for the store people (their team has the fake model): a forbidden page cited is a leak.
+- Ask, for the store people (their team has the fake model): a forbidden page cited is a leak; so is a knowledge unit
+  whose evidence the asker can't read all of, and a superseded unit fails (F4). Which questions Ask leads with a right
+  unit for is held to the baseline.
 
 Sensitive pages a source lets someone read (a medical note in a store channel, an HR note) are reported, not failed:
 excluding them is capture's work (C2).
@@ -455,7 +457,7 @@ def extraction_check(world: company.World) -> tuple[list[str], list[str]]:
     return leaks, missing
 
 
-def score(world: company.World, out) -> tuple[dict, list[str]]:
+def score(world: company.World, out, unit_ids: dict[str, str]) -> tuple[dict, list[str], list[str]]:
     key = lambda names: tuple(world.doc(n).key for n in names)
     cases = [evals.Case(q.id, q.asker, q.text, q.kind, key(q.expect), key(q.forbid), q.needs) for q in world.questions]
     rows, leaks, sensitive = [], [], []
@@ -474,7 +476,8 @@ def score(world: company.World, out) -> tuple[dict, list[str]]:
         wait = f"  (waits on {case.needs})" if case.needs else ""
         print(f"  {mark:4}  {case.id:26}  {case.kind:12}  as {case.user:5}  {detail}{wait}", file=out)
     model_for_stores()
-    answers = {}
+    answers, units, wrong_units = {}, {}, []
+    facts, fact_of = {f.id: f for f in world.facts}, {f"unit:{uid}": fid for fid, uid in unit_ids.items()}
     print(f"\nAsk's citations, through {ASK_MODEL}\n", file=out)
     stores_people = {p.username for p in world.people if p.username and p.team == ASK_TEAM}
     for case in cases:
@@ -485,17 +488,28 @@ def score(world: company.World, out) -> tuple[dict, list[str]]:
             raise SystemExit(f"Ask as {case.user} ({case.id}) answered {r.status_code}: {r.text[:200]}")
         cited = [c["id"] for c in r.json().get("citations") or []]
         leaks += [f"{case.user} was cited {k} ({case.id})" for k in cited if k in case.forbid]
+        led = [fact_of.get(k, k) for k in cited if k.startswith("unit:")]  # F4: each unit cited, as the fact it holds
+        seen = world.visible(case.user)
+        leaks += [f"{case.user} was cited the unit {f} ({case.id}), built from what they can't read" for f in led
+                  if f not in facts or not set(facts[f].evidence) <= seen]
+        wrong_units += [f"Ask cited the superseded unit {f} ({case.id})" for f in led if f in facts and facts[f].status == "superseded"]
+        q = next(x for x in world.questions if x.id == case.id)
+        if q.facts:
+            units[case.id] = bool(led) and led[0] in q.facts
         if case.expect:
             answers[case.id] = any(k in case.expect for k in cited)
         mark = "LEAK" if any(k in case.forbid for k in cited) else ("ok" if not case.expect or answers[case.id] else "miss")
-        print(f"  {mark:4}  {case.id:26}  as {case.user:5}  cited {', '.join(cited[:3]) or 'nothing'}", file=out)
-    card = evals.scorecard(rows, answers, scenario="company")
+        print(f"  {mark:4}  {case.id:26}  as {case.user:5}  cited {', '.join(fact_of.get(k, k) for k in cited[:3]) or 'nothing'}", file=out)
+    card = evals.scorecard(rows, answers, scenario="company", units=units)
     print(f"\n  Recall@{evals.K} {card['recall']:.0%}   MRR {card['mrr']:.2f}   over {len(card['cases'])} counted questions; "
           f"{sum(1 for c in cases if c.needs)} wait on slices not built yet", file=out)
     print(f"  Ask cited a right page for {sum(answers.values())} of {len(answers)} questions", file=out)
+    print(f"  Ask led with a right knowledge unit for {sum(units.values())} of {len(units)} questions with facts", file=out)
+    for line in wrong_units:
+        print(f"  WRONG: {line}", file=out)
     for line in sensitive:
         print(f"  SENSITIVE (excluded once C2 lands): {line}", file=out)
-    return card, leaks
+    return card, leaks, wrong_units
 
 
 def main(argv: list[str]) -> int:
@@ -518,8 +532,9 @@ def main(argv: list[str]) -> int:
     extract_leaks, extract_missing = extraction_check(world)
     merge_leaks, merge_missing = consolidation_check(world, ids)
     leaks, missing = leaks + unit_leaks + extract_leaks + merge_leaks, missing + unit_missing + extract_missing + merge_missing
-    card, retrieval_leaks = score(world, out)
-    problems = [f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
+    card, retrieval_leaks, wrong_units = score(world, out, ids)
+    problems = ([f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
+                + [f"WRONG: {line}" for line in wrong_units])
     if problems:
         for line in problems:
             print(f"  {line}", file=out)

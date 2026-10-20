@@ -132,8 +132,10 @@ function Sources({ answer, here = (path) => path }) {
   const order = [...answer.citations].sort((a, b) => Number(b.cited) - Number(a.cited) || a.n - b.n);
   return h("ol", { className: "ask-sources" }, order.map((c) => h("li", { key: c.id },
     h("span", { className: "cite-n" }, c.n),
-    h("div", null, h("a", { className: "a", href: here(`#/documents/${encodeURIComponent(c.id)}`) }, // opens any document, in place
-      h(SourceIcon, { kind: c.source_kind, label: sourceName(c.source_kind) }), c.title),
+    h("div", null, c.source_kind === "unit" // a knowledge unit (F4) isn't a document: its page comes with D1
+      ? h("span", null, h(SourceIcon, { kind: c.source_kind, label: "Knowledge unit" }), c.title)
+      : h("a", { className: "a", href: here(`#/documents/${encodeURIComponent(c.id)}`) }, // opens any document, in place
+        h(SourceIcon, { kind: c.source_kind, label: sourceName(c.source_kind) }), c.title),
       h("small", { className: "muted" }, c.cited ? (c.section || "Cited") : "Read, not cited")))));
 }
 
@@ -258,7 +260,7 @@ export default function AskView({ me, id: route, scope: workingIn = "org" }) {
 
   const loaded = thread && thread !== "loading" ? thread : null;
   const answer = loaded && pick !== null ? loaded.messages[pick] : null;
-  const ids = answer && !answer.hidden ? answer.citations.map((c) => c.id) : [];
+  const ids = answer && !answer.hidden ? answer.citations.filter((c) => c.source_kind !== "unit").map((c) => c.id) : [];
   const noModels = models !== null && !models.length;
   const ready = question.trim().length >= 3 && model && !busy;
 
