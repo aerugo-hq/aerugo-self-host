@@ -957,7 +957,7 @@ def team_gaps(ws: str, state: str = Query("open", pattern="^(open|answered|dismi
             gap["closest"] = [{"id": v["external_key"], "title": v["title"]} for v in visible]
             if visible:
                 try:
-                    gap["ask"] = [{"name": p.get("name"), "reasons": p.get("reasons", [])}
+                    gap["ask"] = [{"user": p.get("user"), "reasons": p.get("reasons", [])}
                                   for p in concept_people(visible[0]["external_key"], caller).get("people", [])][:3]
                 except HTTPException:
                     gap["ask"] = []

@@ -6622,6 +6622,7 @@ def questions_become_gaps_and_corrections_reach_owners():
         assert gap["askers"] == 3 and gap["asked"] == 3 and gap["state"] == "open", gap
         assert not any(name in json.dumps(gap) for name in ("alice", "carol", "bob")), "a gap named who asked"
         assert "closest" in gap, "the gap didn't say which pages are closest, for its reader"
+        assert all(p["user"] for p in gap.get("ask", [])), f"who to ask about the gap named nobody: {gap.get('ask')}"
         assert badge not in found, "two people's question became a gap"
         assert not any(tag in q and "surgery" in q for q in found), "a question about someone's surgery became a gap"
         assert gaps("carol").status_code == 403, "a member who isn't a curator read the team's gaps"
