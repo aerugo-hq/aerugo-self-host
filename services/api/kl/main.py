@@ -34,7 +34,7 @@ from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .units import router as units_router
-from . import context as asking, gaps, unit_answers, units as unit_store
+from . import context as asking, experts, gaps, unit_answers, units as unit_store
 from .extraction import router as extraction_router
 from .gateway import month_usage
 from .connections_api import router as connections_router
@@ -685,6 +685,7 @@ RATE_DEFAULTS = {  # requests a minute: (per person, per team, or per org for se
     "search": (int(os.environ.get("KL_RATE_SEARCH_PER_USER", "120")), int(os.environ.get("KL_RATE_SEARCH_PER_ORG", "3000"))),
     "ask": (int(os.environ.get("KL_RATE_ASK_PER_USER", "30")), int(os.environ.get("KL_RATE_ASK_PER_TEAM", "300"))),
     "compile": (int(os.environ.get("KL_RATE_COMPILE_PER_USER", "10")), int(os.environ.get("KL_RATE_COMPILE_PER_TEAM", "60"))),
+    "route": (int(os.environ.get("KL_RATE_ROUTE_PER_USER", "10")), int(os.environ.get("KL_RATE_ROUTE_PER_ORG", "300"))),  # F5b
 }
 BUDGET_WARN = 0.8  # past this share of a monthly budget, the team's admins are warned in their audit trail
 
@@ -977,6 +978,88 @@ def dismiss_gap(ws: str, gap_id: str, caller: Caller = Depends(authenticate)):
             raise HTTPException(404, "gap not found")
         audit(conn, org_id, caller.username, "gaps.dismiss", [ws], {"gap": gid})
     return {"id": gid, "state": "dismissed"}
+
+
+# ------------------------------------------------------------------ routing to experts (F5b)
+INBOX_SQL = """SELECT id::text AS id, created_by, expert, page, question, reply, audience, keep_team, replied_at,
+       kept_document IS NOT NULL AS kept, created_at FROM routed_questions ORDER BY created_at DESC LIMIT 200"""
+
+
+class RouteIn(BaseModel):
+    question: str = Field(min_length=3, max_length=2000)
+    page: str = Field(min_length=1, max_length=128)    # the curated page whose who-to-ask suggested the expert
+    expert: str = Field(min_length=1, max_length=120)  # their username, as who-to-ask gives it
+
+
+class ReplyIn(BaseModel):
+    reply: str = Field(min_length=1, max_length=10000)
+    keep: Literal["asker", "team", "org"] = "team"     # who may read it as knowledge: the asker only, the team, everyone
+    team: str | None = Field(default=None, max_length=40)  # which of the expert's own teams keeps it
+
+
+@app.post("/v1/questions/route", status_code=201)
+def route_question(body: RouteIn, caller: Caller = Depends(authenticate)):
+    """Send a question to a likely expert (F5b): someone who-to-ask suggests about a curated page the asker can read (a
+    hidden page is a 404, like a read), never anyone at all. Only the two of them see it, in their inboxes."""
+    if caller.service:
+        raise HTTPException(403, "a service account can't route a question to a person")
+    if not CONCEPT_KEY.fullmatch(body.page):
+        raise HTTPException(404, "concept not found")
+    org_id = resolve_org_id(config.ORG_SLUG)
+    rate_limit(org_id, caller, "route", None)
+    suggested = {p.get("user") for p in concept_people(body.page, caller).get("people", [])}
+    if body.expert not in suggested or body.expert == caller.username:
+        raise HTTPException(422, "route a question to someone who-to-ask suggests about that page")
+    with scoped(org_id, caller.principals) as conn:
+        rid = conn.execute("INSERT INTO routed_questions (org_id, created_by, expert, page, question) VALUES (kl.current_org(), %s, %s, %s, %s) "
+                           "RETURNING id::text AS id", (caller.username, body.expert, body.page, body.question.strip())).fetchone()["id"]
+        audit(conn, org_id, caller.username, "question.route", [], {"routed": rid, "page": body.page})
+    return {"id": rid}
+
+
+@app.get("/v1/questions/inbox")
+def question_inbox(caller: Caller = Depends(authenticate)):
+    """The questions routed to you, and the ones you routed with their replies (F5b): yours alone, by the database's own
+    rule; nobody else's are listed."""
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(INBOX_SQL).fetchall()
+    out = lambda r, who: {"id": r["id"], who: r["created_by"] if who == "asker" else r["expert"], "page": r["page"],  # noqa: E731
+                          "question": r["question"], "asked_at": r["created_at"].isoformat(), "reply": r["reply"],
+                          "replied_at": r["replied_at"] and r["replied_at"].isoformat(), "kept_for": r["audience"], "kept": r["kept"]}
+    return {"asked_of_me": [out(r, "asker") for r in rows if r["expert"] == caller.username],
+            "asked_by_me": [out(r, "expert") for r in rows if r["created_by"] == caller.username]}
+
+
+@app.post("/v1/questions/{routed_id}/reply")
+def reply_question(routed_id: str, body: ReplyIn, caller: Caller = Depends(authenticate)):
+    """The expert's reply (F5b), and who may read it as knowledge, their choice: the asker only, their own team (the
+    default), or the whole company. A kept reply becomes a document with exactly that audience and a proposed unit for
+    the team's curators (the worker's step); a question or reply naming someone's sensitive matters or personal data
+    can't be kept, since both are on the page.
+    A question routed to someone else is a 404."""
+    rid = unit_store._unit_id(routed_id)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    team = None
+    if body.keep != "asker":
+        own = admission.own_teams(caller)
+        team = body.team or (next(iter(own)) if len(own) == 1 else None)
+        if team not in own:
+            raise HTTPException(422, "name which of your own teams keeps the answer")
+    with scoped(org_id, caller.principals) as conn:
+        row = conn.execute("SELECT expert, reply, question FROM routed_questions WHERE id = %s", (rid,)).fetchone()
+        if not row or row["expert"] != caller.username:
+            raise HTTPException(404, "question not found")
+        if row["reply"]:
+            raise HTTPException(409, "it's already answered")
+        if team and not (experts.keepable(body.reply) and experts.keepable(row["question"])):
+            raise HTTPException(422, "it names someone's sensitive matters or personal data, so it can't be kept as knowledge")
+        conn.execute("UPDATE routed_questions SET reply = %s, audience = %s, keep_team = %s, replied_at = now() WHERE id = %s",
+                     (body.reply.strip(), body.keep, team, rid))
+        if team:
+            conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (kl.current_org(), 'answers.keep', %s)", (Jsonb({"routed": rid}),))
+        audit(conn, org_id, caller.username, "question.reply", [team] if team else [], {"routed": rid, "kept_for": body.keep})
+    return {"id": rid, "kept_for": body.keep, "team": team}
 
 
 # ------------------------------------------------------------------ model registry

@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, catalogs, config, confluence, consolidation, curator, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
+from . import alerting, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -553,6 +553,14 @@ def handle_retention_apply(conn, job) -> dict:
     return {**counts, "tuples": len(tuples), "changes_pruned": pruned, "web_sessions_swept": ended, "questions_pruned": asked}
 
 
+def handle_answer_keep(conn, job) -> dict:
+    """An expert's reply kept as knowledge (F5b): its document and proposed unit, then what's derived from them."""
+    result = experts.keep(conn, job["payload"]["routed"])
+    if result.get("kept"):
+        result.update(embedded=embed_missing(conn), bronze=materialize_bronze(conn), **links.refresh(conn), personal_data=privacy.scan(conn))
+    return result
+
+
 def handle_pipeline_push(conn, job) -> dict:
     """A CI pipeline's push (slice J1): its documents, then everything derived from them, as for any connector. The
     pushed text isn't kept once it's applied."""
@@ -712,7 +720,8 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "import.apply": handle_import_apply, "import.retire": handle_import_retire, "units.extract": handle_units_extract,
             "units.consolidate": lambda conn, job: consolidation.run(conn),
             "units.lifecycle": lambda conn, job: lifecycle.run(conn),
-            "gaps.refresh": lambda conn, job: gaps.run(conn)}
+            "gaps.refresh": lambda conn, job: gaps.run(conn),
+            "answers.keep": lambda conn, job: handle_answer_keep(conn, job)}
 RETENTION_SQL = ("INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'retention.apply' WHERE NOT EXISTS "
                  "(SELECT 1 FROM jobs WHERE kind = 'retention.apply' AND created_at > now() - interval '1 hour')")
 

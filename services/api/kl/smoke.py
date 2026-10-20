@@ -6664,6 +6664,93 @@ def questions_become_gaps_and_corrections_reach_owners():
 
 
 @check
+def an_expert_answers_a_routed_question_and_keeps_it_for_whom_they_choose():
+    """F5b, routing to experts: an asker sends a question only to someone who-to-ask suggests about a curated page they can read, and only the two of them see it; only the expert replies, once; kept for their team, the reply becomes a document only that team's people find and a proposed unit in its review queue; kept for the whole company, everyone finds it; kept for the asker alone, nothing is kept; and a reply naming someone's surgery can't be kept"""
+    import uuid
+    tag = uuid.uuid4().hex[:8]
+    page = "kb-sev1-playbook"  # Payments' curated page: for someone on Payments, who-to-ask names its members
+    qs = {k: f"{w} {tag}?" for k, w in (("team", "Which vault holds the settlement keys"), ("org", "Who signs off a refund freeze"),
+                                        ("asker", "Where is the spare pager"), ("health", "Who covers the payouts queue"),
+                                        ("asked", "Is Jamie Doe back from surgery"))}
+
+    def route(user, expert, question, on=page):
+        return api("POST", "/v1/questions/route", user, json={"question": question, "page": on, "expert": expert})
+
+    def owner(sql, *args):
+        with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
+            cur = conn.execute(sql, args)
+            return cur.fetchall() if cur.description else []
+
+    def finds(user, words, key):
+        return key in [r["id"] for r in api("GET", "/v1/search", user, params={"q": words, "limit": 10}).json().get("results", [])]
+    ids = {}
+    try:
+        people = {p["user"] for p in api("GET", f"/v1/concepts/{page}/people", "alice").json()["people"]}
+        assert "carol" in people, f"who-to-ask on {page} for alice: {people}"
+        assert route("alice", "dave", qs["team"]).status_code == 422, "a question went to someone who-to-ask doesn't suggest"
+        assert route("alice", "carol", qs["team"], on="kb-order-retention").status_code == 404, "a hidden page's who-to-ask answered"
+        assert route("alice", "alice", qs["team"]).status_code == 422, "someone routed a question to themselves"
+        for k, q in qs.items():
+            r = route("alice", "carol", q)
+            assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+            ids[k] = r.json()["id"]
+        theirs = api("GET", "/v1/questions/inbox", "carol").json()
+        assert {q["id"] for q in theirs["asked_of_me"]} >= set(ids.values()) and all(q["asker"] == "alice" for q in theirs["asked_of_me"] if q["id"] in ids.values())
+        assert {q["id"] for q in api("GET", "/v1/questions/inbox", "alice").json()["asked_by_me"]} >= set(ids.values())
+        bobs = api("GET", "/v1/questions/inbox", "bob").json()
+        assert not ({q["id"] for q in bobs["asked_of_me"] + bobs["asked_by_me"]} & set(ids.values())), "a routed question reached a third person"
+
+        reply = lambda user, k, body: api("POST", f"/v1/questions/{ids[k]}/reply", user, json=body)
+        assert reply("bob", "team", {"reply": "x"}).status_code == 404, "someone else replied to a routed question"
+        assert reply("alice", "team", {"reply": "x"}).status_code == 404, "the asker replied to their own question"
+        assert reply("carol", "team", {"reply": "In vault B."}).status_code == 422, "carol is on two teams and didn't say which keeps it"
+        answers = {"team": f"The settlement keys {tag} are in vault B, behind the second door.",
+                   "org": f"A refund freeze {tag} is signed off by the payments lead and the controller.",
+                   "asker": f"The spare pager {tag} is in the top drawer."}
+        assert reply("carol", "team", {"reply": answers["team"], "keep": "team", "team": "payments"}).status_code == 200
+        assert reply("carol", "org", {"reply": answers["org"], "keep": "org", "team": "payments"}).status_code == 200
+        assert reply("carol", "asker", {"reply": answers["asker"], "keep": "asker"}).status_code == 200
+        assert reply("carol", "health", {"reply": f"Jamie Doe had surgery {tag}, so Lee covers it.", "keep": "team", "team": "payments"}).status_code == 422, \
+            "a reply naming someone's surgery was kept"
+        assert reply("carol", "asked", {"reply": f"Next week {tag}.", "keep": "team", "team": "payments"}).status_code == 422,             "an answer to a question naming someone's surgery was kept (the question is the page's title)"
+        assert reply("carol", "team", {"reply": "again", "keep": "asker"}).status_code == 409, "a question was answered twice"
+        mine = {q["id"]: q for q in api("GET", "/v1/questions/inbox", "alice").json()["asked_by_me"]}
+        assert mine[ids["team"]]["reply"] == answers["team"] and mine[ids["asker"]]["kept_for"] == "asker", mine[ids["team"]]
+
+        deadline = time.monotonic() + 120
+        while len(owner("SELECT 1 FROM kl.documents WHERE external_key = ANY(%s)", [f"answer-{ids['team']}", f"answer-{ids['org']}"])) < 2 \
+                and time.monotonic() < deadline:
+            time.sleep(2)
+        kept = {r["external_key"]: r["acl_principals"] for r in owner(
+            "SELECT external_key, acl_principals FROM kl.documents WHERE external_key LIKE %s", f"answer-%")}
+        assert f"answer-{ids['asker']}" not in kept, "a reply kept for the asker alone became a document"
+        assert kept[f"answer-{ids['org']}"] == ["org:acme"] and "org:acme" not in kept[f"answer-{ids['team']}"], kept
+        assert finds("alice", f"settlement keys {tag}", f"answer-{ids['team']}"), "the team's own member can't find the kept answer"
+        assert not finds("bob", f"settlement keys {tag}", f"answer-{ids['team']}"), "a team's kept answer reached someone off the team"
+        assert finds("bob", f"refund freeze {tag}", f"answer-{ids['org']}"), "an answer kept for the whole company didn't reach it"
+        proposals = {u["title"] for u in api("GET", "/v1/workspaces/payments/review", "alice").json()["proposals"]}
+        assert qs["team"] in proposals and qs["org"] in proposals, f"the kept answers weren't proposed to the team's curators: {proposals}"
+
+        org = owner("SELECT id::text AS id FROM kl.orgs WHERE slug = 'acme'")[0]["id"]
+        with psycopg.connect(APP_DB, autocommit=True) as conn:  # the database itself: bob never reads alice's routed question
+            conn.execute("SELECT set_config('kl.org_id', %s, false), set_config('kl.principals', 'user:bob,group:finance', false)", (org,))
+            assert not conn.execute("SELECT id FROM kl.routed_questions WHERE id = %s", (ids["team"],)).fetchall(), \
+                "the database showed a routed question to a third person"
+        erased = {tuple(r.values()) for r in owner("SELECT tbl, col FROM kl.subject_columns()")}
+        assert {("routed_questions", "created_by"), ("routed_questions", "expert")} <= erased, "an erasure would leave a name on a routed question"
+        print("      experts: routed only to who-to-ask's people, seen by the two of them, kept for the team or the company as chosen")
+    finally:
+        keys = [f"answer-{i}" for i in ids.values()]
+        from .authz import fga
+        stale = {(t["user"], t["relation"], t["object"]) for k in keys for t in fga.read({"object": f"document:{k}"})}
+        if stale:
+            fga.write(deletes=stale)
+        owner("DELETE FROM kl.knowledge_units WHERE topic = ANY(%s)", [f"answer-{i[:8]}" for i in ids.values()])
+        owner("DELETE FROM kl.documents WHERE external_key = ANY(%s)", keys)
+        owner("DELETE FROM kl.routed_questions WHERE question LIKE %s", f"%{tag}%")
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid

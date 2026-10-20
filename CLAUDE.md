@@ -1804,6 +1804,59 @@ meaning would part them). The teams' baselines are recorded at the loop after F5
 built: an example `questions.yaml` in the provider repository's onboarding example (a small pull request there), graded
 answers per team (a judge model, as `make eval` has), askers who sign in to a real company's identity provider (the
 evaluation environment's test accounts only), and a screen for the scorecards (P9).
+F5b, routing to experts and kept answers (`docs/ENTERPRISE_PLAN.md` sections 5 and 6, ask-time capture; approved
+2026-10-20: an expert keeps an answer for the asker, their team, or the whole company, their team by default).
+Migration 0065: `routed_questions` (the asker, `created_by`; the expert; the curated page whose who-to-ask suggested
+them; the question; the reply; who it was kept for and by which team; the kept document and unit), which only the
+asker and the expert read, by the database's own rule; the asker inserts, the expert replies (a column grant on the
+reply's fields), and the worker records what it kept; `kl.subject_columns` gains `expert`, so an erasure reaches both.
+`POST /v1/questions/route` sends a question only to someone who-to-ask suggests about a curated page the asker can read
+(a hidden page is a 404, anyone else a 422, never to themselves; a rate limit of its own, `KL_RATE_ROUTE_PER_USER` 10 a
+minute, `KL_RATE_ROUTE_PER_ORG` 300); `GET /v1/questions/inbox` lists what was asked of you and what you asked, with
+replies; `POST /v1/questions/{id}/reply` (the expert alone, once; anyone else a 404) takes the reply and who may read
+it as knowledge: the asker only (nothing kept), one of the expert's own teams (`admission.own_teams`; which one, when
+they're on several), or the whole company. `kl/experts.py`: a question or reply that names one person's sensitive
+matters or personal data can't be kept, both screened since the question becomes the kept page's title (`keepable`, the
+same sensitive gate and personal-data detection as F2 and F5a: a business number is knowledge); the worker's step (`answers.keep`, `keep`) writes the kept reply as a document (`source_kind`
+`answer`, `answer-<id>`, its question as its title, "Answered by <expert> on <day>") with exactly its audience
+(`readers_for`: the team's own members and groups, never a grant to the whole company, as Notion's are, or
+`org:<org>`), its chunks, the team's workspace, and OpenFGA's viewer tuples, then embeddings and links as for a push,
+and a proposed unit (kind `answer`, documented) for the team's curators. Nothing is sent outside the app: the inboxes
+are where both see it. The expert's own words, shared by their choice: not synced content, so invariant 12 doesn't
+reach it. Smoke: `an_expert_answers_a_routed_question_and_keeps_it_for_whom_they_choose` (who-to-ask on Payments' Sev1
+playbook names carol for alice; dave, someone not suggested, a 422; Legal's hidden page a 404; alice to herself a 422;
+only carol and alice see the four questions, bob none; bob and alice can't reply; carol, on two teams, must name one;
+kept for Payments, alice finds the answer and bob doesn't; kept for the company, bob finds it; kept for alice alone,
+nothing is written; a reply naming someone's surgery refused, and so is an answer to a question naming it; a second
+reply a 409; both kept answers proposed in
+Payments' review queue; the database shows bob none of the routed questions; erasure lists both names). Unit:
+`tests/test_experts.py` (2). Red first: with routing to anyone, the check failed (dave was accepted); with a team's
+answer kept for the whole company (`readers_for`, built into the worker), it failed (both documents read `org:acme`);
+with the routed questions' read policy loosened to the org (as owner), it failed (bob read alice's question), the policy
+then restored exactly; each restored (`cmp`) and green. Found while building: the route had no rate limit of its own
+(`RATE_DEFAULTS`, a 500); an automated security review found that only the reply was screened, while the question
+becomes the kept page's title, so a routed question about someone's health could have been kept for a team or the
+company: both are screened now, in the API and the worker (red first: the new assertion failed on the old API, then
+passed); the first `keepable` test expected a phone number and an email to block a reply, which the
+shared detection rightly doesn't (only a government id, a card, a date of birth, or HR terms do); and F5a's gap list
+read who-to-ask's people by a field it doesn't have (`name`, where it gives `user`), so who to ask about a gap named no
+one: fixed on F5a's branch, with its check now requiring each person named. Also on F5a's branch, its check's question
+took words of its own (it had grouped with the retailer's ladder-keys question on a long-lived stack). Proof, against the
+running stack: `make unit` 185 passed; the new smoke check alone passed, with F5a's; the full suite is CI's and the
+loop's. Not built: routing from a page that isn't curated (who-to-ask is for curated pages, and the synthetic retailer
+has none, so F5b is proven in smoke only; documents' own authors and owners, and units' owner teams, would let any page
+route), telling an expert outside the app, an expert declining or passing a question on, and editing a kept answer
+(the unit's owners confirm, retire, or supersede it, as any unit).
+**The fresh-stack loop over F5a, F7, and F5b, 2026-10-20** (once after the three, at the top of the stack, f5b-experts,
+with CI's settings): `make pins` passed; `make unit` 185 passed; `make smoke` 182 passed, 15 skipped, 0 failed (each
+new check among them); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10
+94%, MRR 0.81 over 43 counted cases, no leak, no regression; `make eval-company` everyone opening exactly what the
+truth says, no leak, Recall@10 100%, MRR 0.83 over 52 counted questions, leading with a right unit for 15 of 26, the
+truth's 3 of 48 units stale, exactly its 1 gap, no regression; `make atlas-eval` exact, no leak, no regression; `make
+eval-teams` 11 teams, 61 questions, no leak (Stores Ask right 27 of 27, the right unit first 15 of 26); `make e2e` 38
+passed; `make test-web` passed; the lint at 0 errors and 43 warnings. The teams' baselines recorded on that stack after
+the other sets, as CI orders them (`kl.team_evals --record`: each team's Recall@10 100%; MRR from 0.25 for EDP's one
+question, behind the scenario's own pages as F10b found, to 1.0); every other set's record unchanged.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1813,8 +1866,8 @@ but for M10's real-vendor half (set aside), and its final report is above. Next,
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
-three, F5a (questions, gaps, and corrections), and F7 (question sets per team); next, F5b (routing to experts and
-kept answers), then the fresh-stack loop over the three.
+three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
+answers), with the fresh-stack loop over the three; next, F11 (storage modes), then capture (C1 to C5).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
