@@ -134,7 +134,7 @@ layers = [
                                                           ("Analyzers: code, SQL lineage, usage, jobs", S_NEW),
                                                           ("Profiles and systems", S_NEW),
                                                           ("Lifecycle: review, staleness, retirement", S_BUILT),
-                                                          ("Learning loop: feedback, gaps, experts", S_NEW)]),
+                                                          ("Learning loop: feedback, gaps, experts", S_BUILT)]),
     ("Stores: what it keeps", 610, [("Documents and index (Postgres, pgvector)", S_DB_BUILT),
                                      ("Knowledge units", S_DB_BUILT), ("Atlas graph", S_DB_BUILT), ("Questions and gaps", S_DB_BUILT),
                                      ("Usage", S_DB_NEW),

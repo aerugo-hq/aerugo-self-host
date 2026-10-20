@@ -251,7 +251,9 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
       2026-10-19: copies linked, not combined, so no unit's readers shrink; resolutions applied within a team.)
 - [x] **F4.** Answers from units first: scope, trust, freshness; procedures as checklists; contacts resolved; perspectives shown.
       (Contacts' current holders, and scope by role and place, come with F8.)
-- [ ] **F5.** The learning loop: feedback and corrections to owners; gaps from questions; routing to experts; answers kept with consent.
+- [x] **F5.** The learning loop: feedback and corrections to owners; gaps from questions; routing to experts; answers kept with consent.
+      (Built as F5a and F5b, decided 2026-10-20: a gap needs three different askers and never names them; an expert keeps
+      an answer for the asker, their team, or the whole company, their team by default.)
 - [x] **F6.** Lifecycle: review cadences, staleness, effective dates, retirement; owners told.
       (Owners are told in the app: their team's review queue and an info alert; nothing is sent outside it.)
 - [x] **F7.** Question sets per team, a baseline, CI holding to it. (In the company's onboarding repository,
