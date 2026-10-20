@@ -10,9 +10,9 @@ F1's rule, only when the asker reads every piece of its evidence; and it goes to
 receive every one of its evidence's classifications (invariant 7).
 
 Among those, the unit that fits the asker's scope most closely comes first, then the closer match (to a tenth), then
-the more trusted, then the one in force most recently. A unit in an open conflict the asker can see both sides of is
-used with the dispute said, so the answer gives both. Scope is the asker's context: today their teams; their role and place come with F8, until
-when a unit scoped to a role or place is used with its scope stated, so the answer can say who it applies to.
+the more trusted, then the one in force most recently. Scope is the asker's context: today their teams; their role
+and place come with F8, until when a unit scoped to a role or place is used with its scope stated, so the answer can
+say who it applies to.
 
 A unit becomes a source as its text, its structure (a procedure's numbered steps, each with its role and condition; a
 contact's role and how to reach it), its scope, and the perspectives on it the asker reads (another team's view, said
