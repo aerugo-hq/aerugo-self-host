@@ -396,14 +396,16 @@ HASH_SQL = "SELECT content_hash FROM kl.documents WHERE external_key = %s"
 
 
 def lifecycle_check(world: company.World, unit_ids: dict[str, str], out) -> tuple[list[str], list[str]]:
-    """F6 on the retailer: time passes for one unit (its review comes due) and one page changes under another; exactly
-    those two units go stale, each in its owner team's review queue with why, and another team's people are refused the
-    queue. Their owners confirm both first, as owners do, so each has its review restarted and its evidence snapshotted.
-    The page is put back afterwards."""
-    fact_due, (fact_changed, page, (old, new)) = company.LIFECYCLE_DUE, company.LIFECYCLE_CHANGED
+    """F6 on the retailer: time passes for one unit (its review comes due) and one page changes; exactly that unit and
+    every unit citing the page go stale, each in its owner team's review queue with why, and another team's people are
+    refused the queue. Their owners confirm them first, as owners do, so each has its review restarted and its evidence
+    snapshotted. The page is put back afterwards."""
+    fact_due, (_, page, (old, new)) = company.LIFECYCLE_DUE, company.LIFECYCLE_CHANGED
     writers = {spec.fact.id: spec for spec in unit_plan(world)[0]}
+    citing = {f.id for f in world.facts if page in f.evidence and f.id in unit_ids and f.status != "superseded"}
+    want = {fact_due} | citing
     missing: list[str] = []
-    for fid in (fact_due, fact_changed):
+    for fid in sorted(want):
         r = api("POST", f"/v1/units/{unit_ids[fid]}/confirm", writers[fid].writer)
         if r.status_code != 200:
             raise SystemExit(f"confirming {fid} as {writers[fid].writer}: {r.status_code} {r.text[:200]}")
@@ -437,11 +439,10 @@ def lifecycle_check(world: company.World, unit_ids: dict[str, str], out) -> tupl
     while time.monotonic() < deadline:
         with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
             stale = {r["id"] for r in conn.execute(LIFECYCLE_SQL, (sorted(set(unit_ids.values())),)) if r["status"] == "stale"}
-        if {unit_ids[fact_due], unit_ids[fact_changed]} <= stale:
+        if {unit_ids[f] for f in want} <= stale:
             break
         time.sleep(3)
     by_id = {uid: fid for fid, uid in unit_ids.items()}
-    want = {fact_due, fact_changed}
     got = {by_id[u] for u in stale}
     missing += [f"lifecycle never made {f} stale" for f in sorted(want - got)]
     missing += [f"lifecycle made {f} stale, which the truth leaves as it is" for f in sorted(got - want)]

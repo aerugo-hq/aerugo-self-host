@@ -65,6 +65,7 @@
       "bike-key-denver": true,
       "bike-key-portland": true,
       "christmas-eve-hours": true,
+      "district-manager-mine": true,
       "district-manager-mountain": true,
       "first-week": true,
       "first-week-courses": true,
@@ -84,7 +85,9 @@
       "shoplifting-associate": true,
       "shoplifting-leader": true,
       "sick-california": true,
-      "sick-colorado": true
+      "sick-colorado": true,
+      "sick-mine-co": true,
+      "sick-mine-or": true
     },
     "cases": {
       "allocation-fewer-units": {
@@ -139,6 +142,11 @@
       },
       "copy-approval": {
         "first": 2,
+        "found": 1,
+        "of": 1
+      },
+      "district-manager-mine": {
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -268,7 +276,7 @@
         "of": 1
       },
       "registers-down-leader": {
-        "first": 2,
+        "first": 3,
         "found": 1,
         "of": 1
       },
@@ -327,6 +335,16 @@
         "found": 1,
         "of": 1
       },
+      "sick-mine-co": {
+        "first": 3,
+        "found": 1,
+        "of": 1
+      },
+      "sick-mine-or": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      },
       "weeks-of-supply": {
         "first": 1,
         "found": 1,
@@ -334,9 +352,37 @@
       }
     },
     "k": 10,
-    "mrr": 0.8486,
+    "mrr": 0.8317,
     "recall": 1.0,
-    "scenario": "company"
+    "scenario": "company",
+    "units": {
+      "allocation-fewer-units": false,
+      "bike-key-denver": true,
+      "bike-key-portland": true,
+      "christmas-eve-hours": true,
+      "district-manager-mine": true,
+      "district-manager-mountain": true,
+      "first-week": false,
+      "first-week-courses": true,
+      "injury-california": true,
+      "injury-denver-fall": false,
+      "injury-what-to-do": false,
+      "recall-can-i-sell": false,
+      "recall-decision": false,
+      "recall-stores": true,
+      "registers-down-associate": false,
+      "registers-down-leader": true,
+      "returns-no-receipt": true,
+      "returns-owner": true,
+      "returns-window": false,
+      "risk-hospital": false,
+      "shoplifting-associate": false,
+      "shoplifting-leader": false,
+      "sick-california": true,
+      "sick-colorado": true,
+      "sick-mine-co": true,
+      "sick-mine-or": true
+    }
   },
   "golden": {
     "cases": {

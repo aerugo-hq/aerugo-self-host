@@ -70,8 +70,9 @@ KEY_SPOTS = ("in the key box in the manager's office, on hook 4", "in the front 
              "in the safe, in the envelope marked BIKE", "on the hook behind the stockroom door",
              "in the fitting room desk, top drawer", "on the opening key holder's ring, with the blue tag")
 
-# Time passing on the retailer, for F6's lifecycle check: the fact whose unit's review comes due, and the page that changes
-# under a confirmed unit (the fact, the page, and what in it changes); every other unit stays as it is.
+# Time passing on the retailer, for F6's lifecycle check: the fact whose unit's review comes due, and a page that changes
+# (a fact it holds, the page, and what in it changes); every unit citing that page goes stale with it, and every other
+# unit stays as it is.
 LIFECYCLE_DUE = "dec-24-hours"
 LIFECYCLE_CHANGED = ("weeks-of-supply", "merch-glossary", ("over the last 4 weeks", "over the last 6 weeks"))
 

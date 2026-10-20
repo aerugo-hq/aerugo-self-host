@@ -1678,11 +1678,11 @@ a resolved conflict superseding the side not kept. Owners are told in the app an
 conflicts, each only when the caller can read it in full; an info alert per team (`units_stale` in kl.alerting) says
 how many are due, and info alerts are never posted to the org's webhook; a unit's page carries its `history`. A stale
 unit still answers, ranked after current ones and said to be due for review (F4). The retailer: its truth names one
-unit whose review comes due and one page that changes under a confirmed unit (`LIFECYCLE_DUE`, `LIFECYCLE_CHANGED`);
-`lifecycle_check` in kl.company_eval (in CI, after Ask's check) has their owners confirm both, lets time pass for the
-first (its review date moved back, as owner) and changes the second's page in the fake Confluence (synced again), then
-holds that exactly those two of the company's units go stale, each in its owner team's queue with why and refused to
-another team, and puts the page back. Smoke: `knowledge_units_age_and_their_owners_are_told` (one unit stale by its
+unit whose review comes due and one page that changes (`LIFECYCLE_DUE`, `LIFECYCLE_CHANGED`); `lifecycle_check` in
+kl.company_eval (in CI, after Ask's check) has their owners confirm them, lets time pass for the first (its review date
+moved back, as owner) and changes the page in the fake Confluence (synced again), then holds that exactly that unit and
+every unit citing the page go stale (Christmas Eve's hours; weeks of supply and sell-through, both from the glossary),
+each in its owner team's queue with why and refused to another team, and puts the page back. Smoke: `knowledge_units_age_and_their_owners_are_told` (one unit stale by its
 cadence, one by a pushed document changing, one retired past its end date, a waiting proposal left alone; each event's
 reason and `lifecycle` as who; the queue for alice with each stale unit's why and the proposal, refused to carol and
 bob; bob gets no history (no unit); the database shows a unit's events to a reader of its evidence and hides them from a
@@ -1692,16 +1692,32 @@ smoke check now accepts its confirmed unit staying confirmed or going stale once
 record said F6 would review it). Red first: with the worker never scheduling the pass, the smoke check failed (nothing
 moved); with the events' read policy loosened to the org (as owner, `ALTER POLICY`), its database assertion failed (a
 reader of none of the evidence saw the history), the policy then restored exactly (`pg_policies` compared); with the
-review rule inverted in the worker, the retailer's check failed (46 of its 48 units went stale where the truth says 2,
-each named); each restored (`cmp`) and green. Proof, against the running stack: `make unit` 165 passed; the new smoke
+review rule inverted in the worker, the retailer's check failed (46 of its 48 units went stale where the truth then said
+2, each named); each restored (`cmp`) and green. Found by the fresh-stack loop: the truth named only one unit for the
+changed page, but sell-through cites the same glossary page, so it rightly went stale too (the long-lived stack had
+hidden it: its sell-through unit was confirmed before snapshots existed); the truth now says every unit citing the page
+goes stale, and the check confirms them all first, so a run again starts clean. Proof, against the running stack: `make unit` 165 passed; the new smoke
 check alone passed, with F1's, F2's, F3's, F4's, and F8's checks; `make eval-company`: everyone opening exactly what
 the truth says, no leak, Recall@10 100%, MRR 0.83 over 52 counted questions, Ask right for 27 of 27, leading with a right
-unit for 15 of 26, exactly the truth's 2 of 48 units stale ("due for review (every 90 days)" for Christmas Eve's hours,
-in Stores' queue for ana; "its evidence changed since it was confirmed" for weeks of supply, in Merchandising's for
-gus), no regression. Not run: the full smoke suite and the other sets (CI, and the loop next). Not built: telling owners
+unit for 15 of 26, the truth's units stale ("due for review (every 90 days)" for Christmas Eve's hours, in Stores'
+queue for ana; "its evidence changed since it was confirmed" for weeks of supply, in Merchandising's for gus; and, on
+the fresh stack below, sell-through beside it), no regression. Not run: the full smoke suite and the other sets (CI, and the loop next). Not built: telling owners
 outside the app (email or chat would write to a company's system: a decision for later), a unit's history screen (D1),
 a review cadence per kind or team (one per unit today), and scanning only the units due (every active unit, once a
 minute: an index on the review time and documents' change times once an org holds hundreds of thousands).
+**The fresh-stack loop over F4, F8, and F6, 2026-10-20** (by decision, once after the three, at the top of the stack,
+f6-lifecycle, with CI's settings): `make pins` passed; `make unit` 165 passed; `make smoke` 180 passed, 15 skipped, 0
+failed (every new check among them); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario`
+Recall@10 94%, MRR 0.81 over 43 counted cases, no leak, no regression; `make eval-company` failed once, on F6's truth
+(sell-through, above), then passed on the same stack: everyone opening exactly what the truth says, no leak, Recall@10
+100%, MRR 0.83 over 52 counted questions (F8's three new), Ask citing a right page for 27 of 27 and leading with a right
+unit for 15 of 26, every cited contact resolved as the truth says, exactly the truth's 3 of 48 units stale, no
+regression; `make atlas-eval` exact, no leak, no regression; `make e2e` 37 passed and 1 failed,
+`test_compliance_is_for_org_admins`, which passed alone twice (a page none of the three touched; the load flake, as
+`test_a_team_scope_follows_you_everywhere` before it); `make test-web` 7 passed; the lint at 0 errors and 43 warnings.
+The retailer's baseline was recorded again on that stack, in CI's order after the other sets (`kl.company_eval
+--record`): Recall@10 100%, MRR 0.83 over 52 counted questions, with which questions lead with a right unit (15 of 26)
+now held; the golden set's, the scenario's, and the Atlas's records are unchanged.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1710,8 +1726,8 @@ M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
-units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above; next, the fresh-stack loop over F4,
-F8, and F6, then F5 (the learning loop) and F7 (question sets per team).
+units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
+three; next, F5 (the learning loop) and F7 (question sets per team).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
