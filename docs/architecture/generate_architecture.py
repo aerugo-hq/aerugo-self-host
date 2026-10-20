@@ -152,7 +152,7 @@ for title, y, items in layers:
 for lower, upper in zip(rows[::-1][:-1], rows[::-1][1:]):
     p.edge(lower[0], upper[0])
 p.box("<b>Across every layer</b>", 1280, 130, 330, 780, S_GROUP)
-cross = [("Identity: single sign-on (Keycloak, Entra)", S_BUILT), ("Permissions: row-level security and OpenFGA", S_BUILT),
+cross = [("Identity: sign-on, and the asker's role and place", S_BUILT), ("Permissions: row-level security and OpenFGA", S_BUILT),
          ("Model gateway: approved models, budgets", S_BUILT), ("Audit and privacy", S_BUILT),
          ("Job queue with leases", S_BUILT), ("Observability: telemetry, alerts", S_BUILT),
          ("Sensitive-topic filters", S_NEW), ("Question sets: tests for answers", S_NEW)]

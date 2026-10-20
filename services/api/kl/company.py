@@ -192,6 +192,7 @@ class Fact:
     contradicted_by: tuple[str, ...] = ()
     supersedes: str = ""              # the fact it replaced, on the same topic (F1 loads both as versions)
     contradicts: tuple[str, ...] = ()  # a stale fact: the current facts it says otherwise than (F3 must find each)
+    role: str = ""                    # a contact's role, which F8 resolves to its current holder for each asker
 
 
 @dataclass(frozen=True)
@@ -789,7 +790,7 @@ def _facts(places: tuple[Place, ...]) -> tuple[Fact, ...]:
              ("injury-procedure",)),
         Fact("injury-ca", "procedure", "California stores also record a customer injury in the store's safety log the same day.",
              ("injury-procedure",), ("CA",)),
-        Fact("risk-number", "contact", "Risk on-call: 555-0170, any time.", ("who-to-call", "injury-procedure")),
+        Fact("risk-number", "contact", "Risk on-call: 555-0170, any time.", ("who-to-call", "injury-procedure"), role="Risk on-call"),
         Fact("entrance-mats", "decision", "Entrance mats go down before the doors open (decided after the Denver fall, September 2026).",
              ("STORE-101", "opening-closing")),
         Fact("shoplifting", "procedure", "Associates never confront or follow a shoplifter; they tell the manager on duty.", ("shoplifting-basics",)),
@@ -799,7 +800,8 @@ def _facts(places: tuple[Place, ...]) -> tuple[Fact, ...]:
                (f"key-thread-{s.code}",), (s.code,)) for i, s in enumerate(stores)),
         Fact("pos-offline", "procedure", "When registers are down: offline mode (Mode and F9), cards up to $250 and cash work, call 555-0142 option 2.",
              ("pos-down", "helpdesk-pos")),
-        Fact("mountain-dm", "contact", "The Mountain district (Colorado, Utah) is managed by Dara Singh.", ("districts",)),
+        Fact("mountain-dm", "contact", "The Mountain district (Colorado, Utah) is managed by Dara Singh.", ("districts",), ("CO", "UT"),
+             role="District manager"),
         Fact("dec-24-hours", "fact", "On 24 December 2026 stores open 9:00 to 17:00.", ("holiday-hours",)),
         Fact("recall-decision", "decision", "Kai Moreno decided on 11 May 2026 to recall every TrailLite 2 tent (SKU 40211) sold since 1 February 2026.",
              ("QUAL-8", "quality-recall")),
@@ -878,8 +880,8 @@ def _questions() -> tuple[Question, ...]:
         Q("returns-changes", "fay", "What changed in the returns policy this year?", "policy", ("returns-2026", "cc-weekly-changes"), facts=("returns-window", "no-receipt")),
         Q("sick-colorado", "ben", "How much paid sick leave do Colorado store employees earn?", "location", ("sick-co",), facts=("sick-co",)),
         Q("sick-california", "cora", "How much paid sick leave do California store employees get?", "location", ("sick-ca",), facts=("sick-ca",)),
-        Q("sick-mine-co", "ben", "How much sick leave do I earn?", "location", ("sick-co",), needs="F8", facts=("sick-co",)),
-        Q("sick-mine-or", "ana", "How much sick leave do I earn?", "location", ("sick-or",), needs="F8", facts=("sick-or",)),
+        Q("sick-mine-co", "ben", "How much sick leave do I earn?", "location", ("sick-co",), facts=("sick-co",)),
+        Q("sick-mine-or", "ana", "How much sick leave do I earn?", "location", ("sick-or",), facts=("sick-or",)),
         Q("first-week", "ana", "What do I do in my first week?", "onboarding", ("first-week",), facts=("first-week",)),
         Q("first-week-courses", "ana", "Which courses do I need to finish in my first week?", "onboarding", ("first-week",), facts=("first-week",)),
         Q("shoplifting-associate", "ana", "What should I do if I see someone shoplifting?", "permission", ("shoplifting-basics",), ("lp-leaders",),
@@ -893,7 +895,7 @@ def _questions() -> tuple[Question, ...]:
         Q("registers-down-associate", "ana", "The registers are down. What do we do?", "permission", ("helpdesk-pos",), ("pos-down",), facts=("pos-offline",)),
         Q("registers-denver", "dara", "What happened when the registers went offline at Denver Union Station?", "lookup", ("STORE-102",)),
         Q("district-manager-mountain", "ben", "Who is the district manager for the Mountain district?", "contact", ("districts",), facts=("mountain-dm",)),
-        Q("district-manager-mine", "ben", "Who is my district manager?", "contact", ("districts",), needs="F8", facts=("mountain-dm",)),
+        Q("district-manager-mine", "ben", "Who is my district manager?", "contact", ("districts",), facts=("mountain-dm",)),
         Q("christmas-eve-hours", "ana", "What time does the store close on December 24?", "lookup", ("holiday-hours",), facts=("dec-24-hours",)),
         Q("recall-stores", "cora", "What do stores need to do for the TrailLite 2 recall?", "procedure", ("recall-notice",), facts=("recall-stores",)),
         Q("recall-can-i-sell", "ana", "Can I sell a TrailLite 2 tent?", "procedure", ("recall-notice",), facts=("recall-stores",)),
@@ -1060,12 +1062,32 @@ def slack_workspace(world: World) -> dict:
     return {"users": users, "channels": channels}
 
 
+def manager_of(world: World, person: Person) -> Person | None:
+    """Who a person reports to: an associate or assistant to their store's manager, a store manager to their district's
+    manager, a district manager to the head of store operations, anyone else to their team's lead; leads at the top of
+    their team report to no one here. Only people still at the company."""
+    here = [p for p in world.people if p.active and p != person]
+    place = next(p for p in world.places if p.code == person.place)
+    first = lambda test: next((p for p in here if test(p)), None)
+    if person.team == "stores":
+        if person.title in ("Store associate", "Assistant store manager"):
+            return first(lambda p: p.title == "Store manager" and p.place == person.place)
+        if person.title == "Store manager":
+            return first(lambda p: p.title == f"District manager, {place.district}")
+        if person.title.startswith("District manager"):
+            return first(lambda p: p.title == "Head of store operations")
+        return None
+    return None if person.leads else first(lambda p: p.team == person.team and p.leads)
+
+
 def entra_tenant(world: World) -> dict:
-    """The company's directory: everyone, with their title, team, and place (F8 reads these), the one who has left
-    disabled, and a group per team."""
+    """The company's directory: everyone, with their title, team, store or office (by its code), state, and manager (F8
+    reads these), the one who has left disabled, and a group per team."""
     places = {p.code: p for p in world.places}
+    boss = {p.email: manager_of(world, p) for p in world.people}
     users = [{"id": p.entra, "mail": p.email, "userPrincipalName": p.email, "displayName": p.name, "accountEnabled": p.active,
-              "jobTitle": p.title, "department": dict((s, n) for s, n, _ in TEAMS)[p.team], "officeLocation": places[p.place].name}
+              "jobTitle": p.title, "department": dict((s, n) for s, n, _ in TEAMS)[p.team], "officeLocation": p.place,
+              "state": places[p.place].state, **({"manager": {"mail": boss[p.email].email}} if boss[p.email] else {})}
              for p in world.people]
     groups = {str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://acme.test/groups/{slug}")):
               {"mail": f"{slug}@{DOMAIN}", "name": name, "members": [{"user": p.entra} for p in world.people if p.team == slug and p.active]}

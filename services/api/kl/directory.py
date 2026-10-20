@@ -43,6 +43,16 @@ GUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 PEM_BLOCK = re.compile(r"-----BEGIN ([A-Z ]+)-----\s+([A-Za-z0-9+/=\s]+?)-----END \1-----")
 
 
+def about(title=None, department=None, office=None, city=None, state=None, country=None, manager=None) -> dict:
+    """What a listing says of a person beyond who they are (F8): short text each, and a manager only by a valid email."""
+    def text(v) -> str | None:
+        v = str(v or "").strip()
+        return v[:200] or None
+    boss = str(manager or "").strip().lower()
+    return {"title": text(title), "department": text(department), "office": text(office), "city": text(city),
+            "state": text(state), "country": text(country), "manager_email": boss if EMAIL.fullmatch(boss) else None}
+
+
 class ListingCutShort(RuntimeError):
     """A directory's listing stopped before its end: the sync fails rather than reading the missing as leavers."""
 
@@ -141,7 +151,9 @@ class OktaClient:
                 continue
             active = u.get("status") in ACTIVE or found.get(email, {}).get("active", False)
             name = f"{profile.get('firstName') or ''} {profile.get('lastName') or ''}".strip()
-            found[email] = {"email": email, "name": name[:200], "active": active}
+            found[email] = {"email": email, "name": name[:200], "active": active,
+                            **about(profile.get("title"), profile.get("department"), None, profile.get("city"),
+                                    profile.get("state"), profile.get("countryCode"))}  # Okta has no office or manager's email by default
         return list(found.values())
 
 
@@ -201,7 +213,13 @@ class GoogleDirectoryClient:
                 if not EMAIL.fullmatch(email):
                     continue
                 active = (not deleted and not u.get("suspended") and not u.get("archived")) or found.get(email, {}).get("active", False)
-                found[email] = {"email": email, "name": str((u.get("name") or {}).get("fullName") or "")[:200], "active": active}
+                org = next((o for o in u.get("organizations") or [] if o.get("primary")), (u.get("organizations") or [{}])[0])
+                where = (u.get("locations") or [{}])[0]
+                work = next((a for a in u.get("addresses") or [] if a.get("type") == "work"), {})
+                boss = next((r.get("value") for r in u.get("relations") or [] if r.get("type") == "manager"), None)
+                found[email] = {"email": email, "name": str((u.get("name") or {}).get("fullName") or "")[:200], "active": active,
+                                **about(org.get("title"), org.get("department"), where.get("buildingId") or where.get("area"),
+                                        work.get("locality"), work.get("region"), work.get("country"), boss)}
         return list(found.values())
 
     def groups(self, active: set[str]) -> tuple[dict[str, list[str]], dict[str, str], list[str]]:
@@ -311,17 +329,22 @@ class EntraClient(GraphClient):
         can't sign in: it has left, as far as access goes. Graph not saying whether an account is enabled (the app
         lacks User.Read.All) fails the sync rather than reading everyone as gone."""
         found: dict[str, dict] = {}
-        select = {"$select": "id,mail,userPrincipalName,displayName,accountEnabled", "$top": 999}
+        select = {"$select": "id,mail,userPrincipalName,displayName,accountEnabled,jobTitle,department,officeLocation,city,state,country",
+                  "$top": 999}
         for deleted in (False, True):
-            for u in self._pages("directory/deletedItems/microsoft.graph.user" if deleted else "users", select):
+            for u in self._pages("directory/deletedItems/microsoft.graph.user" if deleted else "users",
+                                 select if deleted else {**select, "$expand": "manager($select=mail,userPrincipalName)"}):
                 email = str(u.get("mail") or u.get("userPrincipalName") or "").strip().lower()
                 if not EMAIL.fullmatch(email):
                     continue
                 if not deleted and u.get("accountEnabled") is None:
                     raise ListingCutShort("Graph didn't say whether accounts are enabled: grant User.Read.All")
                 active = (not deleted and u["accountEnabled"] is True) or found.get(email, {}).get("active", False)
+                boss = u.get("manager") or {}
                 found[email] = {"email": email, "name": str(u.get("displayName") or "")[:200], "active": active,
-                                "external_id": str(u.get("id") or "").lower()[:200] or None}
+                                "external_id": str(u.get("id") or "").lower()[:200] or None,
+                                **about(u.get("jobTitle"), u.get("department"), u.get("officeLocation"), u.get("city"), u.get("state"),
+                                        u.get("country"), boss.get("mail") or boss.get("userPrincipalName"))}
         return list(found.values())
 
     def groups(self, active: set[str]) -> tuple[dict[str, list[str]], dict[str, str], list[str]]:
@@ -412,8 +435,10 @@ def sync_directory(conn, connection: dict, client) -> dict:
         gone = [{"email": e, "name": n, "active": False} for e, n in sorted(held.items()) if e not in listed]  # listed before, not now: left
         conn.execute("DELETE FROM directory_people WHERE connection_id = %s", (cid,))
         conn.cursor().executemany(
-            "INSERT INTO directory_people (org_id, connection_id, email, display_name, active, external_id) VALUES (%s, %s, %s, %s, %s, %s)",
-            [(org_id, cid, p["email"], p["name"], p["active"], p.get("external_id")) for p in people + gone])
+            "INSERT INTO directory_people (org_id, connection_id, email, display_name, active, external_id, title, department, office, "
+            "city, state, country, manager_email) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            [(org_id, cid, p["email"], p["name"], p["active"], p.get("external_id"),
+              *(p.get(k) for k in ("title", "department", "office", "city", "state", "country", "manager_email"))) for p in people + gone])
         if client.feeds:
             rows = {(g, m) for g, members in groups.items() for m in members}
             before = {(r["group_email"], r["member_email"]) for r in conn.execute(
