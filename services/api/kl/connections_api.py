@@ -18,7 +18,7 @@ from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
 from .managed import forget_managed, managed_header, managed_info, note_managed
 from .policy import SLUG, audit, require_org_admin, require_workspace_admin
-from .sync_items import POINTER_KINDS
+from .sync_items import LIVE_KINDS, POINTER_KINDS
 from .vault import vault
 
 router = APIRouter(prefix="/v1/workspaces/{ws}")
@@ -26,7 +26,9 @@ router = APIRouter(prefix="/v1/workspaces/{ws}")
 # F11a: how a connection keeps what it reads. `index` keeps its text (search's every channel, and the passes that read it);
 # `pointer` keeps only its address, title, readers, and embeddings, and reads its text from the source when someone asks.
 Storage = Literal["index", "pointer"]
+LiveStorage = Literal["index", "pointer", "live"]  # F11b: live only, where the source's own search can find what it holds
 POINTER_ONLY = "only Confluence, Jira, and Slack can keep pointers only; every other source's text is indexed"
+LIVE_ONLY = "only Confluence and Jira can be live only: Slack's search reads as a person, so keep pointers instead"
 
 
 class IndexedOnly(BaseModel):
@@ -161,7 +163,7 @@ class JiraConnectionIn(BaseModel):
     projects: list[str] | None = Field(default=None, max_length=500)  # None: every project the account can browse
     company_site: bool = False  # its admin confirms this Jira site is the company's own (ADR 0011)
     every_minutes: int | None = Field(default=None, ge=5, le=10080)  # how often it syncs; None: the stack's default
-    storage: Storage = "index"  # F11a
+    storage: LiveStorage = "index"  # F11a, F11b
 
 
 LABEL = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,99}$")  # Confluence's labels: lowercase, no spaces
@@ -178,7 +180,7 @@ class ConfluenceConnectionIn(BaseModel):
     page_trees: list[str] | None = Field(default=None, max_length=100)  # only these pages, and everything under them
     company_site: bool = False  # its admin confirms this Confluence site is the company's own (ADR 0011)
     every_minutes: int | None = Field(default=None, ge=5, le=10080)
-    storage: Storage = "index"  # F11a
+    storage: LiveStorage = "index"  # F11a, F11b
 
 
 def confluence_scope(spaces, labels, page_trees) -> str | None:
@@ -326,6 +328,13 @@ class SlackConnectionIn(BaseModel):
     api_base: str = slack.SLACK_API
     every_minutes: int | None = Field(default=None, ge=5, le=10080)
     storage: Storage = "index"  # F11a
+
+    @field_validator("storage", mode="before")
+    @classmethod
+    def not_live(cls, value):
+        if value == "live":  # F11b: said plainly, rather than as a list of the values allowed
+            raise ValueError(LIVE_ONLY)
+        return value
 
 
 @router.post("/connections/slack", status_code=201)
@@ -884,7 +893,7 @@ class ConnectionPatch(BaseModel):
     bot_token: str | None = Field(default=None, min_length=10, max_length=300, repr=False)  # Slack: a rotation
     token: str | None = Field(default=None, min_length=20, max_length=300, repr=False)  # Notion: a rotation
     every_minutes: int | None = Field(default=None, ge=5, le=10080)   # how often it syncs (ADR 0011)
-    storage: Storage | None = None  # F11a: Confluence, Jira, and Slack; a change reads everything again in the new form
+    storage: LiveStorage | None = None  # F11: pointer for Confluence, Jira, and Slack; live for the first two; a change reads all again
     api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # Jira, Okta: a rotation
     email: str | None = Field(default=None, min_length=3, max_length=254)  # Jira: the account, with a new token
     service_account_key: str | None = Field(default=None, max_length=20000, repr=False)  # Google: a rotation
@@ -948,6 +957,8 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             raise HTTPException(422, "that isn't a bot token (xoxb-...): a user token would read as a person")
         if body.storage is not None and c["kind"] not in POINTER_KINDS:
             raise HTTPException(422, POINTER_ONLY)
+        if body.storage == "live" and c["kind"] not in LIVE_KINDS:
+            raise HTTPException(422, LIVE_ONLY)
         scope = {"spaces": body.spaces, "labels": body.labels, "page_trees": body.page_trees}
         if any(v is not None for v in scope.values()):
             if c["kind"] != "confluence":

@@ -138,8 +138,9 @@ def plan(world: company.World, storage: str = "index") -> list[tuple[str, str, d
             held = [c.id for c in world.containers if c.source == source and c.team == slug]
             if not held:
                 continue
+            kept = "pointer" if storage == "live" and source == "slack" else storage  # F11b: Slack can't be live only
             body = {"name": f"retail-{source}-{slug}", "api_base": SITES[source] + ("/api" if source == "slack" else ""),
-                    scope: held, "every_minutes": 10080, "storage": storage, **CREDENTIALS[source]}
+                    scope: held, "every_minutes": 10080, "storage": kept, **CREDENTIALS[source]}
             body |= {"company_site": True} if source in ("confluence", "jira") else {"company_workspace": True, "history_days": 3650}
             out.append((slug, source, body))
     return out
@@ -152,10 +153,14 @@ def connect(world: company.World, app: dict, storage: str = "index") -> list[tup
     for team, kind, body in plan(world, storage):
         path = f"/v1/workspaces/{team}/connections/{body['name']}"
         held = api("GET", path, ADMIN)
+        if held.status_code == 200 and held.json()["status"] == "error":  # an earlier run's error (its fake restarted empty):
+            api("PATCH", path, ADMIN, json={"enabled": False})            # paused and resumed, it's pending again, so it
+            api("PATCH", path, ADMIN, json={"enabled": True})             # never reads as this run's
+            held = api("GET", path, ADMIN)
         if held.status_code != 200:
             r = api("POST", f"/v1/workspaces/{team}/connections/{kind}", ADMIN, json=body)
-        elif (held.json()["settings"].get("storage") or "index") != storage:
-            r = api("PATCH", path, ADMIN, json={"storage": storage})
+        elif (held.json()["settings"].get("storage") or "index") != body["storage"]:
+            r = api("PATCH", path, ADMIN, json={"storage": body["storage"]})
         else:
             r = api("POST", f"{path}/refresh", ADMIN)
         if r.status_code not in (200, 201, 202):
@@ -550,7 +555,7 @@ def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[
         time.sleep(90)  # a pass a minute: long enough for one to run, had it anything to read
         with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
             found = conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall()
-        print(f"\nExtraction (F2) with pointers only: {len(found)} proposals (none, since no text is kept)\n")
+        print(f"\nExtraction (F2) with no text kept: {len(found)} proposals (none expected)\n")
         return [f"a proposal ({p['id']}) was extracted from {p['external_key']}, a pointer" for p in found], []
     deadline, counts = time.monotonic() + 600, {}
     with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
@@ -675,10 +680,12 @@ def main(argv: list[str]) -> int:
     arg = lambda name, default: int(argv[argv.index(name) + 1]) if name in argv else default
     seed, stores = arg("--seed", DEFAULT[0]), arg("--stores", DEFAULT[1])
     world = company.build(seed, stores)
-    pointer = "--pointer" in argv  # F11a: Confluence, Jira, and Slack keep pointers only; measured as its own set
-    name = "company-pointer" if pointer else "company"
+    # F11: pointers only (Confluence, Jira, and Slack), or live only (Confluence and Jira; Slack keeps pointers), each
+    # measured as its own set
+    storage = "live" if "--live" in argv else "pointer" if "--pointer" in argv else "index"
+    pointer, name = storage != "index", {"index": "company", "pointer": "company-pointer", "live": "company-live"}[storage]
     api_ready()
-    ids = load(world, "pointer" if pointer else "index")
+    ids = load(world, storage)
     if "--load-only" in argv:
         print(f"{company.COMPANY} is loaded ({stores} stores, seed {seed}): sign in as ana, cora, kai, or another of its people "
               "(password: <name>-dev-only).")

@@ -70,6 +70,9 @@ jobs:
       - name: The retailer with pointers only, F11a (no text kept; answers read it live, for who the source lists; no leak; no regression)
         run: make eval-company-pointer
 
+      - name: The retailer live only, F11b (Confluence and Jira found through their own search, nothing but titles and readers kept; no leak; no regression)
+        run: make eval-company-live
+
       - name: No pointer's text in the services' logs (F11a's smoke check plants it in every source it reads)
         run: test "$(docker compose --profile smoke logs --no-color api worker mcp 2>&1 | grep -c ptr-marker)" = 0
 

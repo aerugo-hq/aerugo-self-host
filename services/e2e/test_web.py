@@ -85,6 +85,7 @@ def test_the_gallery_offers_every_source_and_opens_its_form(page):
     form = page.get_by_role("form", name="Connect Confluence")
     expect(form.get_by_role("textbox", name="Confluence site", exact=True)).to_be_visible()
     expect(form.get_by_label("API token")).to_have_attribute("type", "password")  # a token is never shown
+    expect(form.get_by_label(re.compile(r"^Keep")).locator("option[value=live]")).to_have_count(1)  # F11b: live only
 
 
 def open_connector(page, name: str):
@@ -134,6 +135,7 @@ def test_a_team_admin_opens_the_slack_form(page):
     expect(keep).to_have_value("index")
     keep.select_option("pointer")
     expect(keep).to_have_value("pointer")
+    expect(keep.locator("option[value=live]")).to_have_count(0)  # F11b: Slack's search reads as a person
 
 
 def test_a_team_admin_opens_the_microsoft_365_form(page):

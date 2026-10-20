@@ -194,3 +194,61 @@ def test_a_pointers_embeddings_are_made_the_backfills_way(monkeypatch):
     monkeypatch.setattr(sync_items, "embed", lambda *a, **kw: [[0.5]])
     with pytest.raises(RuntimeError):  # the wrong dimension, or a vector short: never stored
         sync_items.pointer_vectors(models, "Returns", [(None, "a"), (None, "b")])
+
+
+# ---- F11b, live only: the source's own search is the runner
+from kl.connections_api import LIVE_ONLY, JiraConnectionIn  # noqa: E402
+
+
+def test_only_confluence_and_jira_can_be_live_only():
+    assert sync_items.storage_of({"kind": "jira", "config": {"storage": "live"}}) == "live"
+    assert sync_items.storage_of({"kind": "confluence", "config": {"storage": "live"}}) == "live"
+    assert sync_items.storage_of({"kind": "slack", "config": {"storage": "live"}}) == "index"  # set by hand: still indexed
+    assert JiraConnectionIn(name="jira", api_base="https://x.atlassian.net", credential_ref="r", storage="live").storage == "live"
+    with pytest.raises(ValidationError, match="Slack's search reads as a person"):
+        SlackConnectionIn(name="slack", bot_token="xoxb-12345678", storage="live")
+    assert LIVE_ONLY.startswith("only Confluence and Jira")
+
+
+def test_a_sources_search_is_asked_only_for_words_never_for_what_someone_typed():
+    asked = {}
+    client = jira.JiraClient("https://acme.atlassian.net", "bot@acme.test", "token")
+    client._get = lambda path, **params: asked.update(params) or {"issues": [{"key": "STORE-1"}, {"key": "bad key"}]}
+    assert client.search_text(["checkout", "errors"], ["STORE", "QUAL"]) == ["STORE-1"]
+    assert asked["jql"] == 'project in (STORE, QUAL) AND (text ~ "checkout" OR text ~ "errors")'
+    for words, projects in ((['x" OR project = HR'], None), (["ok"], ["HR) OR (x"]), ([], None)):
+        with pytest.raises(ValueError):
+            client.search_text(words, projects)
+    conf = confluence.ConfluenceClient("https://acme.atlassian.net", "bot@acme.test", "token")
+    conf._get = lambda path, **params: asked.update(params) or {"results": [{"content": {"id": "71004"}}, {"content": {"id": "x"}}]}
+    assert conf.search_text(["returns"], ["STORES"]) == ["71004"]
+    assert asked["cql"] == 'type in (page, blogpost) AND space in ("STORES") AND (text ~ "returns")'
+    with pytest.raises(ValueError):
+        conf.search_text(["returns"], ['STORES") OR space = "HR'])
+
+
+def test_search_words_are_the_questions_longest_content_words_and_sources_take_turns():
+    assert live.search_words("What's the runbook when checkout errors spike?") == ["checkout", "runbook", "errors", "spike"]
+    assert len(live.search_words(" ".join(f"word{n}" for n in range(20)))) == live.MAX_WORDS
+    assert live.interleave([["a1", "a2", "a3"], ["b1"], ["c1", "a2"]]) == ["a1", "b1", "c1", "a2", "a3"]
+    assert live.interleave([]) == []
+
+
+def test_a_live_search_that_fails_finds_nothing_and_the_others_still_answer(monkeypatch, caplog):
+    connections = [{"id": "c-jira", "kind": "jira", "config": {}, "credential_ref": "r"},
+                   {"id": "c-conf", "kind": "confluence", "config": {}, "credential_ref": "r"}]
+
+    @contextmanager
+    def scoped(org, principals):
+        yield type("Conn", (), {"execute": lambda self, sql, params=None: type("R", (), {"fetchall": lambda self: connections})()})()
+
+    def broken(client, cfg, words):
+        raise RuntimeError("the secret marker text")
+    monkeypatch.setattr(live, "scoped", scoped)
+    monkeypatch.setattr(live, "SOURCES", {"jira": (lambda c: object(), None), "confluence": (lambda c: object(), None)})
+    monkeypatch.setattr(live, "SEARCHES", {"jira": broken, "confluence": lambda client, cfg, words: ["confluence-1", "confluence-2"]})
+    caller = type("Caller", (), {"principals": ["user:ben"]})()
+    with caplog.at_level(logging.WARNING):
+        assert live.search("org", caller, "returns window", ["stores"]) == [("c-conf", "confluence-1"), ("c-conf", "confluence-2")]
+    assert "RuntimeError" in caplog.text and "marker" not in caplog.text
+    assert live.search("org", caller, "the a an", ["stores"]) == []  # no content words: no source is asked

@@ -1,6 +1,6 @@
 # Recipes start with ">" instead of a tab (.RECIPEPREFIX, GNU make 3.82+), so editors can't break them.
 .RECIPEPREFIX = >
-.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario company eval-company eval-company-pointer enterprise atlas-eval eval-extraction eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
+.PHONY: sdk-test pins lint-web test-web unit env up smoke eval eval-mine demo eval-scenario company eval-company eval-company-pointer eval-company-live enterprise atlas-eval eval-extraction eval-baseline llm backup backups restore-drill web e2e obs lock github-app curator-app sandbox-github ps logs down reset kind-up kind-open kind-check kind-down
 
 # The local model `make llm` downloads for Ask. About 1 GB; make llm LLM_MODEL=qwen2.5:3b for better answers (about 2 GB).
 LLM_MODEL ?= qwen2.5:1.5b
@@ -112,6 +112,12 @@ eval-company-pointer: env
 >docker compose --profile smoke build smoke
 >docker compose --profile smoke run --rm smoke python -m kl.company_eval --pointer
 
+# The retailer live only (F11b): its Confluence and Jira keep only titles and readers, found through their own search,
+# and Slack keeps pointers (its search needs a person); held to "company-live", run last, as the pointer run is.
+eval-company-live: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm smoke python -m kl.company_eval --live
+
 # The synthetic enterprise (F10b, kl.enterprise): the retailer's data estate, its EDW moving to the EDP, with known truth.
 # enterprise loads it, the retailer too (its data people sign in as nia and otto); atlas-eval loads it and scores the
 # Atlas: exactly what its sources reveal, each person seeing exactly what the truth says, and no source finding less
@@ -159,6 +165,8 @@ eval-baseline: env
 >docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.team_evals --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 >docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.company_eval --pointer --record > services/api/kl/evals_baseline.tmp
+>mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
+>docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.company_eval --live --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 
 # The clients (slice A2): the Python and TypeScript clients' own tests, against stand-ins for the API, in pinned images.

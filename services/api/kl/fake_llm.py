@@ -725,6 +725,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"), "spaceId": space_of[parts[3]],
                                     "version": {"number": c.get("version", 1), "createdAt": c.get("modified", "2026-01-01T00:00:00.000Z")},
                                     **({"body": {"storage": {"value": c.get("body", "")}}} if q.get("body-format") == "storage" else {})})
+        if rest == "rest/api/search":  # CQL, as a live-only connection asks it (F11b): its spaces, any term
+            cql = q.get("cql", "")
+            state.setdefault("searches", []).append(cql)
+            terms = re.findall(r'text ~ "([a-z0-9]+)"', cql)
+            listed = re.search(r"space in \(([^)]*)\)", cql)
+            wanted = {k.strip().strip('"') for k in listed[1].split(",")} if listed else set(spaces)
+            words = lambda c: re.findall(r"[a-z0-9]+", re.sub(r"<[^>]+>", " ", f"{c['title']} {c.get('body', '')}").lower())
+            hits = [(sum(t in words(c) for t in terms), n, c) for n, c in
+                    enumerate(c for k in sorted(wanted) for kind in ("pages", "blogposts") for c in spaces.get(k, {}).get(kind, []))]
+            found = [c for score, _, c in sorted(hits, key=lambda h: (-h[0], h[1])) if score]
+            return self._json(200, {"results": [{"content": {"id": str(c["id"]), "type": "page", "title": c["title"]}}
+                                                for c in found[:int(q.get("limit") or 25)]]})
         if rest == "api/v2/spaces":
             keys = set(q["keys"].split(",")) if q.get("keys") else None
             return self._json(200, {"results": [{"id": str(s["id"]), "key": k, "name": s["name"]} for k, s in spaces.items()
@@ -991,6 +1003,16 @@ class Handler(BaseHTTPRequestHandler):
             jql = q.get("jql", "")
             site.setdefault("searches", []).append(jql)
             key = (re.search(r"project = (\S+)", jql) or [None, ""])[1]
+            terms = re.findall(r'text ~ "([a-z0-9]+)"', jql)
+            if terms:  # Jira's own search (F11b), as a live-only connection asks it: any term, most terms first
+                listed = re.search(r"project in \(([^)]*)\)", jql)
+                keys = [k.strip() for k in listed[1].split(",")] if listed else list(projects)
+                text = lambda i: " ".join([i["summary"], i.get("description", "")] + [c["body"] for c in i.get("comments", [])]).lower()
+                hits = [(sum(t in re.findall(r"[a-z0-9]+", text(i)) for t in terms), n, i) for n, i in
+                        enumerate(i for k in keys for i in projects.get(k, {}).get("issues", []))]
+                found = [i for score, _, i in sorted(hits, key=lambda h: (-h[0], h[1])) if score]
+                return self._json(200, {"issues": [{"id": i["key"], "key": i["key"], "fields": {"summary": i["summary"]}}
+                                                   for i in found[:int(q.get("maxResults") or 50)]], "isLast": True})
             within = re.search(r"updated >= -(\d+)m", jql)
             recent = lambda i: not within or datetime.strptime(i.get("updated", "2026-10-01T10:00:00.000+0000"), "%Y-%m-%dT%H:%M:%S.%f%z") \
                 >= datetime.now(timezone.utc) - timedelta(minutes=int(within[1]))
