@@ -20,7 +20,7 @@ SEARCHES = {"jira": jira.search, "confluence": confluence.search}  # F11b: each 
 LIVE_SQL = """
 SELECT c.id, c.kind, c.config, c.credential_ref FROM connections c JOIN workspaces w ON w.id = c.workspace_id
 WHERE c.config->>'storage' = 'live' AND c.kind = ANY(%(kinds)s) AND c.status <> 'disabled' AND w.slug = ANY(%(targets)s)
-ORDER BY c.id
+ORDER BY w.slug, c.name  -- stable, so a question ranks the same on every stack
 """
 MAX_WORDS = 8  # a question's words a source's search is asked for, its rarest-looking (longest) first
 SEARCH_SECONDS = 8.0  # every live-only source in scope is asked at once, and none is waited for longer
@@ -72,16 +72,6 @@ def search_words(question: str) -> list[str]:
     return sorted(asked, key=lambda w: (-len(w), w))[:MAX_WORDS]
 
 
-def interleave(found: list[list]) -> list:
-    """Each source's results in turn, best first, so no one source crowds out the others."""
-    out: list = []
-    for rank in range(max(map(len, found), default=0)):
-        for keys in found:
-            if rank < len(keys) and keys[rank] not in out:
-                out.append(keys[rank])
-    return out
-
-
 def search(org_id: str, caller, question: str, targets: list[str]) -> dict:
     """F11b's runner: {connection id: keys, best first} that each live-only connection in scope finds through its
     source's own search, run as the connection's account, within only the projects or spaces where the caller already
@@ -111,7 +101,7 @@ def search(org_id: str, caller, question: str, targets: list[str]) -> dict:
     done, _ = wait(futures.values(), timeout=SEARCH_SECONDS)
     pool.shutdown(wait=False, cancel_futures=True)
     found = {}
-    for cid, future in futures.items():  # in LIVE_SQL's order, so the sources always take turns the same way
+    for cid, future in futures.items():  # in LIVE_SQL's order, so a run is the same on every stack
         if future not in done:
             log.warning("live search of connection %s took longer than %ss", cid, SEARCH_SECONDS)
             continue
@@ -122,12 +112,14 @@ def search(org_id: str, caller, question: str, targets: list[str]) -> dict:
     return found
 
 
-def merge(found: dict, rows: list[dict]) -> list[dict]:
-    """The rows the caller may see (SOURCE_SQL's), each source's in its own order and the sources taking turns. Hidden
+def merge(found: dict, rows: list[dict]) -> list[list[dict]]:
+    """The rows the caller may see (SOURCE_SQL's), one list per source in its own order, for fusion to take each as a
+    channel of its own, so every source's best hit counts alike, whatever the order the sources are listed in. Hidden
     keys are gone before anything is ordered, so an item's place, and its score, depend only on what the caller sees,
     never on how many items they can't open a source ranked above it (invariant 11)."""
     by = {(r["connection_id"], r["external_key"]): r for r in rows}
-    return interleave([[by[(cid, key)] for key in keys if (cid, key) in by] for cid, keys in found.items()])
+    groups = ([by[(cid, key)] for key in keys if (cid, key) in by] for cid, keys in found.items())
+    return [rows for rows in groups if rows]
 
 
 def read(org_id: str, caller, keys: list[str]) -> dict[str, Sections | str]:

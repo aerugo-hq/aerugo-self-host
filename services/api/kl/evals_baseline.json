@@ -416,7 +416,7 @@
     },
     "cases": {
       "allocation-fewer-units": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -431,12 +431,12 @@
         "of": 1
       },
       "cc-escalate": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "cc-injury-return": {
-        "first": 1,
+        "first": 2,
         "found": 2,
         "of": 2
       },
@@ -451,7 +451,7 @@
         "of": 1
       },
       "christmas-eve-hours": {
-        "first": 6,
+        "first": 5,
         "found": 1,
         "of": 1
       },
@@ -476,17 +476,17 @@
         "of": 1
       },
       "district-manager-mountain": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "ecom-on-call": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "first-wave": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -501,12 +501,12 @@
         "of": 1
       },
       "flash-sale-lesson": {
-        "first": 2,
+        "first": 3,
         "found": 1,
         "of": 1
       },
       "holiday-results": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -516,32 +516,32 @@
         "of": 1
       },
       "injury-denver-fall": {
-        "first": 1,
+        "first": 3,
         "found": 1,
         "of": 1
       },
       "injury-what-to-do": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "inv-daily-late": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "late-shipment": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
       "northpeak-last-time": {
-        "first": 2,
+        "first": 3,
         "found": 2,
         "of": 2
       },
       "pay-range-people": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -561,37 +561,37 @@
         "of": 1
       },
       "recall-lesson": {
-        "first": 1,
-        "found": 1,
-        "of": 1
-      },
-      "recall-regulator": {
         "first": 2,
         "found": 1,
         "of": 1
       },
-      "recall-reports": {
+      "recall-regulator": {
         "first": 3,
         "found": 1,
         "of": 1
       },
-      "recall-script": {
-        "first": 1,
-        "found": 1,
-        "of": 1
-      },
-      "recall-steps": {
-        "first": 1,
-        "found": 1,
-        "of": 1
-      },
-      "recall-stores": {
+      "recall-reports": {
         "first": 4,
         "found": 1,
         "of": 1
       },
+      "recall-script": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      },
+      "recall-steps": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      },
+      "recall-stores": {
+        "first": 5,
+        "found": 1,
+        "of": 1
+      },
       "registers-denver": {
-        "first": 1,
+        "first": 5,
         "found": 1,
         "of": 1
       },
@@ -606,7 +606,7 @@
         "of": 1
       },
       "returns-50-days": {
-        "first": 3,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -616,7 +616,7 @@
         "of": 2
       },
       "returns-no-receipt": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -626,17 +626,17 @@
         "of": 1
       },
       "returns-window": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "risk-hospital": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "sell-through": {
-        "first": 1,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -646,22 +646,22 @@
         "of": 1
       },
       "shoplifting-leader": {
-        "first": 2,
+        "first": 3,
         "found": 1,
         "of": 1
       },
       "sick-california": {
-        "first": 5,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "sick-colorado": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       },
       "sick-mine-co": {
-        "first": 2,
+        "first": 1,
         "found": 1,
         "of": 1
       },
@@ -677,7 +677,7 @@
       }
     },
     "k": 10,
-    "mrr": 0.7011,
+    "mrr": 0.6286,
     "recall": 0.9904,
     "scenario": "company",
     "units": {

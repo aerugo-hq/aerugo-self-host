@@ -1941,9 +1941,9 @@ opens, through its source's own search (`live.search`: `JiraClient.search_text`,
 question's eight longest content words as asked (`search_words`; the sources stem them), letters and digits only, so
 nothing typed is ever JQL or CQL; a source that fails gives nothing, logged by its kind. Only keys come back, each matched
 to that connection's own document (two sites can hold the same key), and they enter as the `source` channel
-(`SOURCE_SQL`, under the caller's row-level security, then the post-check like every channel), each source's results
-taking turns (`interleave`), counting twice (`SOURCE_WEIGHT` 2.0), since it stands in for the words and meaning channels
-a live document doesn't have. Keyword mode keeps to Aerugo's own all-words channels (a source's search matches any of
+(`SOURCE_SQL`, under the caller's row-level security, then the post-check like every channel), each source's results a
+channel of its own (`live.merge`), so every source's best hit counts alike, each counting twice (`SOURCE_WEIGHT` 2.0),
+since it stands in for the words and meaning channels a live document doesn't have. Keyword mode keeps to Aerugo's own all-words channels (a source's search matches any of
 the words), and meaning mode to embeddings. The title channel now reaches a live document's kept title, and focus a
 live document, indexed documents unchanged. Answers and the reader read a live document as a pointer (F11a's live
 reads, its readers re-read in the source). The fakes: Jira's `search/jql` and Confluence's CQL `rest/api/search` answer
@@ -1960,7 +1960,7 @@ Unit: 4 more in `tests/test_live.py` (14). Red first: with the words-only rule r
 failed; in the stack, with the source channel off the check failed (nothing found), and with a live sync writing chunks
 it failed (a chunk each); each restored (`cmp`) and green. Found while building: a source hit counted as one channel
 tied with weak meaning matches, which win ties, so alice's Ask left both items out of its six sources (it counts as two
-now); interleaving kept a key two sources returned at the same rank twice (its unit test caught it); the plurals
+now); the plurals
 `claims.words` trims ("errors" to "error") would have reached a source's search, which stems on its own side; and the
 source search first ran in keyword mode too, where the modes check caught a paraphrase found by one shared word. An
 independent review of the branch found four problems, each fixed: results from the sources were merged before the
@@ -2000,9 +2000,19 @@ MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 94%, MRR 0.8
 `make eval-teams` 11 teams, no leak, no regression; the retailer as pointers no leak, Recall@10 99%, MRR 0.84, Ask right
 for 27 of 27, recorded as `company-pointer`; the retailer live only (Slack as pointers) no leak, Recall@10 99%, MRR 0.70,
 Ask right for 25 of 27 (both bike-key questions' store threads, Slack pointers found by meaning, now rank below the live
-Confluence pages the source search brings), recorded as `company-live`; no planted text in the API's, worker's, or MCP
+Confluence pages the source search brings), recorded as `company-live` (recorded again since: below); no planted text in the API's, worker's, or MCP
 server's logs; `make e2e` 38 passed; `make test-web` 7 passed; the lint at 0 errors and 43 warnings. Every other set's
 record unchanged.
+CI on pull request 75 then failed the live-only gate: `allocation-fewer-units` fell from #1 to #4 while other cases
+rose. The live sources took turns in the order of their connections' ids, which are random per stack, so the same
+question ranked differently on each machine. The sources are now ordered by team and name (`LIVE_SQL`), and each
+source's results are a channel of their own in fusion rather than taking turns, so no source's best hit is pushed down
+by where it's listed (`live.merge` returns a list per source; `tests/test_live.py` holds every source's best hit to the
+same score, red with one combined list). A source hit counting once instead of twice was measured and dropped (MRR 0.63
+to 0.40, Ask right for 25 of 27 to 23). The live-only baseline was recorded again on the loop's stack, then run again
+against itself with the same numbers: Recall@10 99%, MRR 0.63 over 52 counted questions, Ask right for 25 of 27, no
+leak (the earlier 0.70 and CI's 0.71 were two random orders of the sources); `make unit` 204 passed; the live-only check
+passed.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's

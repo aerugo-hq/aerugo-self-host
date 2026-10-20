@@ -227,11 +227,9 @@ def test_a_sources_search_is_asked_only_for_words_never_for_what_someone_typed()
         conf.search_text(["returns"], ['STORES") OR space = "HR'])
 
 
-def test_search_words_are_the_questions_longest_content_words_and_sources_take_turns():
+def test_search_words_are_the_questions_longest_content_words():
     assert live.search_words("What's the runbook when checkout errors spike?") == ["checkout", "runbook", "errors", "spike"]
     assert len(live.search_words(" ".join(f"word{n}" for n in range(20)))) == live.MAX_WORDS
-    assert live.interleave([["a1", "a2", "a3"], ["b1"], ["c1", "a2"]]) == ["a1", "b1", "c1", "a2", "a3"]
-    assert live.interleave([]) == []
 
 
 def live_search_stage(monkeypatch, searches, visible):
@@ -287,7 +285,16 @@ def test_an_items_place_never_counts_what_the_caller_cant_open():
     visible = [row("c-jira", "jira-A-9"), row("c-conf", "confluence-1"), row("c-conf", "confluence-2")]
     plain = live.merge({"c-jira": ["jira-A-9"], "c-conf": ["confluence-1", "confluence-2"]}, visible)
     hidden = live.merge({"c-jira": ["jira-H-1", "jira-H-2", "jira-H-3", "jira-A-9"], "c-conf": ["confluence-1", "confluence-2"]}, visible)
-    assert plain == hidden == [visible[0], visible[1], visible[2]]  # three hidden issues ranked first move nothing
+    assert plain == hidden == [[visible[0]], [visible[1], visible[2]]]  # three hidden issues ranked first move nothing
+    assert live.merge({"c-jira": ["jira-H-1"], "c-conf": ["confluence-1"]}, visible[1:2]) == [[visible[1]]]  # nothing seen: no list
+
+
+def test_every_sources_best_hit_counts_alike_whatever_order_the_sources_are_listed_in():
+    from kl.ranking import fuse
+    row = lambda cid, key: {"connection_id": cid, "external_key": key}
+    groups = live.merge({"c-a": ["a-1"], "c-b": ["b-1"], "c-c": ["c-1"]}, [row("c-a", "a-1"), row("c-b", "b-1"), row("c-c", "c-1")])
+    scores = {r["external_key"]: r["score"] for r in fuse([("source", g) for g in groups])}
+    assert scores["a-1"] == scores["b-1"] == scores["c-1"]  # the third source's best hit isn't third
 
 
 def test_someone_waiting_never_waits_out_a_throttle(monkeypatch):

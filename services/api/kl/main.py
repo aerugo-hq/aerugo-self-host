@@ -435,12 +435,12 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
                              key=lambda r: r["rank"], reverse=True) if names else []
             telemetry.set_attributes(s, names=len(names), rows=len(aliased))
         pairs = [(cid, key) for cid, keys in sourced.items() for key in keys]
-        found = live.merge(sourced, conn.execute(SOURCE_SQL, {  # filtered by the caller's own readers first, then ordered
+        sources = live.merge(sourced, conn.execute(SOURCE_SQL, {  # filtered by the caller's own readers first, then ordered
             "connections": [cid for cid, _ in pairs], "keys": [key for _, key in pairs], "targets": targets}).fetchall()) if pairs else []
         weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT, "source": SOURCE_WEIGHT}
         # Curated knowledge wins a near tie with the evidence, never when the evidence clearly matches better.
-        candidates = prefer_curated(fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased),
-                                          ("source", found)], weights=weights), CURATED_BOOST)
+        candidates = prefer_curated(fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)]
+                                         + [("source", rows) for rows in sources], weights=weights), CURATED_BOOST)
         canonical = conn.execute(CANONICAL_SQL, {"q": q.strip().lower(), "targets": targets}).fetchall() if words else []
         if canonical:
             exact = {r["external_key"] for r in canonical}
