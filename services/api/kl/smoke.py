@@ -6621,8 +6621,8 @@ def questions_become_gaps_and_corrections_reach_owners():
         assert ladder in found, f"three people's unanswered question didn't become a gap: {list(found)}"
         gap = found[ladder]
         assert gap["askers"] == 3 and gap["asked"] == 3 and gap["state"] == "open", gap
-        asked = json.dumps({k: v for k, v in gap.items() if k != "ask"})  # who to ask about it is named; who asked never
-        assert not any(name in asked for name in ("alice", "carol", "bob")), "a gap named who asked"
+        shown = json.dumps({k: v for k, v in gap.items() if k != "ask"})  # who to ask about it is named; who asked never
+        assert not any(name in shown for name in ("alice", "carol", "bob")), "a gap named who asked"
         assert "closest" in gap, "the gap didn't say which pages are closest, for its reader"
         assert all(p["user"] for p in gap.get("ask", [])), f"who to ask about the gap named nobody: {gap.get('ask')}"
         assert badge not in found, "two people's question became a gap"
