@@ -143,15 +143,30 @@ SELECT DISTINCT ON (d.id)
        d.external_key, d.title, d.source_uri, d.source_kind, d.source_version, d.classification, d.tier, d.audience,
        c.heading_path, left(c.body, 280) AS snippet, c.body,
        ts_rank(c.tsv, q.query) AS rank
-FROM chunks c
-JOIN documents d            ON d.id = c.document_id
+FROM documents d
+LEFT JOIN chunks c          ON c.document_id = d.id  -- a live-only document has none (F11b)
 JOIN workspace_documents wd ON wd.document_id = d.id
 JOIN workspaces w           ON w.id = wd.workspace_id
 CROSS JOIN (SELECT replace(plainto_tsquery('english', %(q)s)::text, ' & ', ' | ')::tsquery AS query) q
 WHERE d.external_key = ANY(%(keys)s)
+  AND (c.id IS NOT NULL OR d.storage = 'live')
   AND w.slug = ANY(%(targets)s)
-ORDER BY d.id, rank DESC, c.ordinal
+ORDER BY d.id, rank DESC NULLS LAST, c.ordinal
 """
+# Source channel (F11b): the live-only documents their sources' own searches found, in the caller's teams and under their
+# row-level security, each with no text (answers read it live); the post-check follows, as for every channel.
+SOURCE_SQL = """
+SELECT DISTINCT ON (d.id)
+       d.external_key, d.title, d.source_uri, d.source_kind, d.source_version, d.classification, d.tier, d.audience,
+       NULL::text AS heading_path, NULL::text AS snippet, NULL::text AS body, d.connection_id
+FROM documents d
+JOIN workspace_documents wd ON wd.document_id = d.id
+JOIN workspaces w           ON w.id = wd.workspace_id
+WHERE (d.connection_id, d.external_key) IN (SELECT * FROM unnest(%(connections)s::uuid[], %(keys)s::text[]))
+  AND d.storage = 'live' AND w.slug = ANY(%(targets)s)
+ORDER BY d.id
+"""
+SOURCE_WEIGHT = 2.0  # it stands in for the words and meaning channels a live-only document doesn't have, so it counts as both
 MODES = ("smart", "keyword", "meaning", "curated")  # how Ask may search: every channel, words, meaning, or curated only
 
 # Title channel (slice M1): documents whose title or file name matches, each shown by its first chunk.
@@ -162,11 +177,12 @@ SELECT DISTINCT ON (d.id)
        c.heading_path, left(c.body, 280) AS snippet, c.body,
        ts_rank(d.title_tsv, q.query) AS rank
 FROM documents d
-JOIN chunks c               ON c.document_id = d.id
+LEFT JOIN chunks c          ON c.document_id = d.id
 JOIN workspace_documents wd ON wd.document_id = d.id
 JOIN workspaces w           ON w.id = wd.workspace_id
 CROSS JOIN (SELECT plainto_tsquery('english', %(q)s) AS query) q
 WHERE d.title_tsv @@ q.query
+  AND (c.id IS NOT NULL OR d.storage = 'live')  -- a live-only document keeps its title and no chunks (F11b)
   AND w.slug = ANY(%(targets)s)
 ORDER BY d.id, c.ordinal
 """
@@ -390,6 +406,10 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
     with telemetry.span("retrieve.embed") as s:  # H5: the query's embeddings first, before any transaction opens
         vectors = query_vectors(org_id, caller, q, targets) if mode != "keyword" else []
         telemetry.set_attributes(s, models=len(vectors))
+    with telemetry.span("retrieve.source") as s:  # F11b: live-only sources' own searches, also before any transaction;
+        # smart mode only, since a source's search matches any of the words, looser than keyword mode's all of them
+        sourced = live.search(org_id, caller, q, targets) if mode == "smart" and not focus else {}
+        telemetry.set_attributes(s, sources=len(sourced))  # never how many it found: some may be hidden from the caller
     member_of = memberships(caller)
     returned, dropped = [], []
 
@@ -414,10 +434,13 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
             aliased = sorted(conn.execute(ALIAS_SQL, {"q": " or ".join(f'"{n}"' for n in names), "targets": targets}).fetchall(),
                              key=lambda r: r["rank"], reverse=True) if names else []
             telemetry.set_attributes(s, names=len(names), rows=len(aliased))
-        weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT}
+        pairs = [(cid, key) for cid, keys in sourced.items() for key in keys]
+        sources = live.merge(sourced, conn.execute(SOURCE_SQL, {  # filtered by the caller's own readers first, then ordered
+            "connections": [cid for cid, _ in pairs], "keys": [key for _, key in pairs], "targets": targets}).fetchall()) if pairs else []
+        weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT, "source": SOURCE_WEIGHT}
         # Curated knowledge wins a near tie with the evidence, never when the evidence clearly matches better.
-        candidates = prefer_curated(fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)],
-                                         weights=weights), CURATED_BOOST)
+        candidates = prefer_curated(fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased)]
+                                         + [("source", rows) for rows in sources], weights=weights), CURATED_BOOST)
         canonical = conn.execute(CANONICAL_SQL, {"q": q.strip().lower(), "targets": targets}).fetchall() if words else []
         if canonical:
             exact = {r["external_key"] for r in canonical}
@@ -2579,7 +2602,7 @@ def list_documents(scope: str = "org", key: str | None = Query(None, max_length=
                        "source": r["source_kind"], "source_uri": r["source_uri"], "workspaces": r["workspaces"],
                        "container": {"ref": r["container_ref"], "name": r["container_name"]},
                        "path": r["source_path"],  # its place in its source: a Confluence page's ancestors
-                       "storage": r["storage"],  # pointer: its text is read from its source when opened (F11a)
+                       "storage": r["storage"],  # pointer or live: its text is read from its source when opened (F11)
                        "created_at": r["created_at"].isoformat()} for r in shown],
         "next_offset": offset + limit if more else None,
         "sources": sources,
@@ -2604,7 +2627,7 @@ def document_content(key: str, caller: Caller = Depends(authenticate)):
     if not found:
         raise HTTPException(404, "document not found")
     org_id = resolve_org_id(config.ORG_SLUG)
-    pointer = found[0].get("storage") == "pointer"
+    pointer = found[0].get("storage") in ("pointer", "live")
     with scoped(org_id, caller.principals) as conn:
         rows = [] if pointer else conn.execute(
             "SELECT c.heading_path, c.body FROM chunks c JOIN documents d ON d.id = c.document_id "

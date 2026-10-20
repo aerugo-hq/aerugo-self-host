@@ -194,3 +194,117 @@ def test_a_pointers_embeddings_are_made_the_backfills_way(monkeypatch):
     monkeypatch.setattr(sync_items, "embed", lambda *a, **kw: [[0.5]])
     with pytest.raises(RuntimeError):  # the wrong dimension, or a vector short: never stored
         sync_items.pointer_vectors(models, "Returns", [(None, "a"), (None, "b")])
+
+
+# ---- F11b, live only: the source's own search is the runner
+from kl.connections_api import LIVE_ONLY, JiraConnectionIn  # noqa: E402
+
+
+def test_only_confluence_and_jira_can_be_live_only():
+    assert sync_items.storage_of({"kind": "jira", "config": {"storage": "live"}}) == "live"
+    assert sync_items.storage_of({"kind": "confluence", "config": {"storage": "live"}}) == "live"
+    assert sync_items.storage_of({"kind": "slack", "config": {"storage": "live"}}) == "index"  # set by hand: still indexed
+    assert JiraConnectionIn(name="jira", api_base="https://x.atlassian.net", credential_ref="r", storage="live").storage == "live"
+    with pytest.raises(ValidationError, match="Slack's search reads as a person"):
+        SlackConnectionIn(name="slack", bot_token="xoxb-12345678", storage="live")
+    assert LIVE_ONLY.startswith("only Confluence and Jira")
+
+
+def test_a_sources_search_is_asked_only_for_words_never_for_what_someone_typed():
+    asked = {}
+    client = jira.JiraClient("https://acme.atlassian.net", "bot@acme.test", "token")
+    client._get = lambda path, **params: asked.update(params) or {"issues": [{"key": "STORE-1"}, {"key": "bad key"}]}
+    assert client.search_text(["checkout", "errors"], ["STORE", "QUAL"]) == ["STORE-1"]
+    assert asked["jql"] == 'project in (STORE, QUAL) AND (text ~ "checkout" OR text ~ "errors")'
+    for words, projects in ((['x" OR project = HR'], None), (["ok"], ["HR) OR (x"]), ([], None)):
+        with pytest.raises(ValueError):
+            client.search_text(words, projects)
+    conf = confluence.ConfluenceClient("https://acme.atlassian.net", "bot@acme.test", "token")
+    conf._get = lambda path, **params: asked.update(params) or {"results": [{"content": {"id": "71004"}}, {"content": {"id": "x"}}]}
+    assert conf.search_text(["returns"], ["STORES"]) == ["71004"]
+    assert asked["cql"] == 'type in (page, blogpost) AND space in ("STORES") AND (text ~ "returns")'
+    with pytest.raises(ValueError):
+        conf.search_text(["returns"], ['STORES") OR space = "HR'])
+
+
+def test_search_words_are_the_questions_longest_content_words():
+    assert live.search_words("What's the runbook when checkout errors spike?") == ["checkout", "runbook", "errors", "spike"]
+    assert len(live.search_words(" ".join(f"word{n}" for n in range(20)))) == live.MAX_WORDS
+
+
+def live_search_stage(monkeypatch, searches, visible):
+    """live.search over two live connections, with the containers the caller opens something in."""
+    connections = [{"id": "c-jira", "kind": "jira", "config": {"projects": ["STORE", "HR"]}, "credential_ref": "r"},
+                   {"id": "c-conf", "kind": "confluence", "config": {}, "credential_ref": "r"}]
+
+    @contextmanager
+    def scoped(org, principals):
+        rows = lambda sql: connections if "FROM connections" in sql else [
+            {"connection_id": cid, "container_ref": ref} for cid, refs in visible.items() for ref in refs]
+        yield type("Conn", (), {"execute": lambda self, sql, params=None: type("R", (), {"fetchall": lambda self: rows(sql)})()})()
+    monkeypatch.setattr(live, "scoped", scoped)
+    monkeypatch.setattr(live, "SOURCES", {"jira": (lambda c: object(), None), "confluence": (lambda c: object(), None)})
+    monkeypatch.setattr(live, "SEARCHES", searches)
+    return type("Caller", (), {"principals": ["user:ben"]})()
+
+
+def test_a_live_search_that_fails_finds_nothing_and_the_others_still_answer(monkeypatch, caplog):
+    def broken(client, cfg, words):
+        raise RuntimeError("the secret marker text")
+    caller = live_search_stage(monkeypatch, {"jira": broken, "confluence": lambda client, cfg, words: ["confluence-1", "confluence-2"]},
+                               {"c-jira": ["STORE"], "c-conf": ["STORES"]})
+    with caplog.at_level(logging.WARNING):
+        assert live.search("org", caller, "returns window", ["stores"]) == {"c-conf": ["confluence-1", "confluence-2"]}
+    assert "RuntimeError" in caplog.text and "marker" not in caplog.text
+    assert live.search("org", caller, "the a an", ["stores"]) == {}  # no content words: no source is asked
+
+
+def test_a_source_is_searched_only_where_the_caller_opens_something(monkeypatch):
+    asked = {}
+    record = lambda kind: lambda client, cfg, words: asked.setdefault(kind, cfg) and []
+    caller = live_search_stage(monkeypatch, {"jira": record("jira"), "confluence": record("confluence")}, {"c-jira": ["STORE"]})
+    assert live.search("org", caller, "till drawer", ["stores"]) == {"c-jira": []}
+    assert asked == {"jira": {"projects": ["STORE"]}}  # never HR, which the connection reads and the caller opens nothing in
+
+
+def test_a_slow_source_is_left_out_at_the_deadline(monkeypatch):
+    import time
+    def slow(client, cfg, words):
+        time.sleep(1.5)
+        return ["jira-STORE-1"]
+    caller = live_search_stage(monkeypatch, {"jira": slow, "confluence": lambda client, cfg, words: ["confluence-1"]},
+                               {"c-jira": ["STORE"], "c-conf": ["STORES"]})
+    monkeypatch.setattr(live, "SEARCH_SECONDS", 0.3)
+    started = time.monotonic()
+    assert live.search("org", caller, "till drawer", ["stores"]) == {"c-conf": ["confluence-1"]}
+    assert time.monotonic() - started < 1.0  # the search answered without waiting for it
+
+
+def test_an_items_place_never_counts_what_the_caller_cant_open():
+    row = lambda cid, key: {"connection_id": cid, "external_key": key}
+    visible = [row("c-jira", "jira-A-9"), row("c-conf", "confluence-1"), row("c-conf", "confluence-2")]
+    plain = live.merge({"c-jira": ["jira-A-9"], "c-conf": ["confluence-1", "confluence-2"]}, visible)
+    hidden = live.merge({"c-jira": ["jira-H-1", "jira-H-2", "jira-H-3", "jira-A-9"], "c-conf": ["confluence-1", "confluence-2"]}, visible)
+    assert plain == hidden == [[visible[0]], [visible[1], visible[2]]]  # three hidden issues ranked first move nothing
+    assert live.merge({"c-jira": ["jira-H-1"], "c-conf": ["confluence-1"]}, visible[1:2]) == [[visible[1]]]  # nothing seen: no list
+
+
+def test_every_sources_best_hit_counts_alike_whatever_order_the_sources_are_listed_in():
+    from kl.ranking import fuse
+    row = lambda cid, key: {"connection_id": cid, "external_key": key}
+    groups = live.merge({"c-a": ["a-1"], "c-b": ["b-1"], "c-c": ["c-1"]}, [row("c-a", "a-1"), row("c-b", "b-1"), row("c-c", "c-1")])
+    scores = {r["external_key"]: r["score"] for r in fuse([("source", g) for g in groups])}
+    assert scores["a-1"] == scores["b-1"] == scores["c-1"]  # the third source's best hit isn't third
+
+
+def test_someone_waiting_never_waits_out_a_throttle(monkeypatch):
+    from kl import source_http
+    calls = []
+    monkeypatch.setattr(source_http.httpx, "request", lambda method, url, **kw: calls.append(kw.get("timeout")) or source_http.httpx.Response(429))
+    monkeypatch.setattr(source_http, "wait", lambda r, attempt: 0.0)
+    with source_http.answering():
+        assert source_http.get("https://acme.atlassian.net/x", timeout=30).status_code == 429
+    assert calls == [source_http.ANSWER_TIMEOUT]  # one try, and briefly
+    calls.clear()
+    source_http.get("https://acme.atlassian.net/x", timeout=30)  # a sync still waits a throttle out
+    assert len(calls) == source_http.RETRIES + 1 and calls[0] == 30

@@ -385,7 +385,9 @@ const blankM365 = { name: "microsoft", tenant_id: "", client_id: "", certificate
 const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "", storage: "index" };
 // F11a: how a connection keeps what it reads; only these sources can read their text again live
 const POINTER_KINDS = new Set(["jira", "confluence", "slack"]);
-const STORAGE = [["index", "Its text, indexed"], ["pointer", "Pointers only: text read live when someone asks"]];
+const STORAGE = [["index", "Its text, indexed"], ["pointer", "Pointers only: text read live when someone asks"],
+  ["live", "Live only: nothing but titles and readers; found through its own search"]];
+const LIVE_KINDS = new Set(["jira", "confluence"]); // F11b: Slack's search reads as a person, so it can't be live only
 const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", tenant_id: "", client_id: "",
                          certificate: "", every_minutes: 60, credential_ref: "" };
 // The scope list each kind has, to edit in place: its field, its label, and an example.
@@ -757,8 +759,9 @@ function Connections({ ws, teams, orgAdmin }) {
   const setN = (key) => (e) => setNt({ ...nt, [key]: e.target.value });
   const setK = (key) => (e) => setCt({ ...ct, [key]: e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
-  const storageField = (value, onChange) => field("Keep", h("select", { className: "select", value, onChange }, STORAGE.map(([v, label]) => h("option", { key: v, value: v }, label))),
-    "Pointers only keeps titles, readers, and embeddings, never the text: answers read it from the source for each asker, keyword search and attachments are left out, and changing this reads everything again.");
+  const storageField = (value, onChange, kind) => field("Keep", h("select", { className: "select", value, onChange },
+    STORAGE.filter(([v]) => v !== "live" || LIVE_KINDS.has(kind)).map(([v, label]) => h("option", { key: v, value: v }, label))),
+    "Pointers only keeps titles, readers, and embeddings, never the text: answers read it from the source for each asker, keyword search and attachments are left out. Live only keeps no embeddings either: search asks the source's own. Changing this reads everything again.");
   const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
   const steps = {
     jira: () => h("form", { className: "panel-body connector-form", onSubmit: connectJira },
@@ -769,7 +772,7 @@ function Connections({ ws, teams, orgAdmin }) {
       form.credential_ref ? null : field("API token", h("input", { className: "input mono", type: "password", value: form.api_token, onChange: set("api_token"), required: true, autoComplete: "off" }), "Stored in OpenBao and never shown again."),
       field("Projects", h("input", { className: "input mono", value: form.projects, onChange: set("projects"), placeholder: "EDP, PAY" }), "Leave empty for every project the account can browse."),
       field("Sync", h("select", { className: "select", value: form.every_minutes, onChange: set("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
-      storageField(form.storage, set("storage")),
+      storageField(form.storage, set("storage"), "jira"),
       h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: form.company_site, onChange: set("company_site") }),
         h("span", null, h("b", null, "This Jira site is our company's own. "), "Then a project anyone in Jira may browse is readable by everyone in the org. Leave it off for a partner's or a vendor's site: its projects stay with the people Jira names.")),
       h("details", { className: "connector-wide" }, h("summary", null, "Use a secret the team keeps in OpenBao instead"),
@@ -788,7 +791,7 @@ function Connections({ ws, teams, orgAdmin }) {
       field("Labels", h("input", { className: "input mono", value: cf.labels, onChange: setC("labels"), placeholder: "runbook, decision" }), "Only pages with one of these labels. Leave empty for every page."),
       field("Page trees", h("input", { className: "input mono", value: cf.page_trees, onChange: setC("page_trees"), placeholder: "123456789" }), "Only these pages and everything under them, by the number in a page's address."),
       field("Sync", h("select", { className: "select", value: cf.every_minutes, onChange: setC("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
-      storageField(cf.storage, setC("storage")),
+      storageField(cf.storage, setC("storage"), "confluence"),
       h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: cf.company_site, onChange: setC("company_site") }),
         h("span", null, h("b", null, "This Confluence site is our company's own. "), "Then a space anyone in Confluence may view is readable by everyone in the org, and restrictions still narrow it. Leave it off for a partner's or a vendor's site.")),
       h("details", { className: "connector-wide" }, h("summary", null, "Use a secret the team keeps instead"),
@@ -839,7 +842,7 @@ function Connections({ ws, teams, orgAdmin }) {
       field("History", h("input", { className: "input", type: "number", min: 1, max: 3650, value: sl.history_days, onChange: setS("history_days"), required: true }),
         "Days back it reads. Older messages leave the index."),
       field("Sync", h("select", { className: "select", value: sl.every_minutes, onChange: setS("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
-      storageField(sl.storage, setS("storage")),
+      storageField(sl.storage, setS("storage"), "slack"),
       h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: sl.company_workspace, onChange: setS("company_workspace") }),
         h("span", null, h("b", null, "This Slack workspace is our company's own. "), "Then a public channel is readable by everyone in the org. Leave it off otherwise: each channel stays with its members. A channel shared with another organization always stays with this workspace's members.")),
       h("details", { className: "connector-wide" }, h("summary", null, "Use a token the team keeps in OpenBao instead"),
@@ -990,7 +993,7 @@ function Connections({ ws, teams, orgAdmin }) {
     return h("form", { className: "connector-form connection-edit", onSubmit: (e) => saveEdit(e, c), "aria-label": `Edit ${c.name}` },
       field("Sync", h("select", { className: "select", value: edit.every_minutes, onChange: (e) => setEdit({ ...edit, every_minutes: e.target.value }) },
         h("option", { value: "" }, "The deployment's default"), choices.map(([m, label]) => h("option", { key: m, value: String(m) }, label)))),
-      POINTER_KINDS.has(c.kind) ? storageField(edit.storage, (e) => setEdit({ ...edit, storage: e.target.value })) : null,
+      POINTER_KINDS.has(c.kind) ? storageField(edit.storage, (e) => setEdit({ ...edit, storage: e.target.value }), c.kind) : null,
       scope ? field(scope[1], h("input", { className: "input mono", value: edit.scope, placeholder: scope[2], onChange: (e) => setEdit({ ...edit, scope: e.target.value }) }),
         "Comma-separated. It can change, not be removed: to read everything again, connect it again.") : null,
       h("div", { className: "actions connector-wide" },
@@ -1017,7 +1020,8 @@ function Connections({ ws, teams, orgAdmin }) {
             h("td", null, h("div", { className: "title" }, c.name,
                 c.managed_by ? h("span", { className: "tag tf-tag", title: managedTitle(c.managed_by) }, toolName(c.managed_by.by)) : null),
               h("div", { className: "sub" }, h(SourceIcon, { kind: c.kind }), " ", c.kind,
-                c.storage === "pointer" ? h("span", { className: "tag", title: "Its text isn't kept: answers and the reader read it from the source for each person" }, "Pointers only") : null)),
+                c.storage === "pointer" ? h("span", { className: "tag", title: "Its text isn't kept: answers and the reader read it from the source for each person" }, "Pointers only") : null,
+                c.storage === "live" ? h("span", { className: "tag", title: "Only titles and readers are kept: search asks the source's own, and answers read it live" }, "Live only") : null)),
             h("td", null, note[c.name] ? h(Status, { tone: note[c.name][0] }, note[c.name][1])
               : h(Status, { tone: tone(c.status) }, c.status.charAt(0).toUpperCase() + c.status.slice(1))),
             h("td", { className: "hide-sm" }, every(c.every_minutes)),

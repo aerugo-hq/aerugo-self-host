@@ -1927,7 +1927,92 @@ truth's 3 stale units and its 1 gap; no planted text in the API's, worker's, or 
 taken after the check (which shows only that nothing was left behind: the check reads every table while the pointers
 exist); the lint at 0 errors and 43 warnings; the gallery's 3 browser tests passed. Not built: Terraform's `storage`
 (the provider's follow-up), pointers for other sources, attachments read live, and reading an answer's pointers at once
-(one after another today, so an Ask with six pointers waits on six sources in turn).
+(one after another today, so an Ask with six pointers waits on six sources in turn). CI on pull request 74: unit 195
+passed; smoke 181 passed, 17 skipped, 0 failed; the golden set, the scenario, the retailer, the Atlas, and the teams at
+their baselines, no leak and no regression; the retailer as pointers no leak, everyone opening exactly what the truth
+says, Recall@10 99%, MRR 0.84 (its baseline recorded in the loop); no planted text in the services' logs.
+F11b, live only (`docs/ENTERPRISE_PLAN.md` F11; approved 2026-10-20 with F11a). A Confluence or Jira connection can be
+`storage` `live`; Slack refuses it, saying why (its search needs a person's token), and so does every other source.
+Migration 0067 lets `documents.storage` be `live`. A live document keeps its key, address, title, version, and readers:
+its sync doesn't read its body at all (`sync_container`), keeps no chunks and no embeddings, and forgets what was made
+from its text as a pointer does. Search, in smart mode, asks each live-only connection in scope, before any transaction
+opens, through its source's own search (`live.search`: `JiraClient.search_text`, JQL `text ~` for each word;
+`ConfluenceClient.search_text`, CQL over pages and posts; each within the connection's projects or spaces) for the
+question's eight longest content words as asked (`search_words`; the sources stem them), letters and digits only, so
+nothing typed is ever JQL or CQL; a source that fails gives nothing, logged by its kind. Only keys come back, each matched
+to that connection's own document (two sites can hold the same key), and they enter as the `source` channel
+(`SOURCE_SQL`, under the caller's row-level security, then the post-check like every channel), each source's results a
+channel of its own (`live.merge`), so every source's best hit counts alike, each counting twice (`SOURCE_WEIGHT` 2.0),
+since it stands in for the words and meaning channels a live document doesn't have. Keyword mode keeps to Aerugo's own all-words channels (a source's search matches any of
+the words), and meaning mode to embeddings. The title channel now reaches a live document's kept title, and focus a
+live document, indexed documents unchanged. Answers and the reader read a live document as a pointer (F11a's live
+reads, its readers re-read in the source). The fakes: Jira's `search/jql` and Confluence's CQL `rest/api/search` answer
+`text ~` terms (any term, most matched first, in the listed projects or spaces). The app offers "Live only" for
+Confluence and Jira, never Slack, and marks the row. `make eval-company-live` (`kl.company_eval --live`, CI's last
+evaluation, set `company-live`): the retailer with Confluence and Jira live and Slack as pointers. The loader now pauses
+and resumes a connection an earlier run left in `error`, so a stale error never reads as this run's (found when the fake
+restarted empty on a long-lived stack and the readers refresh marked the retailer's connections). Smoke:
+`live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search` (a Jira issue and a Confluence page live
+only: no chunks, no embeddings, their text in no table; Slack and Notion refuse live only; a word only their text holds
+finds both for alice through the sources' own search, and neither for bob, though the search ran as the connection's
+account; alice's Ask reads both live; once the sources stop listing her, none; carol still does; nothing stored after).
+Unit: 4 more in `tests/test_live.py` (14). Red first: with the words-only rule removed from both query builders, its test
+failed; in the stack, with the source channel off the check failed (nothing found), and with a live sync writing chunks
+it failed (a chunk each); each restored (`cmp`) and green. Found while building: a source hit counted as one channel
+tied with weak meaning matches, which win ties, so alice's Ask left both items out of its six sources (it counts as two
+now); the plurals
+`claims.words` trims ("errors" to "error") would have reached a source's search, which stems on its own side; and the
+source search first ran in keyword mode too, where the modes check caught a paraphrase found by one shared word. An
+independent review of the branch found four problems, each fixed: results from the sources were merged before the
+caller's filter, so a visible item's place and score counted the items they can't open that a source ranked above it,
+an exact count of hidden matches for a word of their choosing (invariant 11): now each source's keys stay apart, the
+caller's row-level security filters them (`SOURCE_SQL` returns each row's connection), and only then are they ordered,
+each source's in its order and the sources taking turns (`live.merge`); the source's result cap applied before the
+filter, so hidden matches could push a visible item off (an existence check, and lost recall): a source is now searched
+only within the projects or spaces where the caller already opens something (`VISIBLE_SQL`), a connection where they
+open nothing isn't asked, and each returns up to 50; a slow or throttled source held the request thread through the
+worker's retry waits and spent the account's rate the syncs and the readers refresh need: every call made while someone
+waits (searches and F11a's live reads alike) is now tried once with a 5-second timeout (`source_http.answering`, a
+context variable the helper reads), and the live-only sources are asked at once under one 8-second deadline
+(`SEARCH_SECONDS`), a late one left out; and a live connection still brought in attachments, findable by name and
+never readable: they're left out as a pointer connection's are. Also: focus brings an indexed document only with a
+chunk, as before, and the search's trace records how many sources were asked, never how many hits (some hidden). Red
+first for each: four unit tests (an item's place with hidden keys mixed in, the containers asked, the deadline, one try
+under a throttle) failed with their fixes undone, and the live check failed with attachments let back in (`make unit`
+203 passed after). Proof,
+against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 203 passed; the live-only and
+pointer checks passed, and so did semantic search, MCP search, E1, the reranker, conversations, and the Jira and
+Confluence checks; two failed on the stack's extra content, neither from F11b (Q4's lineage walk had no room left among
+the scenario's twenty curated pages; the modes check's meaning-mode page was crowded out by the scenario's pages and the
+retailer's Slack days), for the fresh loop to prove; `kl.company_eval --live`: no leak, everyone opening exactly what
+the truth says, nothing extracted, Recall@10 99% and MRR 0.72 over 52 counted questions (indexed and pointers: 100% and
+0.83; `checkout-changed` finds one of its two pages, at #6), Ask citing a right page for 27 of 27, the right unit first
+for 15 of 26, the truth's 3 stale units and 1 gap; the lint at 0 errors and 43 warnings; the gallery's 3 browser tests
+passed. Not built: live only for other sources, a source's own ranking beyond the order it answers in (an issue search
+comes back in Jira's order), and searching live-only sources in parallel (one after another today).
+**The fresh-stack loop over F11a and F11b, 2026-10-20** (once after the two, at the top of the stack, f11b-live-only,
+with CI's settings): `make pins` passed; `make unit` 203 passed; `make smoke` 184 passed, 15 skipped, 0 failed (both
+storage checks among them; the web servers recreated first, so the optional web checks ran); the golden set hit@1 1.0,
+MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for
+24 of 25, no leak, no regression; `make eval-company` everyone opening exactly what the truth says, no leak, Recall@10
+100%, MRR 0.83 over 52 counted questions, Ask right for 27 of 27, the truth's 3 stale units and 1 gap, no regression
+(one case better, `registers-down-leader` #3 to #2, not recorded); `make atlas-eval` exact, no leak, no regression;
+`make eval-teams` 11 teams, no leak, no regression; the retailer as pointers no leak, Recall@10 99%, MRR 0.84, Ask right
+for 27 of 27, recorded as `company-pointer`; the retailer live only (Slack as pointers) no leak, Recall@10 99%, MRR 0.70,
+Ask right for 25 of 27 (both bike-key questions' store threads, Slack pointers found by meaning, now rank below the live
+Confluence pages the source search brings), recorded as `company-live` (recorded again since: below); no planted text in the API's, worker's, or MCP
+server's logs; `make e2e` 38 passed; `make test-web` 7 passed; the lint at 0 errors and 43 warnings. Every other set's
+record unchanged.
+CI on pull request 75 then failed the live-only gate: `allocation-fewer-units` fell from #1 to #4 while other cases
+rose. The live sources took turns in the order of their connections' ids, which are random per stack, so the same
+question ranked differently on each machine. The sources are now ordered by team and name (`LIVE_SQL`), and each
+source's results are a channel of their own in fusion rather than taking turns, so no source's best hit is pushed down
+by where it's listed (`live.merge` returns a list per source; `tests/test_live.py` holds every source's best hit to the
+same score, red with one combined list). A source hit counting once instead of twice was measured and dropped (MRR 0.63
+to 0.40, Ask right for 25 of 27 to 23). The live-only baseline was recorded again on the loop's stack, then run again
+against itself with the same numbers: Recall@10 99%, MRR 0.63 over 52 counted questions, Ask right for 25 of 27, no
+leak (the earlier 0.70 and CI's 0.71 were two random orders of the sources); `make unit` 204 passed; the live-only check
+passed.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1938,8 +2023,8 @@ this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fi
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
-answers), with the fresh-stack loop over the three, and F11a (pointer mode); next, F11b (live only, for Confluence and
-Jira), the fresh-stack loop over F11a and F11b, then capture (C1 to C5).
+answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
+loop over the two; next, capture (C1 to C5).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

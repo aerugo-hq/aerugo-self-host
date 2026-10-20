@@ -29,6 +29,7 @@ SITE = re.compile(r"^https://[a-z0-9][a-z0-9-]{0,62}\.atlassian\.net$")  # Jira 
 OVERLAP_MINUTES = 10  # an incremental sync reaches this far before its cursor: clocks drift, and edits land mid-listing (H6)
 FIELDS = "summary,description,comment,status,assignee,reporter,issuetype,updated,security,labels,resolution,resolutiondate,attachment"
 ATTACHMENT_ID = re.compile(r"^[0-9]{1,20}$")
+WORD = re.compile(r"^[a-z0-9]{1,40}$")  # a search word (F11b): nothing else reaches a query
 ANYONE = {"applicationRole", "anyone"}  # permission holders meaning "anyone with access to this Jira"
 BLOCKS = {"paragraph", "heading", "listItem", "blockquote", "codeBlock", "panel", "tableRow", "rule"}
 
@@ -171,6 +172,16 @@ class JiraClient:
             raise ValueError("unexpected issue key")
         return self._get(f"issue/{key}", fields=FIELDS)
 
+    def search_text(self, words: list[str], projects: list[str] | None, limit: int = 50) -> list[str]:
+        """The issues Jira's own search finds for any of these words, in its order (F11b's runner). Words are letters and
+        digits alone and projects are keys, so nothing a person typed is ever JQL."""
+        if not words or not all(WORD.fullmatch(w) for w in words) or not all(PROJECT.fullmatch(p) for p in projects or []):
+            raise ValueError("search words are letters and digits, projects their keys")
+        scope = f"project in ({', '.join(projects)}) AND " if projects else ""
+        terms = " OR ".join(f'text ~ "{w}"' for w in words)
+        page = self._get("search/jql", jql=f"{scope}({terms})", fields="summary", maxResults=limit)
+        return [i["key"] for i in page.get("issues") or [] if ISSUE.fullmatch(i.get("key") or "")]
+
     def open_to_everyone(self, project: str) -> bool:
         """Whether anyone with Jira access may browse the project."""
         scheme = self._get(f"project/{project}/permissionscheme", expand="permissions")
@@ -230,6 +241,11 @@ def live(client: JiraClient, cfg: dict, doc: dict) -> tuple[list[str], list[tupl
     return readers, issue_sections(issue)[1]
 
 
+def search(client: JiraClient, cfg: dict, words: list[str]) -> list[str]:
+    """F11b: the keys of the issues Jira's search finds, within the connection's projects."""
+    return [f"jira-{key}" for key in client.search_text(words, cfg.get("projects"))]
+
+
 def minutes_since(cursor: str | None) -> int | None:
     """Whole minutes since a cursor (an ISO time), or None for no cursor, or one that isn't a time."""
     try:
@@ -248,7 +264,7 @@ def sync_project(conn, connection: dict, client: JiraClient, project: str, since
     cfg = connection["config"] or {}
     seen: dict[str, dict] = {}  # the accounts Jira named, as it reports them
     everyone_else = project_readers(client, cfg, project, seen)
-    pointer = storage_of(connection) == "pointer"  # F11a: attachments aren't read live, so a pointer connection leaves them out
+    pointer = storage_of(connection) != "index"  # F11: attachments aren't read live, so pointer and live connections leave them out
     items = []
     for issue in client.issues(project, since=since):
         acl = readers_of(client.browsers(issue=issue["key"]), seen) if restricted(issue) else everyone_else
