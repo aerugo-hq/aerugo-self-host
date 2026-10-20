@@ -6233,6 +6233,79 @@ def extraction_proposes_units_only_from_what_a_team_opted_in():
 
 
 @check
+def consolidation_links_duplicates_and_sends_contradictions_to_owners():
+    """F3, consolidation: a unit that says what another of its team's says is linked to it, each keeping its own evidence, so someone who reads both sees it once and someone who reads only the copy still sees the copy; two units that state the same thing with a different number, for the same people at the same time, become a conflict their owners see, but versions that apply at different times and rules for different places never do; a conflict across teams shows only to someone who reads both sides; resolving one inside a team supersedes the side not kept, while across teams it's only recorded; and each team's curators list its open conflicts"""
+    import uuid
+    tag = uuid.uuid4().hex[:8]
+    topic = f"smoke-c-{tag}"
+
+    def make(user, ws, text, doc, sub, **kw):
+        r = api("POST", f"/v1/workspaces/{ws}/units", user, json={"kind": "fact", "topic": f"{topic}-{sub}", "title": f"{sub} {tag}",
+                                                                   "text": text, "evidence": [{"document": doc}], **kw})
+        assert r.status_code == 201, f"{sub}: {r.status_code} {r.text[:200]}"
+        return r.json()["id"]
+
+    def get(user, uid):
+        return api("GET", f"/v1/units/{uid}", user)
+
+    def listed(user):
+        return {u["id"] for u in api("GET", "/v1/units", user, params={"q": tag, "limit": 100}).json()["units"]}
+
+    def found(user, uid):
+        r = get(user, uid)
+        return [c for c in r.json().get("conflicts", []) if c["opened_by"] == "consolidation"] if r.status_code == 200 else []
+
+    def until(test, seconds=150):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(3)
+        return test()
+    try:
+        first = make("alice", "payments", f"Settlement files {tag} reach the bank by 18:00 each business day.", "pay-runbook", "first")
+        assert api("POST", f"/v1/units/{first}/confirm", "alice").status_code == 200
+        copy = make("alice", "payments", f"Settlement files {tag} reach the bank by 18:00 each business day.", "handbook", "copy")
+        big = make("alice", "payments", f"Refunds {tag} over $500 are approved by the finance lead.", "pay-runbook", "big")
+        small = make("alice", "payments", f"Refunds {tag} over $50 are approved by the finance lead.", "pay-runbook", "small")
+        old = make("alice", "payments", f"Chargebacks {tag} are answered within 10 days.", "pay-runbook", "old", valid_until="2025-12-31")
+        new = make("alice", "payments", f"Chargebacks {tag} are answered within 7 days.", "pay-runbook", "new", valid_from="2026-01-01")
+        co = make("alice", "payments", f"Store refunds {tag} are capped at $300 a day.", "pay-runbook", "co", scope={"places": ["CO"]})
+        oregon = make("alice", "payments", f"Store refunds {tag} are capped at $400 a day.", "pay-runbook", "or", scope={"places": ["OR"]})
+        ours = make("alice", "payments", f"Card disputes {tag} go to the risk desk within 2 hours.", "pay-runbook", "ours")
+        theirs = make("olivia", "commons", f"Card disputes {tag} go to the risk desk within 4 hours.", "handbook", "theirs")
+        assert until(lambda: get("alice", copy).json().get("duplicate_of") == first and found("alice", big) and found("alice", ours)), \
+            f"consolidation didn't link the copy or open the conflicts: {get('alice', copy).json().get('duplicate_of')}"
+
+        assert first in listed("carol") and copy not in listed("carol"), "someone who reads both saw a duplicate twice"
+        assert [d["id"] for d in get("carol", first).json()["duplicates"]] == [copy], "the original doesn't say where else it's stated"
+        assert copy in listed("bob") and first not in listed("bob"), "someone who reads only the copy lost it"
+        conflict = found("alice", big)
+        assert len(conflict) == 1 and conflict[0]["other"]["id"] == small and "number" in conflict[0]["note"], conflict
+        for a, b in ((old, new), (co, oregon), (first, copy)):
+            assert not found("alice", a) and not found("alice", b), "versions in time, rules for different places, or duplicates were made a conflict"
+        across = found("alice", ours)
+        assert len(across) == 1 and across[0]["other"]["id"] == theirs, across
+        assert found("bob", theirs) == [] and found("dave", theirs) == [], "a conflict reached someone who reads only one side"
+        listed_open = {c["id"] for c in api("GET", "/v1/workspaces/payments/conflicts", "alice").json()["conflicts"]}
+        assert {conflict[0]["id"], across[0]["id"]} <= listed_open, f"the team's open conflicts: {listed_open}"
+        assert api("GET", "/v1/workspaces/payments/conflicts", "carol").status_code == 403, "a member who isn't a curator listed conflicts"
+        assert api("GET", "/v1/workspaces/payments/conflicts", "bob").status_code == 403, "another team's member listed conflicts"
+
+        kept = "unit" if conflict[0]["unit"] == big else "other"
+        r = api("POST", f"/v1/units/conflicts/{conflict[0]['id']}/resolve", "alice", json={"kept": kept, "resolution": "The policy says $500."})
+        assert r.status_code == 200, f"{r.status_code} {r.text[:200]}"
+        lost = get("alice", small).json()
+        assert lost["status"] == "superseded" and lost["superseded_by"] == big, f"the side not kept wasn't superseded: {lost['status']}"
+        assert get("alice", big).json()["status"] == "proposed", "the side kept changed"
+        kept = "unit" if across[0]["unit"] == ours else "other"
+        assert api("POST", f"/v1/units/conflicts/{across[0]['id']}/resolve", "alice", json={"kept": kept, "resolution": "Ours is current."}).status_code == 200
+        assert get("olivia", theirs).json()["status"] == "proposed", "a resolution superseded another team's unit"
+        print(f"      consolidation: the copy linked, two conflicts opened and none for versions or places, one resolution applied")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.knowledge_units WHERE topic LIKE %s", (f"{topic}%",))
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid

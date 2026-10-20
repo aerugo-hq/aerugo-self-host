@@ -16,13 +16,15 @@ Loading, every run (each step only adds what's missing, so a run again changes n
    versions on one topic; and the planner's version of sell-through as a perspective, with its conflict. A fact no
    one who signs in can fully read (two stores' bike keys) is named, not loaded; sensitive facts never are.
 
-Then five checks:
+Then six checks:
 
 - Readers: each person can open exactly the documents the truth says, no more (a leak) and no fewer.
 - Units: each person reads exactly the units whose evidence they can all read, listed and by id, and a perspective and
   its conflict only when they read both sides.
 - Extraction (F2): Stores and Product quality opt in with the fake model; every proposal cites one of their pages or
   tickets, never a chat thread, and each person sees exactly the proposals whose document they can open.
+- Consolidation (F3): exactly the conflicts the truth's stale pages make, no fact linked as another's copy, and each
+  conflict shown exactly to the people who read both sides.
 - Retrieval: each question, asked as its person, scored as kl.evals scores the migration scenario (found, first
   right page, Recall@10, MRR), held to its own baseline ("company" in kl/evals_baseline.json); a forbidden page in
   the results is a leak. Questions waiting on a slice (F8, C1 to C3) are shown, not counted.
@@ -341,6 +343,49 @@ def units_check(world: company.World, ids: dict[str, str]) -> tuple[list[str], l
     return leaks, missing
 
 
+DUE_SQL = """SELECT count(*) AS n FROM kl.knowledge_units WHERE status <> ALL('{superseded,retired}')
+AND (consolidated_at IS NULL OR updated_at > consolidated_at)"""
+FOUND_SQL = "SELECT unit_id::text AS a, other_unit::text AS b FROM kl.unit_conflicts WHERE opened_by = 'consolidation' AND other_unit IS NOT NULL"
+LINKS_SQL = "SELECT id::text AS id, duplicate_of::text AS original FROM kl.knowledge_units WHERE duplicate_of IS NOT NULL"
+
+
+def consolidation_check(world: company.World, ids: dict[str, str]) -> tuple[list[str], list[str]]:
+    """F3 on the retailer: once every unit has been compared, consolidation opened exactly the conflicts the truth's stale
+    pages make (each stale fact against the current facts it contradicts), linked none of the truth's
+    facts as copies of each other, and each person sees a conflict exactly when they can read both of its sides.
+    Returns (leaks, missing); a conflict the truth doesn't hold counts as missing precision, and fails too."""
+    by_id = {uid: fid for fid, uid in ids.items()}
+    facts = {f.id: f for f in world.facts}
+    want = {frozenset((f.id, g)) for f in world.facts if f.id in ids for g in f.contradicts if g in ids}
+    deadline = time.monotonic() + 300
+    with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+        while conn.execute(DUE_SQL).fetchone()["n"] and time.monotonic() < deadline:
+            time.sleep(5)
+        found = conn.execute(FOUND_SQL).fetchall()
+        links = conn.execute(LINKS_SQL).fetchall()
+    among = {frozenset((by_id[r["a"]], by_id[r["b"]])) for r in found if r["a"] in by_id and r["b"] in by_id}
+    leaks, missing = [], [f"consolidation never found {' against '.join(sorted(pair))}" for pair in sorted(want - among, key=sorted)]
+    missing += [f"consolidation opened a conflict the truth doesn't hold: {' against '.join(sorted(pair))}" for pair in sorted(among - want, key=sorted)]
+    missing += [f"{by_id[r['id']]} was linked as a copy of {by_id[r['original']]}" for r in links if r["id"] in by_id and r["original"] in by_id]
+    print(f"\nConsolidation (F3): {len(among)} conflicts among the company's units (the truth holds {len(want)}), "
+          f"{len(found) - len(among)} more involving proposals, {len(links)} copies linked; who sees each\n")
+    for pair in sorted(among & want, key=sorted):
+        first, second = sorted(pair)
+        for person in (p for p in world.people if p.username):
+            seen = world.visible(person.username)
+            should = set(facts[first].evidence) <= seen and set(facts[second].evidence) <= seen
+            r = api("GET", f"/v1/units/{ids[first]}", person.username)
+            shows = r.status_code == 200 and any(c["other"].get("id") == ids[second] or c["unit"] == ids[second]
+                                                 for c in r.json()["conflicts"] if c["opened_by"] == "consolidation")
+            if shows and not should:
+                leaks.append(f"{person.username} saw the conflict between {first} and {second}")
+            elif should and not shows:
+                missing.append(f"{person.username} can't see the conflict between {first} and {second}")
+        readers = [p.username for p in world.people if p.username and set(facts[first].evidence) | set(facts[second].evidence) <= world.visible(p.username)]
+        print(f"  {first} against {second}: shown to {', '.join(readers) or 'no one who signs in'}, as the truth says")
+    return leaks, missing
+
+
 def model_for_stores(team: str = ASK_TEAM) -> None:
     """The fake model, registered for a team (Stores, so Ask is checked for its people), its key put back after a restart."""
     r = api("POST", f"/v1/workspaces/{team}/models", ADMIN, json={
@@ -359,7 +404,7 @@ LEFT JOIN kl.extraction_state s ON s.workspace_id = w.id AND s.document_id = d.i
 WHERE w.slug = %s AND d.source_kind = ANY(%s)
 """
 PROPOSALS_SQL = """
-SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team FROM kl.knowledge_units u
+SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team, u.duplicate_of::text AS duplicate_of FROM kl.knowledge_units u
 JOIN kl.documents d ON d.id = u.evidence[1] JOIN kl.workspaces w ON w.id = u.owner_team
 WHERE u.created_by = 'extraction' AND u.status = 'proposed' AND w.slug = ANY(%s)
 """
@@ -394,7 +439,8 @@ def extraction_check(world: company.World) -> tuple[list[str], list[str]]:
           "who sees them, against the truth\n")
     for person in (p for p in world.people if p.username):
         seen = world.visible(person.username)
-        want = {p["id"] for p in found if p["external_key"] in by_key and by_key[p["external_key"]].name in seen}
+        readable_ids = {p["id"] for p in found if p["external_key"] in by_key and by_key[p["external_key"]].name in seen}
+        want = {i for i in readable_ids if next(p["duplicate_of"] for p in found if p["id"] == i) not in readable_ids}  # F3: a copy shows under its original
         got, offset = set(), 0
         while offset is not None:
             r = api("GET", "/v1/units", person.username, params={"status": "proposed", "limit": 100, "offset": offset})
@@ -470,7 +516,8 @@ def main(argv: list[str]) -> int:
     leaks, missing = readers_check(world)
     unit_leaks, unit_missing = units_check(world, ids)
     extract_leaks, extract_missing = extraction_check(world)
-    leaks, missing = leaks + unit_leaks + extract_leaks, missing + unit_missing + extract_missing
+    merge_leaks, merge_missing = consolidation_check(world, ids)
+    leaks, missing = leaks + unit_leaks + extract_leaks + merge_leaks, missing + unit_missing + extract_missing + merge_missing
     card, retrieval_leaks = score(world, out)
     problems = [f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
     if problems:

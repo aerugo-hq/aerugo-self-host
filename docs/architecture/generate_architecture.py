@@ -130,7 +130,7 @@ layers = [
                                        ("Change agent (pull requests)", S_NEW), ("Review queue, gaps", S_BUILT)]),
     ("Pipelines: how it understands (the worker)", 450, [("Indexing: chunks, embeddings", S_BUILT),
                                                           ("Extraction: knowledge units", S_BUILT),
-                                                          ("Consolidation: merge, supersede, conflicts", S_NEW),
+                                                          ("Consolidation: merge, supersede, conflicts", S_BUILT),
                                                           ("Analyzers: code, SQL lineage, usage, jobs", S_NEW),
                                                           ("Profiles and systems", S_NEW),
                                                           ("Learning loop: feedback, gaps, freshness", S_NEW)]),
