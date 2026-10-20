@@ -6582,7 +6582,8 @@ def questions_become_gaps_and_corrections_reach_owners():
     import uuid
     tag = uuid.uuid4().hex[:8]
     topic = f"smoke-f5a-{tag}"
-    ladder, badge, health = f"Where is the spare ladder key {tag} kept?", f"Who reorders visitor badges {tag}?", f"Is Jamie Doe back from surgery {tag}?"
+    ladder, badge, health = (f"Which shelf holds the label printer rolls {tag}?", f"Who reorders visitor badges {tag}?",
+                             f"Is Jamie Doe back from surgery {tag}?")  # words of their own: the retailer asks about ladder keys
     models = {"alice": "payments/smoke-fake", "carol": "payments/smoke-fake", "bob": "finance/smoke-fake"}
 
     def ask(user, question):
@@ -6620,7 +6621,8 @@ def questions_become_gaps_and_corrections_reach_owners():
         assert ladder in found, f"three people's unanswered question didn't become a gap: {list(found)}"
         gap = found[ladder]
         assert gap["askers"] == 3 and gap["asked"] == 3 and gap["state"] == "open", gap
-        assert not any(name in json.dumps(gap) for name in ("alice", "carol", "bob")), "a gap named who asked"
+        asked = json.dumps({k: v for k, v in gap.items() if k != "ask"})  # who to ask about it is named; who asked never
+        assert not any(name in asked for name in ("alice", "carol", "bob")), "a gap named who asked"
         assert "closest" in gap, "the gap didn't say which pages are closest, for its reader"
         assert all(p["user"] for p in gap.get("ask", [])), f"who to ask about the gap named nobody: {gap.get('ask')}"
         assert badge not in found, "two people's question became a gap"
