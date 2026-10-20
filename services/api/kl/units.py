@@ -29,6 +29,7 @@ from .auth import Caller, authenticate
 from .authz import fga
 from .db import resolve_org_id, scoped
 from .okf import CONCEPT_KEY
+from .lifecycle import EVENT_SQL, SNAPSHOT
 from .policy import SLUG, audience_allows, audit, memberships, resolve_targets
 
 log = logging.getLogger("kl.units")
@@ -204,6 +205,12 @@ LEFT JOIN knowledge_units o ON o.id = c.other_unit LEFT JOIN workspaces wo ON wo
 WHERE (w.slug = %(ws)s OR wo.slug = %(ws)s) AND (%(status)s::text IS NULL OR c.status = %(status)s)
 ORDER BY c.created_at DESC LIMIT 500
 """
+EVENTS_SQL = "SELECT from_status, to_status, reason, created_by, at FROM unit_events WHERE unit_id = %(id)s ORDER BY at, id"
+REVIEW_SQL = f"""
+SELECT {UNIT_COLUMNS}, (SELECT e.reason FROM unit_events e WHERE e.unit_id = u.id ORDER BY e.at DESC, e.id DESC LIMIT 1) AS why
+FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team
+WHERE w.slug = %(ws)s AND u.status IN ('proposed', 'stale') ORDER BY u.updated_at DESC, u.id LIMIT 500
+"""
 PERSPECTIVES_SQL = """
 SELECT p.id::text AS id, p.holder_kind, p.holder, p.context, p.body, p.evidence::text[] AS evidence, p.sections, p.created_by, p.created_at
 FROM unit_perspectives p WHERE p.unit_id = %(id)s ORDER BY p.created_at
@@ -343,6 +350,8 @@ def _detail(conn, caller: Caller, uid: str, row: dict, docs: dict[str, dict]) ->
             "duplicate_of": original["id"] if original and shown(original["evidence"], set(seen)) else None,  # never a hidden one
             "duplicates": [{"id": d["id"], "title": d["title"], "owner": d["owner"], "evidence": _evidence(d, seen)}
                            for d in copies if shown(d["evidence"], set(seen))],
+            "history": [{"from": e["from_status"], "to": e["to_status"], "reason": e["reason"], "by": e["created_by"],
+                         "at": e["at"].isoformat()} for e in conn.execute(EVENTS_SQL, {"id": uid}).fetchall()],  # F6
             "versions": [{**_summary(v), "superseded_by": v["superseded_by"]} for v in versions if shown(v["evidence"], set(seen))]}
 
 
@@ -414,6 +423,7 @@ def create_unit(ws: str, body: UnitIn, caller: Caller = Depends(authenticate)):
             conn.execute("UPDATE knowledge_units SET status = 'superseded', superseded_by = %s, updated_at = now(), "
                          "valid_until = coalesce(%s::date - 1, valid_until, current_date) WHERE id = %s",
                          (new, body.valid_from, old["id"]))
+            conn.execute(EVENT_SQL, (old["id"], old["status"], "superseded", "a new version replaced it", caller.username))
         audit(conn, org_id, caller.username, "unit.create", [ws], {"unit": new, "kind": body.kind, "topic": body.topic,
                                                                    "supersedes": old and old["id"], "evidence": len(evidence)})
     return {"id": new}
@@ -440,9 +450,13 @@ def _set_status(unit_id: str, caller: Caller, status: str, action: str) -> dict:
         raise HTTPException(409, f"the unit is {row['status']}")
     with scoped(org_id, caller.principals, teams=[row["owner"]]) as conn:
         trust = "confirmed" if status == "confirmed" else row["trust"]
+        # F6: confirming restarts its review and snapshots its evidence, so a change underneath it can be told
         conn.execute("UPDATE knowledge_units SET status = %s, trust = %s, updated_at = now(), "
-                     "reviewed_at = CASE WHEN %s = 'confirmed' THEN now() ELSE reviewed_at END WHERE id = %s",
-                     (status, trust, status, uid))
+                     "reviewed_at = CASE WHEN %s = 'confirmed' THEN now() ELSE reviewed_at END, "
+                     f"evidence_hashes = CASE WHEN %s = 'confirmed' THEN {SNAPSHOT} ELSE evidence_hashes END WHERE id = %s",
+                     (status, trust, status, status, uid))
+        conn.execute(EVENT_SQL, (uid, row["status"], status, "confirmed by its owner" if status == "confirmed" else "retired by its owner",
+                                 caller.username))
         audit(conn, org_id, caller.username, action, [row["owner"]], {"unit": uid})
     return {"id": uid, "status": status, "trust": trust}
 
@@ -537,6 +551,23 @@ def team_conflicts(ws: str, status: str | None = Query("open", pattern="^(open|r
     return {"conflicts": out}
 
 
+@router.get("/workspaces/{ws}/review")
+def team_review(ws: str, caller: Caller = Depends(authenticate)):
+    """What a team's curators have to review (F6): proposals to confirm, stale units (each with why), and open conflicts,
+    each only when the caller can read it in full, so the queue reveals nothing they can't read."""
+    require_curator(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(REVIEW_SQL, {"ws": ws}).fetchall()
+        docs = readable(conn, caller, [d for r in rows for d in r["evidence"]])
+        rows = [r for r in rows if shown(r["evidence"], set(docs))]
+        listed = {r["id"] for r in rows}
+        proposals = [_summary(r) for r in rows if r["status"] == "proposed" and r["duplicate_of"] not in listed]
+        stale = [{**_summary(r), "why": r["why"]} for r in rows if r["status"] == "stale"]
+        audit(conn, org_id, caller.username, "unit.review", [ws], {"proposals": len(proposals), "stale": len(stale)})
+    return {"proposals": proposals, "stale": stale, "conflicts": team_conflicts(ws, "open", caller)["conflicts"]}
+
+
 @router.post("/units/conflicts/{conflict_id}/resolve")
 def resolve_conflict(conflict_id: str, body: ResolveIn, caller: Caller = Depends(authenticate)):
     """The first unit's owner team resolves a conflict: which side was kept, and why, recorded. When both sides are its
@@ -564,7 +595,10 @@ def resolve_conflict(conflict_id: str, body: ResolveIn, caller: Caller = Depends
         superseded = None
         if c["other_unit"] and body.kept != "both":
             winner, loser = (c["unit_id"], c["other_unit"]) if body.kept == "unit" else (c["other_unit"], c["unit_id"])
+            was = conn.execute("SELECT status FROM knowledge_units WHERE id = %s", (loser,)).fetchone()
             superseded = conn.execute(SUPERSEDE_SQL, {"winner": winner, "loser": loser, "team": row["owner"]}).fetchone()
             superseded = superseded and superseded["id"]
+            if superseded:
+                conn.execute(EVENT_SQL, (loser, was["status"], "superseded", "a conflict was resolved for the other side", caller.username))
         audit(conn, org_id, caller.username, "unit.resolve", [row["owner"]], {"conflict": cid, "kept": body.kept, "superseded": superseded})
     return {"id": cid, "status": "resolved", "kept": body.kept, "superseded": superseded}

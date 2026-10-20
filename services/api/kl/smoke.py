@@ -6218,7 +6218,8 @@ def extraction_proposes_units_only_from_what_a_team_opted_in():
         assert any("fifteen minutes" in t for t in now.values()), f"the changed document's new proposal is missing: {now}"
         assert not any("ten minutes" in t for t in now.values()), "a changed document's old proposal stayed"
         kept = detail("alice", restart[0]["id"]).json()
-        assert kept["status"] == "confirmed" and "ten minutes" in kept["text"], "a confirmed unit went with its document's proposals"
+        assert kept["status"] in ("confirmed", "stale") and "ten minutes" in kept["text"], \
+            "a confirmed unit went with its document's proposals"  # stale once F6's pass sees its evidence changed: kept for review
 
         assert api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": None}).status_code == 200
         assert api("GET", "/v1/workspaces/payments/extraction", "alice").json()["model"] is None
@@ -6482,6 +6483,97 @@ def answers_fit_who_is_asking():
             conn.execute("DELETE FROM kl.knowledge_units WHERE topic LIKE %s", (f"{topic}%",))
             conn.execute("DELETE FROM kl.directory_people WHERE connection_id IN (SELECT id FROM kl.connections WHERE name = %s)", (name,))
         reset_fake()
+
+
+@check
+def knowledge_units_age_and_their_owners_are_told():
+    """F6, lifecycle: a confirmed unit goes stale when its review comes due or when its evidence changes underneath it, and a unit past its end date is retired, each change recorded with its reason; the owner team's curators find stale units, with why, and proposals in their review queue, and an info alert in the app, while a member and another team are refused the queue; a unit's history shows only with the unit; and confirming it again restarts its review"""
+    import uuid
+    from datetime import date, timedelta
+    from .pipelines import document_key
+    tag = uuid.uuid4().hex[:8]
+    topic, name, repo = f"smoke-f6-{tag}", f"f6-{tag}", f"acme/f6-{tag}"
+
+    def create(body):
+        r = api("POST", "/v1/workspaces/payments/units", "alice", json={"kind": "fact", "topic": topic, "evidence": [{"document": "pay-runbook"}], **body})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        return r.json()["id"]
+
+    def owner(sql, *args):
+        with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
+            cur = conn.execute(sql, args)
+            return cur.fetchall() if cur.description else []
+
+    def status(uid):
+        return owner("SELECT status FROM kl.knowledge_units WHERE id = %s", uid)[0]["status"]
+
+    def until(test, seconds=180):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not test():
+            time.sleep(3)
+        return test()
+
+    def push(minutes):
+        token = httpx.post(f"{FAKE_CI}/token", json={"repository": repo}, timeout=10).json()["token"]
+        r = httpx.post(f"{API}/v1/workspaces/payments/documents", timeout=30, headers={"Authorization": f"Bearer {token}"}, json={"upserts": [{
+            "key": "windows.md", "title": f"Settlement windows {tag}", "classification": "internal", "readers": ["group:payments"],
+            "uri": f"https://github.com/{repo}/blob/main/windows.md",
+            "markdown": f"# Settlement windows {tag}\n\nSettlement windows {tag} close at {minutes}."}]})
+        assert r.status_code == 202, f"push: {r.status_code} {r.text[:200]}"
+        url = f"{API}/v1/workspaces/payments/documents/pushes/{r.json()['push']}"
+        assert until(lambda: httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10).json()["status"] == "done", 120), \
+            "the worker never applied the push"
+    try:
+        r = api("POST", "/v1/workspaces/payments/pipelines", "alice", json={"name": name, "issuer": FAKE_CI, "repository": repo})
+        assert r.status_code == 201, f"register: {r.status_code} {r.text[:200]}"
+        key = document_key(r.json()["id"], "windows.md")
+        push("17:00")
+        aged = create({"title": f"Payouts {tag}", "text": f"Payouts {tag} run nightly at 02:00."})
+        moved = create({"title": f"Settlement windows {tag}", "text": f"Settlement windows {tag} close at 17:00.", "evidence": [{"document": key}]})
+        ended = create({"title": f"Holiday freeze {tag}", "text": f"Refunds {tag} were frozen for the holidays.",
+                        "valid_until": (date.today() - timedelta(days=2)).isoformat()})
+        waiting = create({"title": f"Chargeback desk {tag}", "text": f"Chargebacks {tag} go to the disputes desk."})
+        for uid in (aged, moved):
+            assert api("POST", f"/v1/units/{uid}/confirm", "alice").status_code == 200
+        assert owner("SELECT evidence_hashes FROM kl.knowledge_units WHERE id = %s", aged)[0]["evidence_hashes"], "confirming took no snapshot"
+
+        owner("UPDATE kl.knowledge_units SET reviewed_at = now() - interval '200 days' WHERE id = %s", aged)  # time passes
+        push("18:00")  # the evidence changes underneath the unit
+        assert until(lambda: (status(aged), status(moved), status(ended)) == ("stale", "stale", "retired")), \
+            f"the lifecycle pass didn't move them: {status(aged)}, {status(moved)}, {status(ended)}"
+        assert status(waiting) == "proposed", "a unit with nothing due moved"
+        last = lambda uid: api("GET", f"/v1/units/{uid}", "alice").json()["history"][-1]
+        assert last(aged) == {**last(aged), "to": "stale", "reason": "due for review (every 90 days)", "by": "lifecycle"}, last(aged)
+        assert last(moved)["reason"] == "its evidence changed since it was confirmed", last(moved)
+        assert last(ended)["to"] == "retired" and "end date" in last(ended)["reason"], last(ended)
+        assert [h["to"] for h in api("GET", f"/v1/units/{aged}", "alice").json()["history"]] == ["confirmed", "stale"]
+
+        queue = api("GET", "/v1/workspaces/payments/review", "alice")
+        assert queue.status_code == 200, f"{queue.status_code} {queue.text[:200]}"
+        stale = {u["id"]: u["why"] for u in queue.json()["stale"]}
+        assert {aged, moved} <= set(stale) and ended not in stale and stale[aged].startswith("due for review"), stale
+        assert waiting in {u["id"] for u in queue.json()["proposals"]}, "a proposal waiting to be confirmed wasn't in the queue"
+        assert api("GET", "/v1/workspaces/payments/review", "carol").status_code == 403, "a member who isn't a curator read the queue"
+        assert api("GET", "/v1/workspaces/payments/review", "bob").status_code == 403, "another team's member read the queue"
+        assert api("GET", f"/v1/units/{aged}", "bob").status_code == 404, "a unit's history showed without its unit"
+
+        org = owner("SELECT id::text AS id FROM kl.orgs WHERE slug = 'acme'")[0]["id"]
+        docs = {r["external_key"]: r["acl_principals"] for r in owner(
+            "SELECT external_key, acl_principals FROM kl.documents WHERE external_key IN ('pay-runbook', 'handbook')")}
+        for principals, want in ((docs["pay-runbook"], True), (docs["handbook"], False)):
+            with psycopg.connect(APP_DB, autocommit=True) as conn:
+                conn.execute("SELECT set_config('kl.org_id', %s, false), set_config('kl.principals', %s, false)", (org, ",".join(principals)))
+                seen = conn.execute("SELECT count(*) FROM kl.unit_events WHERE unit_id = %s", (aged,)).fetchone()[0] > 0
+            assert seen == want, f"the database {'hid' if want else 'showed'} a unit's history from a reader of {'all' if want else 'none'} of its evidence"
+        assert until(lambda: owner("SELECT 1 FROM kl.alerts WHERE rule = 'units_stale' AND subject = 'payments' AND status = 'firing' "
+                                   "AND severity = 'info'"), 120), "the owners weren't told in the app"
+
+        assert api("POST", f"/v1/units/{aged}/confirm", "alice").status_code == 200
+        assert status(aged) == "confirmed" and last(aged)["by"] == "alice", "confirming it again didn't restart its review"
+        print("      lifecycle: one stale by its cadence, one by its evidence, one retired at its end, each in the queue with why")
+    finally:
+        owner("DELETE FROM kl.knowledge_units WHERE topic LIKE %s RETURNING id", f"{topic}%")
+        api("DELETE", f"/v1/workspaces/payments/pipelines/{name}", "alice")
 
 
 @check

@@ -25,6 +25,8 @@ Then six checks:
   tickets, never a chat thread, and each person sees exactly the proposals whose document they can open.
 - Consolidation (F3): exactly the conflicts the truth's stale pages make, no fact linked as another's copy, and each
   conflict shown exactly to the people who read both sides.
+- Lifecycle (F6): one unit's review comes due and one page changes under another; exactly those two go stale, each in
+  its owner team's review queue, refused to another team.
 - Retrieval: each question, asked as its person, scored as kl.evals scores the migration scenario (found, first
   right page, Recall@10, MRR), held to its own baseline ("company" in kl/evals_baseline.json); a forbidden page in
   the results is a leak. Questions waiting on a slice (F8, C1 to C3) are shown, not counted.
@@ -389,6 +391,75 @@ def consolidation_check(world: company.World, ids: dict[str, str]) -> tuple[list
     return leaks, missing
 
 
+LIFECYCLE_SQL = "SELECT id::text AS id, status FROM kl.knowledge_units WHERE id = ANY(%s::uuid[])"
+HASH_SQL = "SELECT content_hash FROM kl.documents WHERE external_key = %s"
+
+
+def lifecycle_check(world: company.World, unit_ids: dict[str, str], out) -> tuple[list[str], list[str]]:
+    """F6 on the retailer: time passes for one unit (its review comes due) and one page changes under another; exactly
+    those two units go stale, each in its owner team's review queue with why, and another team's people are refused the
+    queue. Their owners confirm both first, as owners do, so each has its review restarted and its evidence snapshotted.
+    The page is put back afterwards."""
+    fact_due, (fact_changed, page, (old, new)) = company.LIFECYCLE_DUE, company.LIFECYCLE_CHANGED
+    writers = {spec.fact.id: spec for spec in unit_plan(world)[0]}
+    missing: list[str] = []
+    for fid in (fact_due, fact_changed):
+        r = api("POST", f"/v1/units/{unit_ids[fid]}/confirm", writers[fid].writer)
+        if r.status_code != 200:
+            raise SystemExit(f"confirming {fid} as {writers[fid].writer}: {r.status_code} {r.text[:200]}")
+    doc = world.doc(page)
+    team = world.container(doc.source, doc.container).team
+
+    def serve_page(text: str, version: int) -> str:
+        state = company.confluence_site(world)
+        for space in state["spaces"].values():
+            for p in space["pages"]:
+                if p["id"] == doc.key.split("-", 1)[1]:
+                    p |= {"body": company.storage(text), "version": version, "modified": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
+        httpx.post(f"{SITES['confluence']}/setup", json=state, timeout=30).raise_for_status()
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            before = conn.execute(HASH_SQL, (doc.key,)).fetchone()["content_hash"]
+        api("POST", f"/v1/workspaces/{team}/connections/retail-confluence-{team}/refresh", ADMIN)
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+                now = conn.execute(HASH_SQL, (doc.key,)).fetchone()["content_hash"]
+            if now != before:
+                return now
+            time.sleep(3)
+        raise SystemExit(f"the changed page {doc.key} was never synced again")
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # its review came due: confirmed longer ago than its cadence
+        conn.execute("UPDATE kl.knowledge_units SET reviewed_at = now() - make_interval(days => review_days + 1) WHERE id = %s",
+                     (unit_ids[fact_due],))
+    serve_page(doc.text.replace(old, new), 2)
+    deadline, stale = time.monotonic() + 180, set()
+    while time.monotonic() < deadline:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            stale = {r["id"] for r in conn.execute(LIFECYCLE_SQL, (sorted(set(unit_ids.values())),)) if r["status"] == "stale"}
+        if {unit_ids[fact_due], unit_ids[fact_changed]} <= stale:
+            break
+        time.sleep(3)
+    by_id = {uid: fid for fid, uid in unit_ids.items()}
+    want = {fact_due, fact_changed}
+    got = {by_id[u] for u in stale}
+    missing += [f"lifecycle never made {f} stale" for f in sorted(want - got)]
+    missing += [f"lifecycle made {f} stale, which the truth leaves as it is" for f in sorted(got - want)]
+    print(f"\nLifecycle (F6): {len(got)} of the company's {len(unit_ids)} units went stale; the truth says {len(want)}\n", file=out)
+    for fid in sorted(want & got):
+        spec = writers[fid]
+        queue = api("GET", f"/v1/workspaces/{spec.team}/review", spec.writer)
+        why = {u["id"]: u["why"] for u in queue.json().get("stale", [])} if queue.status_code == 200 else {}
+        if unit_ids[fid] not in why:
+            missing.append(f"{spec.writer} doesn't find {fid} in {spec.team}'s review queue")
+        outsider = next(p.username for p in world.people if p.username and p.team != spec.team)
+        if api("GET", f"/v1/workspaces/{spec.team}/review", outsider).status_code != 403:
+            missing.append(f"{outsider} read {spec.team}'s review queue")
+        print(f"  {fid}: stale, {why.get(unit_ids[fid])!r}; in {spec.team}'s queue for {spec.writer}", file=out)
+    serve_page(doc.text, 3)  # put the page back
+    return [], missing
+
+
 def model_for_stores(team: str = ASK_TEAM) -> None:
     """The fake model, registered for a team (Stores, so Ask is checked for its people), its key put back after a restart."""
     r = api("POST", f"/v1/workspaces/{team}/models", ADMIN, json={
@@ -558,6 +629,8 @@ def main(argv: list[str]) -> int:
     merge_leaks, merge_missing = consolidation_check(world, ids)
     leaks, missing = leaks + unit_leaks + extract_leaks + merge_leaks, missing + unit_missing + extract_missing + merge_missing
     card, retrieval_leaks, wrong_units = score(world, out, ids)
+    life_leaks, life_missing = lifecycle_check(world, ids, out)  # after Ask's: a stale unit ranks differently
+    leaks, missing = leaks + life_leaks, missing + life_missing
     problems = ([f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
                 + [f"WRONG: {line}" for line in wrong_units])
     if problems:
