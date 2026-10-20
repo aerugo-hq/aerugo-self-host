@@ -179,7 +179,8 @@ WHERE d.id = ANY(%(ids)s::uuid[])
 KEYS_SQL = "SELECT d.id::text AS id, d.external_key FROM documents d WHERE d.external_key = ANY(%(keys)s)"
 UNIT_COLUMNS = """u.id::text AS id, u.kind, u.topic, u.title, u.body, u.structure, u.scope_teams, u.scope_roles, u.scope_places,
        w.slug AS owner, u.owner_role, u.trust, u.confidence, u.status, u.valid_from, u.valid_until, u.superseded_by::text AS superseded_by,
-       u.review_days, u.reviewed_at, u.evidence::text[] AS evidence, u.sections, u.created_by, u.created_at, u.updated_at"""
+       u.review_days, u.reviewed_at, u.evidence::text[] AS evidence, u.sections, u.created_by, u.created_at, u.updated_at,
+       u.duplicate_of::text AS duplicate_of"""
 LIST_SQL = f"""
 SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team
 WHERE (%(kind)s::text IS NULL OR u.kind = %(kind)s) AND (%(team)s::text IS NULL OR w.slug = %(team)s)
@@ -192,6 +193,16 @@ VERSIONS_SQL = f"""
 SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team
 WHERE u.topic = %(topic)s AND u.owner_team = (SELECT owner_team FROM knowledge_units WHERE id = %(id)s)
 ORDER BY u.valid_from NULLS FIRST, u.created_at
+"""
+DUPLICATES_SQL = f"SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team WHERE u.duplicate_of = %(id)s ORDER BY u.created_at"
+TEAM_CONFLICTS_SQL = """
+SELECT c.id::text AS id, c.unit_id::text AS unit_id, c.other_unit::text AS other_unit, c.perspective_id::text AS perspective_id,
+       c.note, c.status, c.opened_by, c.created_at
+FROM unit_conflicts c
+JOIN knowledge_units u ON u.id = c.unit_id JOIN workspaces w ON w.id = u.owner_team
+LEFT JOIN knowledge_units o ON o.id = c.other_unit LEFT JOIN workspaces wo ON wo.id = o.owner_team
+WHERE (w.slug = %(ws)s OR wo.slug = %(ws)s) AND (%(status)s::text IS NULL OR c.status = %(status)s)
+ORDER BY c.created_at DESC LIMIT 500
 """
 PERSPECTIVES_SQL = """
 SELECT p.id::text AS id, p.holder_kind, p.holder, p.context, p.body, p.evidence::text[] AS evidence, p.sections, p.created_by, p.created_at
@@ -259,7 +270,8 @@ def list_units(kind: str | None = Query(None, pattern="^[a-z]{3,12}$"), team: st
                status: str | None = Query(None, pattern="^[a-z]{5,12}$"), topic: str | None = Query(None, pattern=TOPIC),
                q: str | None = Query(None, min_length=2, max_length=200), limit: int = Query(50, ge=1, le=LIMIT),
                offset: int = Query(0, ge=0, le=100000), caller: Caller = Depends(authenticate)):
-    """The units the caller may read, newest first; filters only narrow."""
+    """The units the caller may read, newest first; filters only narrow. A copy of a unit listed here is left out (F3):
+    its original stands for it, and its page names where else it's stated."""
     if team is not None and not SLUG.fullmatch(team):
         raise HTTPException(404, "workspace not found")
     like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" if q else None
@@ -269,7 +281,9 @@ def list_units(kind: str | None = Query(None, pattern="^[a-z]{3,12}$"), team: st
                                        "limit": limit + 1, "offset": offset}).fetchall()
         more, rows = len(rows) > limit, rows[:limit]
         docs = readable(conn, caller, [d for r in rows for d in r["evidence"]])
-        units = [_summary(r) for r in rows if shown(r["evidence"], set(docs))]
+        visible = [r for r in rows if shown(r["evidence"], set(docs))]
+        listed = {r["id"] for r in visible}
+        units = [_summary(r) for r in visible if r["duplicate_of"] not in listed]  # a copy, once, under its original
         audit(conn, org_id, caller.username, "unit.list", [], {"kind": kind, "team": team, "status": status, "topic": topic,
                                                                 "query": q, "offset": offset, "shown": len(units)})
     return {"units": units, "next_offset": offset + limit if more else None}
@@ -295,11 +309,14 @@ def _detail(conn, caller: Caller, uid: str, row: dict, docs: dict[str, dict]) ->
     all of its own evidence too."""
     perspectives = conn.execute(PERSPECTIVES_SQL, {"id": uid}).fetchall()
     versions = conn.execute(VERSIONS_SQL, {"topic": row["topic"], "id": uid}).fetchall()
+    copies = conn.execute(DUPLICATES_SQL, {"id": uid}).fetchall()
+    original = conn.execute(UNIT_SQL, {"id": row["duplicate_of"]}).fetchone() if row["duplicate_of"] else None
     conflicts = conn.execute(CONFLICTS_SQL, {"id": uid}).fetchall()
     other_ids = [c["other_unit"] if c["unit_id"] == uid else c["unit_id"] for c in conflicts if c["other_unit"]]
     others = conn.execute(f"SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team "
                           "WHERE u.id = ANY(%s::uuid[])", (other_ids,)).fetchall()
-    seen = readable(conn, caller, [d for r in [*perspectives, *versions, *others] for d in r["evidence"]]) | docs
+    seen = readable(conn, caller, [d for r in [*perspectives, *versions, *others, *copies, *([original] if original else [])]
+                                   for d in r["evidence"]]) | docs
     perspectives = [p for p in perspectives if shown(p["evidence"], set(seen))]
     shown_others = {o["id"]: o for o in others if shown(o["evidence"], set(seen))}
     mine = {p["id"] for p in perspectives}
@@ -314,7 +331,7 @@ def _detail(conn, caller: Caller, uid: str, row: dict, docs: dict[str, dict]) ->
             other = {"kind": "unit", "id": other_id, "title": shown_others[other_id]["title"]}
         else:
             continue
-        out_conflicts.append({"id": c["id"], "status": c["status"], "note": c["note"], "other": other, "kept": c["kept"],
+        out_conflicts.append({"id": c["id"], "unit": c["unit_id"], "status": c["status"], "note": c["note"], "other": other, "kept": c["kept"],
                               "resolution": c["resolution"], "opened_by": c["opened_by"], "resolved_by": c["resolved_by"],
                               "resolved_at": c["resolved_at"] and c["resolved_at"].isoformat()})
     return {**_summary(row), "text": row["body"], "structure": row["structure"], "superseded_by": row["superseded_by"],
@@ -323,6 +340,9 @@ def _detail(conn, caller: Caller, uid: str, row: dict, docs: dict[str, dict]) ->
             "perspectives": [{"id": p["id"], "holder": {"kind": p["holder_kind"], "name": p["holder"]}, "context": p["context"],
                               "text": p["body"], "evidence": _evidence(p, seen), "created_by": p["created_by"]} for p in perspectives],
             "conflicts": out_conflicts,
+            "duplicate_of": original["id"] if original and shown(original["evidence"], set(seen)) else None,  # never a hidden one
+            "duplicates": [{"id": d["id"], "title": d["title"], "owner": d["owner"], "evidence": _evidence(d, seen)}
+                           for d in copies if shown(d["evidence"], set(seen))],
             "versions": [{**_summary(v), "superseded_by": v["superseded_by"]} for v in versions if shown(v["evidence"], set(seen))]}
 
 
@@ -478,10 +498,50 @@ def open_conflict(unit_id: str, body: ConflictIn, caller: Caller = Depends(authe
     return {"id": cid}
 
 
+SUPERSEDE_SQL = """
+UPDATE knowledge_units l SET status = 'superseded', superseded_by = %(winner)s, updated_at = now(),
+       valid_until = least(coalesce(l.valid_until, greatest(coalesce(l.valid_from, current_date - 1), current_date - 1)),
+                           greatest(coalesce(l.valid_from, current_date - 1), current_date - 1))
+WHERE l.id = %(loser)s AND l.status <> ALL('{superseded,retired}')
+  AND l.owner_team = (SELECT id FROM workspaces WHERE slug = %(team)s)
+  AND (SELECT owner_team FROM knowledge_units WHERE id = %(winner)s) = l.owner_team
+RETURNING l.id::text AS id
+"""
+
+
+@router.get("/workspaces/{ws}/conflicts")
+def team_conflicts(ws: str, status: str | None = Query("open", pattern="^(open|resolved)$"), caller: Caller = Depends(authenticate)):
+    """A team's conflicts (F3: what consolidation found, and what people opened), for its curators to resolve: those on
+    its units whose both sides the caller can read, so a conflict never reveals a side they can't."""
+    require_curator(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(TEAM_CONFLICTS_SQL, {"ws": ws, "status": status}).fetchall()
+        ids = sorted({x for r in rows for x in (r["unit_id"], r["other_unit"]) if x})
+        units = {u["id"]: u for u in conn.execute(f"SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team "
+                                                  "WHERE u.id = ANY(%s::uuid[])", (ids,)).fetchall()}
+        views = {r["unit_id"]: conn.execute(PERSPECTIVES_SQL, {"id": r["unit_id"]}).fetchall() for r in rows if r["perspective_id"]}
+        persp = {p["id"]: p for ps in views.values() for p in ps}
+        docs = readable(conn, caller, [d for x in [*units.values(), *persp.values()] for d in x["evidence"]])
+        side = lambda u: u is not None and shown(u["evidence"], set(docs))  # noqa: E731
+        out = []
+        for r in rows:
+            first = units.get(r["unit_id"])
+            other = units.get(r["other_unit"]) if r["other_unit"] else persp.get(r["perspective_id"])
+            if side(first) and side(other):
+                out.append({"id": r["id"], "status": r["status"], "note": r["note"], "opened_by": r["opened_by"],
+                            "created_at": r["created_at"].isoformat(), "unit": {"id": first["id"], "title": first["title"], "owner": first["owner"]},
+                            "other": ({"kind": "unit", "id": other["id"], "title": other["title"], "owner": other["owner"]} if r["other_unit"]
+                                      else {"kind": "perspective", "id": r["perspective_id"], "holder": other["holder"]})})
+        audit(conn, org_id, caller.username, "unit.conflicts", [ws], {"status": status, "shown": len(out)})
+    return {"conflicts": out}
+
+
 @router.post("/units/conflicts/{conflict_id}/resolve")
 def resolve_conflict(conflict_id: str, body: ResolveIn, caller: Caller = Depends(authenticate)):
-    """The first unit's owner team records how a conflict was resolved (which side was kept, and why); nothing is
-    overwritten, and the merging and superseding it may lead to are F3's."""
+    """The first unit's owner team resolves a conflict: which side was kept, and why, recorded. When both sides are its
+    own units, the side not kept is superseded by the one kept, ending the day before (F3); another team's unit is never
+    changed, so across teams the resolution is recorded and both perspectives stay."""
     cid = _unit_id(conflict_id)
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
@@ -501,5 +561,10 @@ def resolve_conflict(conflict_id: str, body: ResolveIn, caller: Caller = Depends
     with scoped(org_id, caller.principals, teams=[row["owner"]]) as conn:
         conn.execute("UPDATE unit_conflicts SET status = 'resolved', kept = %s, resolution = %s, resolved_by = %s, resolved_at = now() "
                      "WHERE id = %s", (body.kept, body.resolution.strip(), caller.username, cid))
-        audit(conn, org_id, caller.username, "unit.resolve", [row["owner"]], {"conflict": cid, "kept": body.kept})
-    return {"id": cid, "status": "resolved", "kept": body.kept}
+        superseded = None
+        if c["other_unit"] and body.kept != "both":
+            winner, loser = (c["unit_id"], c["other_unit"]) if body.kept == "unit" else (c["other_unit"], c["unit_id"])
+            superseded = conn.execute(SUPERSEDE_SQL, {"winner": winner, "loser": loser, "team": row["owner"]}).fetchone()
+            superseded = superseded and superseded["id"]
+        audit(conn, org_id, caller.username, "unit.resolve", [row["owner"]], {"conflict": cid, "kept": body.kept, "superseded": superseded})
+    return {"id": cid, "status": "resolved", "kept": body.kept, "superseded": superseded}

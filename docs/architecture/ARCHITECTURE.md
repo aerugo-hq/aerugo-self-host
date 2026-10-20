@@ -49,8 +49,8 @@ Bottom to top. Built today is marked (built); everything else is to build.
   permissions in OpenFGA (built), credentials in OpenBao or a cloud secret manager (built).
 - **Pipelines** (the worker): indexing (built), extraction of knowledge units (built: a team's own model, opted in,
   proposes them from its pages and tickets, each held to the claim checks; chat waits for capture's opt-in),
-  consolidation (merge, supersede,
-  conflicts), analyzers (code, SQL lineage, usage, jobs), profiles and systems, and the learning loop (feedback, gaps,
+  consolidation (built: copies linked, each keeping its own readers; contradictions sent to owners as conflicts;
+  a resolution supersedes within a team), analyzers (code, SQL lineage, usage, jobs), profiles and systems, and the learning loop (feedback, gaps,
   freshness).
 - **Services:** answers (search and Ask: built), the architect agent and playbooks, incident mode and onboarding
   paths, migrations, the change agent (pull requests), the review queue and gaps (built, to extend).
@@ -157,7 +157,8 @@ after is proven; the Atlas's graph (F10a), where today's lineage now lives, each
 may see its evidence; and the retailer's data estate (F10b), its warehouse moving to a new platform, with the truth
 of every node and edge, so each engineering item after it is measured against what's really there; and knowledge units
 (F1), the store the foundation's pipelines fill, each shown only to someone who can read all of its evidence; and
-extraction (F2), a team's own model proposing units from its pages and tickets, each held to its source. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, consolidation (F3): merging, superseding, and conflicts sent to owners. A connector only adds raw material;
+extraction (F2), a team's own model proposing units from its pages and tickets, each held to its source; and
+consolidation (F3), copies linked and contradictions sent to their owners, never overwritten. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
+but for M10's real-vendor half, set aside; next, answers from units (F4): scope, trust, freshness, procedures as checklists. A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.

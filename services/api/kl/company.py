@@ -188,9 +188,10 @@ class Fact:
     evidence: tuple[str, ...]
     scope: tuple[str, ...] = ()       # the places or roles it applies to; empty: everyone
     valid_until: str = ""             # a superseded fact's last day
-    status: str = "current"           # current | superseded | sensitive
+    status: str = "current"           # current | superseded | sensitive | stale (a page still in use that says what's no longer so)
     contradicted_by: tuple[str, ...] = ()
     supersedes: str = ""              # the fact it replaced, on the same topic (F1 loads both as versions)
+    contradicts: tuple[str, ...] = ()  # a stale fact: the current facts it says otherwise than (F3 must find each)
 
 
 @dataclass(frozen=True)
@@ -519,6 +520,12 @@ Use this for any call about the TrailLite 2 tent recall.
     page("cc-weekly-changes", "CC", "This week's changes: week of 2 March 2026", "2026-03-02", """
 - Returns: from 1 March the window is 45 days, not 60, and store credit without a receipt is up to $50, not $75.
 - Holiday store hours for 2026 are in the handbook.""")
+    # A stale page (F3): the 2025 script, never updated, still saying 60 days; consolidation must find it against the
+    # current policy. A fixed id, so the store pages' count never moves it.
+    page("cc-returns-script-2025", "CC", "Script: returns", "2025-06-02", """
+Owner: Tess Ward, contact center supervisor.
+## Returns
+Customers have 60 days to return an item with a receipt. Offer an exchange before a refund.""", pid=79003)
 
     # Distribution
     page("late-shipments", "DC", "Late inbound vendor shipments", "2025-11-10", """
@@ -768,6 +775,8 @@ def _facts(places: tuple[Place, ...]) -> tuple[Fact, ...]:
              valid_until="2026-02-28", status="superseded"),
         Fact("no-receipt", "policy", "Without a receipt, store credit at the lowest price in 45 days, up to $50; above $50 a store leader approves.",
              ("returns-2026",)),
+        Fact("cc-returns-stale", "policy", "Customers have 60 days to return an item with a receipt.", ("cc-returns-script-2025",),
+             status="stale", contradicted_by=("returns-2026",), contradicts=("returns-window",)),
         Fact("returns-owner", "contact", "Store operations owns the returns policy; its head is Priya Shah (Max Weber left in June 2026).",
              ("returns-2026",)),
         Fact("sick-co", "policy", "Colorado store employees earn 1 hour of sick leave per 30 hours worked, up to 48 hours a year.", ("sick-co",), ("CO",)),
@@ -938,6 +947,7 @@ def problems(world: World) -> list[str]:
     personas = {p.username for p in world.people if p.username}
     out = [f"fact {f.id}: no page {e}" for f in world.facts for e in f.evidence if e not in names]
     out += [f"fact {f.id} supersedes {f.supersedes}, which isn't a fact" for f in world.facts if f.supersedes and f.supersedes not in facts]
+    out += [f"fact {f.id} contradicts {g}, which isn't a fact" for f in world.facts for g in f.contradicts if g not in facts]
     out += [f"a perspective on {fact} names what isn't there" for fact, *_, evidence in PERSPECTIVES
             if fact not in facts or any(e not in names for e in evidence)]
     for q in world.questions:

@@ -1496,7 +1496,65 @@ lint at 0 errors and 43 warnings. No baseline changed: proposals don't reach sea
 (C1, C2, with their channels' opt-in), a document longer than 12,000 characters read past that (sent in parts later,
 if long documents matter), merging proposals across documents and teams (F3), answers from confirmed units (F4),
 staleness when a confirmed unit's document changes (F6), the calibrated claim threshold for proposals (the default's
-used; answers use the calibrated one), and a screen for proposals (D1).
+used; answers use the calibrated one), and a screen for proposals (D1). CI on pull request 66: unit 133 passed; smoke
+174 passed, 17 skipped, 0 failed; the golden set, the scenario, the retailer (every person shown exactly their units and
+proposals), and the Atlas at their baselines; no leak and no regression.
+F3, consolidation (`docs/ENTERPRISE_PLAN.md` section 5; approved 2026-10-19: copies linked rather than combined, strict
+conflict rules, resolution applied within a team, and a stale contact-center page in the retailer's truth). Migration
+0060: `knowledge_units.duplicate_of` (the original a copy repeats, never itself) and `consolidated_at` (when the worker
+last compared it). `kl/consolidation.py`: the worker's pass (`run`, a `units.consolidate` job queued at most once a
+minute while any active unit changed since it was last compared) compares each such unit with every active unit
+sharing at least two content words (`candidates`), by the claim checker's words, never a model. Two units are compared
+only when neither is superseded or retired nor supersedes the other, they apply to the same people (the same places,
+roles, and teams: Colorado's rule is never Oregon's, nor the company-wide one's), at overlapping times (two versions
+are never a conflict), and each has at least four content words (`MIN_WORDS`: a fragment says too little). A
+duplicate: the same team and kind, each stating at least 80% of the other's words, and no disagreement. The copy is
+linked to the original (the higher trust, then the earlier; a copy of a copy to the first), never combined, so each
+keeps its own evidence and so its own readers (invariant 16): a list hides a copy only from someone it also shows the
+original, the original's page lists the copies the caller may read, and a copy's page names its original only when
+it's readable. A conflict: one stating at least 80% of the other's words, and the two disagreeing (`disagreement`):
+each giving a number the other doesn't (45 days against 60), or one negated where the other's closest sentence isn't;
+across teams too, opened as a `unit_conflicts` row by `consolidation`, which F1's rule shows only to someone who reads
+both sides; a pair already in conflict, in any status, isn't opened again. One leaving out a number the other gives is
+no disagreement: H4's one-sided rule is for a claim against its source, not for two peers. `GET
+/v1/workspaces/{ws}/conflicts` (the team's curators; open or resolved): the conflicts on its units whose both sides the
+caller can read, post-checked through the documents list's gates, audited. Resolving a conflict (F1's route, the first
+unit's owner team) now supersedes the side not kept by the side kept when both are that team's own units, ending the
+day before (or at its start, if later); another team's unit is never changed, so across teams the resolution is
+recorded and both stay. Words, not a model: a disagreement in meaning with no number or negation isn't caught; a
+team's model can judge those later, on top. The retailer: a stale page joins the truth, the contact center's 2025
+returns script still saying 60 days (`cc-returns-script-2025`), with its fact (`Fact.contradicts`: the current facts a
+stale one says otherwise than; `problems` checks each is a fact). `consolidation_check` in kl.company_eval, in CI: once
+every unit is compared, consolidation opened exactly the conflicts the truth's stale facts make (the script against
+the current 45-day window), linked none of the truth's facts as copies, and each person sees the conflict exactly when
+they read both sides (fay); F2's check now expects a proposal repeating another readable one to be listed under it.
+Smoke: `consolidation_links_duplicates_and_sends_contradictions_to_owners` (the copy linked to the confirmed original,
+hidden from carol, who reads both, and kept for bob, who reads only the copy; $500 against $50 a conflict, its note
+saying why; versions in time, Colorado against Oregon, and the duplicate pair never a conflict; a cross-team conflict
+hidden from bob and dave, who read one side; the team's open conflicts listed for alice and refused to carol and bob;
+resolving inside Payments supersedes the $50 unit, and across teams leaves Commons' unit as it was). Unit:
+`tests/test_consolidation.py` (11). Red first: with the scope and validity rules dropped, 3 of the 11 failed (versions,
+places, and the retailer's exact conflicts); with the old one-sided rule, the test for a number left out failed; on the
+stack, with the worker built with the scope rule dropped (the source restored and compared, the units' consolidation
+reset as owner), the retailer's check failed with the Colorado and Oregon sick-leave rules opened as a conflict the
+truth doesn't hold; rebuilt correctly and reset, it passed: 1 conflict among the company's units, the truth's 1, none
+involving proposals, no copies, shown to fay alone. Found while building: the first conflict rule, a contradiction in
+either direction by the claim checker, opened three false conflicts between F1's units and F2's proposals on the
+retailer (a shorter proposal leaving out a unit's date counted as a missing number; "For store leaders only" against
+the no-receipt rule counted as a negation); the rule became two-sided and fragments are skipped, with a unit test for
+each. And the check's truth first took any current fact sharing a page with the stale one's contradicting page, which
+named the no-receipt rule and the returns owner too; the truth now says which facts a stale one contradicts. Proof, at
+f722126: `make unit` 144 passed; `make eval-company` (the retailer's check) everyone opening exactly the documents and
+shown exactly the units, proposals, and conflicts the truth says, Recall@10 100%, MRR 0.85 over 49 counted questions,
+no leak, no regression (the stale page moved no question); a fresh stack's loop, cut short by the laptop restarting:
+`make pins` passed, `make smoke` 176 passed, 15 skipped, 1 failed (the new check passed; C1's and M7's jobs check
+failed because its second worker finished the sync before the check could stop it, a race in that check, untouched
+here, to be looked at with the next loop), the golden set, the scenario, and the retailer with no leak and no
+regression; the Atlas, the browser tests, and the lint weren't reached. By decision (2026-10-19), the full fresh-stack
+loop now runs once every two or three items, unit tests and each item's own checks every time. Not built: merging
+copies into one unit (by decision: a merged unit would be readable only by whoever reads all of its evidence), a
+model judging meaning beyond numbers and negations, conflicts between a perspective and other units, telling owners of
+a new conflict (D1's screen, F6's review), and conflicts in MCP.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1504,8 +1562,8 @@ findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, 
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
-F10b (the synthetic enterprise), F1 (knowledge units), and F2 (extraction) are done, recorded above; next, F3
-(consolidation: merging, superseding, contradiction detection, conflicts to owners).
+F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), and F3 (consolidation) are done, recorded
+above; next, F4 (answers from units first: scope, trust, freshness, procedures as checklists, perspectives shown).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

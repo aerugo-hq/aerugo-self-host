@@ -295,7 +295,7 @@ gets browser tests.
 Phase 0 comes first: the platform must be sound before it's widened. Then each item in order, on its own branch.
 
 ### Phase 0: prerequisites
-- [ ] **O0.** From `docs/PRODUCTION_REVIEW.md`: the provider repository on a branch; the permissions audit's P1 to P3;
+- [x] **O0.** From `docs/PRODUCTION_REVIEW.md`: the provider repository on a branch; the permissions audit's P1 to P3;
       H1 and H5 (the pool, timeouts, no calls inside transactions); H2 and H6 (one HTTP helper with retries, and
       incremental syncs); H4 (the claim checker). Proven, and recorded.
 
