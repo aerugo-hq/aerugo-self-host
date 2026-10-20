@@ -1600,7 +1600,7 @@ building: the first matching, by the plain share of the question's words, led wi
 questions (offline, every fact as a unit); weighing words by rarity cut that to 11, of which 4 F8 decides and 4 are
 permission traps the real path filters; a lower threshold (0.4, 0.45) won back two right leads at the cost of three
 wrong ones, so 0.5 stays (precision over completeness). And migration 0061 first lacked `SET search_path`, which every
-migration carries. Proof, at the commit below, against the running stack (by decision the full fresh-stack loop runs
+migration carries. Proof, at e8a0fd9, against the running stack (by decision the full fresh-stack loop runs
 after F8 and F6): `make unit` 153 passed; the new smoke check alone passed; `make eval-company`: everyone opening exactly
 the documents and shown exactly the units the truth says, no leak, no superseded unit, Recall@10 100%, MRR 0.85 over 49
 counted questions, Ask citing a right page for 24 of 24 and leading with a right unit for 12 of the 23 store people's
