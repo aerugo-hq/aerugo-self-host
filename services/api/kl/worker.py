@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, catalogs, config, confluence, consolidation, curator, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
+from . import alerting, catalogs, config, confluence, consolidation, curator, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -709,7 +709,8 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "retention.apply": handle_retention_apply,
             "pipeline.push": handle_pipeline_push, "pipeline.retire": handle_pipeline_retire, "manifest.apply": handle_manifest_apply,
             "import.apply": handle_import_apply, "import.retire": handle_import_retire, "units.extract": handle_units_extract,
-            "units.consolidate": lambda conn, job: consolidation.run(conn)}
+            "units.consolidate": lambda conn, job: consolidation.run(conn),
+            "units.lifecycle": lambda conn, job: lifecycle.run(conn)}
 RETENTION_SQL = ("INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'retention.apply' WHERE NOT EXISTS "
                  "(SELECT 1 FROM jobs WHERE kind = 'retention.apply' AND created_at > now() - interval '1 hour')")
 
@@ -903,6 +904,10 @@ def main() -> None:
                             conn.execute(consolidation.QUEUE_SQL)
                         except Exception as e:  # noqa: BLE001
                             log.warning("consolidation not scheduled: %s", type(e).__name__)
+                        try:  # lifecycle (F6): a pass a minute over the units in use
+                            conn.execute(lifecycle.QUEUE_SQL)
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("lifecycle not scheduled: %s", type(e).__name__)
                         try:  # retention (slice I2): at most one run an hour, as a job like any other
                             conn.execute(RETENTION_SQL)
                         except Exception as e:  # noqa: BLE001

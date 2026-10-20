@@ -95,6 +95,12 @@ def conditions(conn, resync_minutes: float) -> list[dict]:
                  f"Connection {r['name']} hasn't synced in {r['lag'] // 60} minutes, so its changes and permission "
                  "updates aren't arriving.", workspace=r["slug"], connection=r["name"], minutes=r["lag"] // 60)
 
+    for r in conn.execute("SELECT w.slug, count(*)::int AS n FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team "
+                          "WHERE u.status = 'stale' GROUP BY w.slug").fetchall():  # F6: owners told, in the app
+        hold("units_stale", r["slug"], "info",
+             f"{r['n']} of {r['slug']}'s knowledge units are due for review: their review came due or their evidence changed. "
+             "The team's review queue lists them; confirming one restarts its review.", workspace=r["slug"], stale=r["n"])
+
     for r in conn.execute(
             "SELECT subject, sum(n)::int AS n FROM signals WHERE kind = 'budget_exhausted' "
             "AND at > now() - interval '30 minutes' GROUP BY subject").fetchall():

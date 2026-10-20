@@ -252,7 +252,8 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 - [x] **F4.** Answers from units first: scope, trust, freshness; procedures as checklists; contacts resolved; perspectives shown.
       (Contacts' current holders, and scope by role and place, come with F8.)
 - [ ] **F5.** The learning loop: feedback and corrections to owners; gaps from questions; routing to experts; answers kept with consent.
-- [ ] **F6.** Lifecycle: review cadences, staleness, effective dates, retirement; owners told.
+- [x] **F6.** Lifecycle: review cadences, staleness, effective dates, retirement; owners told.
+      (Owners are told in the app: their team's review queue and an info alert; nothing is sent outside it.)
 - [ ] **F7.** Question sets per team, a baseline, CI holding to it.
 - [x] **F8.** Context: the person's team, role, and location from the directory, used by every answer.
       (Decided 2026-10-20: a unit's scope says whom it applies to, not who may ask; another place's version is left out

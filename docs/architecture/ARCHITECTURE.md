@@ -161,7 +161,8 @@ extraction (F2), a team's own model proposing units from its pages and tickets, 
 consolidation (F3), copies linked and contradictions sent to their owners, never overwritten; and answers from units
 (F4), the units that answer a question leading Ask's sources with their steps and other views; and who is asking
 (F8), each answer fitted to the asker's role and place from the directory, contacts resolved to a role's current
-holder. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, lifecycle (F6): review cadences, staleness, owners told. A connector only adds raw material;
+holder; and lifecycle (F6), units going stale when their review comes due or their evidence changes, retired at
+their end date, each change recorded, and their owners told in the app. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
+but for M10's real-vendor half, set aside; next, the fresh-stack loop over F4, F8, and F6, then F5 (the learning loop). A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.
