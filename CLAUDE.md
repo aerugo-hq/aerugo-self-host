@@ -152,6 +152,7 @@ decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 - `make up`: build and start the stack. `make web`: the web app on http://localhost:3000.
 - `make smoke`: the smoke suite; it must pass before a task is done. It expects the plain seed.
 - `make e2e`: the browser tests. `make eval`: the golden set (slice M2); `make eval-mine` grows it from feedback.
+- `make eval-teams`: each team's question set (F7), asked as its people, each team held to its own baseline; `docs/question-sets.md`.
 - `make demo`: load the fictional migration company (`sandbox/scenarios/migration`). `make eval-scenario`: load it and score its questions; it fails only on a permission leak. Run `make reset && make up` before `make smoke` afterwards.
 - `make github-app ORG=<org>`: the dev GitHub App; credentials land in `.secrets/`.
 - `make reset && make up`: re-run init SQL and the realm import after schema or seed changes.

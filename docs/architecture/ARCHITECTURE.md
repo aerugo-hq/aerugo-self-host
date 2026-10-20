@@ -164,7 +164,8 @@ consolidation (F3), copies linked and contradictions sent to their owners, never
 holder; and lifecycle (F6), units going stale when their review comes due or their evidence changes, retired at
 their end date, each change recorded, and their owners told in the app; and the learning loop's first half (F5a),
 what people ask kept for a month, what several of them weren't answered well shown to their teams' curators as gaps,
-never who asked, and corrections sent to a unit's owners. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, question sets per team (F7), then routing to experts and kept answers (F5b). A connector only adds raw material;
+never who asked, and corrections sent to a unit's owners; and question sets per team (F7), each team's questions in its
+onboarding repository, asked as its people, each team held to its own baseline. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
+but for M10's real-vendor half, set aside; next, routing to experts and kept answers (F5b). A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.

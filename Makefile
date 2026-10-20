@@ -115,6 +115,12 @@ enterprise: env
 >docker compose --profile smoke up -d fake-llm
 >docker compose --profile smoke run --rm smoke python -m kl.enterprise_eval --load-only
 
+# Question sets per team (F7, kl.team_evals): each team's questions, asked as its people, each team held to its own
+# baseline. The retailer's live in sandbox/scenarios/retail/teams; a company's in its onboarding repository.
+eval-teams: env
+>docker compose --profile smoke build smoke
+>docker compose --profile smoke run --rm smoke python -m kl.team_evals
+
 atlas-eval: env
 >docker compose --profile smoke build smoke fake-llm
 >docker compose --profile smoke up -d fake-llm
@@ -142,6 +148,8 @@ eval-baseline: env
 >docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.company_eval --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 >docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.enterprise_eval --record > services/api/kl/evals_baseline.tmp
+>mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
+>docker compose --profile smoke run --rm -T $(BASELINE_FILE) smoke python -m kl.team_evals --record > services/api/kl/evals_baseline.tmp
 >mv services/api/kl/evals_baseline.tmp services/api/kl/evals_baseline.json
 
 # The clients (slice A2): the Python and TypeScript clients' own tests, against stand-ins for the API, in pinned images.

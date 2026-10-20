@@ -960,6 +960,28 @@ def _questions() -> tuple[Question, ...]:
 
 
 # ------------------------------------------------------------------ checks the truth holds itself to
+def unit_title(fact_id: str) -> str:
+    """The title a fact's knowledge unit is loaded with (kl.company_eval) and named by in the teams' question sets."""
+    return (fact_id[0].upper() + fact_id[1:]).replace("-", " ")
+
+
+def question_sets(world: World) -> dict[str, dict]:
+    """F7: the truth's questions as each team's question set (the asker's team), in the format a company's teams keep in
+    their onboarding repository (teams/<team>/questions.yaml): who asks, what, the pages a right answer draws on, the
+    units it should lead with, and what that asker must never see. Stores' people also ask through their team's model."""
+    loaded = {d.name for d in world.docs if d.source in LOADED}
+    units = {f.id for f in world.facts if f.status not in ("sensitive", "superseded") and set(f.evidence) <= loaded}
+    sets: dict[str, dict] = {}
+    for q in world.questions:
+        team = world.person(q.asker).team
+        case = {"id": q.id, "asker": q.asker, "question": q.text, "kind": q.kind,
+                "expect": [world.doc(n).key for n in q.expect], "units": [unit_title(f) for f in q.facts if f in units],
+                "forbid": [world.doc(n).key for n in q.forbid], **({"needs": q.needs} if q.needs else {})}
+        sets.setdefault(team, {"version": 1, "team": team, **({"model": f"{team}/smoke-fake"} if team == "stores" else {}),
+                               "cases": []})["cases"].append(case)
+    return dict(sorted(sets.items()))
+
+
 def problems(world: World) -> list[str]:
     """Everything wrong with the company's truth: a question naming a page that isn't there, a right page the asker
     can't read (unless it waits on a slice), a forbidden page they can read, a sensitive page they can't."""

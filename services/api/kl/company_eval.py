@@ -223,7 +223,7 @@ def unit_plan(world: company.World) -> tuple[list[UnitSpec], list[str]]:
 def unit_body(world: company.World, spec: UnitSpec) -> dict:
     places = {p.code for p in world.places}
     where = [s for s in spec.fact.scope if s in places or re.fullmatch(r"[A-Z]{2}", s)]
-    return {"kind": spec.fact.kind, "topic": spec.topic, "title": (spec.fact.id[0].upper() + spec.fact.id[1:]).replace("-", " "),
+    return {"kind": spec.fact.kind, "topic": spec.topic, "title": company.unit_title(spec.fact.id),
             "text": spec.fact.text, "evidence": [{"document": world.doc(e).key} for e in spec.fact.evidence],
             "scope": {"places": where, "roles": [s for s in spec.fact.scope if s not in where]},
             **({"structure": {"role": spec.fact.role}} if spec.fact.role else {}),  # F8: a contact's role, resolved per asker

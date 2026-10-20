@@ -1,0 +1,60 @@
+# The synthetic retailer's contact-center questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: contact-center
+cases:
+- id: returns-50-days
+  asker: fay
+  question: Can a customer return a jacket they bought 50 days ago?
+  kind: policy
+  expect:
+  - confluence-71001
+  units:
+  - Returns window
+  forbid: []
+- id: returns-changes
+  asker: fay
+  question: What changed in the returns policy this year?
+  kind: policy
+  expect:
+  - confluence-71001
+  - confluence-71018
+  units:
+  - Returns window
+  - No receipt
+  forbid: []
+- id: recall-script
+  asker: fay
+  question: What do I tell a customer calling about the TrailLite 2 recall?
+  kind: procedure
+  expect:
+  - confluence-71017
+  units: []
+  forbid: []
+- id: recall-reports
+  asker: fay
+  question: How many customers reported the TrailLite 2 poles cracking?
+  kind: lookup
+  expect:
+  - jira-QUAL-7
+  units:
+  - Recall reports
+  forbid: []
+- id: cc-escalate
+  asker: fay
+  question: When do I escalate a call to a supervisor?
+  kind: procedure
+  expect:
+  - confluence-71016
+  units:
+  - Escalation
+  forbid: []
+- id: cc-injury-return
+  asker: fay
+  question: A caller says a product hurt them. Do I process the return first?
+  kind: two-source
+  expect:
+  - confluence-71016
+  - slack-CRTCC-1775135100.000100
+  units:
+  - Escalation
+  forbid: []

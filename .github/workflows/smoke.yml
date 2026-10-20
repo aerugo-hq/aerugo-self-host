@@ -64,6 +64,9 @@ jobs:
       - name: The synthetic enterprise, F10b (the Atlas holds exactly what its sources reveal; each person sees exactly its truth; no regression)
         run: make atlas-eval
 
+      - name: Question sets per team, F7 (each team's questions asked as its people; no leak; each team at its baseline)
+        run: make eval-teams
+
       - name: Service logs
         if: failure()
         run: docker compose --profile smoke logs --no-color --tail=300

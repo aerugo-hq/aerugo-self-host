@@ -1,0 +1,13 @@
+# The synthetic retailer's edp questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: edp
+cases:
+- id: first-wave
+  asker: nia
+  question: Which tables move to the EDP in the first wave?
+  kind: decision
+  expect:
+  - confluence-79001
+  units:
+  - Migration waves
+  forbid: []

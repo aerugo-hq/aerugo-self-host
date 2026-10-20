@@ -1,0 +1,50 @@
+# The synthetic retailer's ecommerce questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: ecommerce
+cases:
+- id: recall-delisted
+  asker: jon
+  question: Was the TrailLite 2 delisted from the website?
+  kind: lookup
+  expect:
+  - jira-ECOM-210
+  units:
+  - Recall delisted
+  forbid: []
+- id: checkout-runbook
+  asker: jon
+  question: Checkout errors are spiking. What's the runbook?
+  kind: procedure
+  expect:
+  - confluence-71023
+  units:
+  - Checkout runbook
+  forbid: []
+- id: checkout-changed
+  asker: jon
+  question: What changed in checkout recently?
+  kind: two-source
+  expect:
+  - jira-ECOM-260
+  - slack-CRTECOM-1792057200.000100
+  units:
+  - Sdk change
+  forbid: []
+- id: ecom-on-call
+  asker: jon
+  question: Who is on call for e-commerce the week of 12 October?
+  kind: contact
+  expect:
+  - confluence-71024
+  units:
+  - Ecom oncall
+  forbid: []
+- id: flash-sale-lesson
+  asker: jon
+  question: What did we learn from the flash sale checkout outage?
+  kind: lesson
+  expect:
+  - jira-ECOM-233
+  units:
+  - Flash sale lesson
+  forbid: []

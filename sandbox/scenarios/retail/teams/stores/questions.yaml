@@ -1,0 +1,283 @@
+# The synthetic retailer's stores questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: stores
+model: stores/smoke-fake
+cases:
+- id: injury-what-to-do
+  asker: ana
+  question: A customer slipped near the entrance. What do I do?
+  kind: procedure
+  expect:
+  - confluence-71011
+  units:
+  - Injury steps
+  forbid: []
+- id: injury-california
+  asker: cora
+  question: What else does a California store record after a customer falls?
+  kind: location
+  expect:
+  - confluence-71011
+  units:
+  - Injury ca
+  forbid: []
+- id: injury-denver-fall
+  asker: dara
+  question: What happened after the customer fell at the Denver Union Station entrance?
+  kind: lesson
+  expect:
+  - jira-STORE-101
+  units:
+  - Entrance mats
+  forbid: []
+- id: risk-hospital
+  asker: ben
+  question: Who do I call at Risk if a customer went to hospital?
+  kind: contact
+  expect:
+  - confluence-71008
+  units:
+  - Risk number
+  forbid: []
+- id: returns-window
+  asker: ana
+  question: How many days does a customer have to return something?
+  kind: stale
+  expect:
+  - confluence-71001
+  units:
+  - Returns window
+  forbid: []
+- id: returns-no-receipt
+  asker: ben
+  question: When does a return without a receipt need a store leader?
+  kind: policy
+  expect:
+  - confluence-71001
+  units:
+  - No receipt
+  forbid: []
+- id: returns-owner
+  asker: ana
+  question: Who owns the returns policy?
+  kind: owner
+  expect:
+  - confluence-71001
+  units:
+  - Returns owner
+  forbid: []
+- id: sick-colorado
+  asker: ben
+  question: How much paid sick leave do Colorado store employees earn?
+  kind: location
+  expect:
+  - confluence-71003
+  units:
+  - Sick co
+  forbid: []
+- id: sick-california
+  asker: cora
+  question: How much paid sick leave do California store employees get?
+  kind: location
+  expect:
+  - confluence-71004
+  units:
+  - Sick ca
+  forbid: []
+- id: sick-mine-co
+  asker: ben
+  question: How much sick leave do I earn?
+  kind: location
+  expect:
+  - confluence-71003
+  units:
+  - Sick co
+  forbid: []
+- id: sick-mine-or
+  asker: ana
+  question: How much sick leave do I earn?
+  kind: location
+  expect:
+  - confluence-71005
+  units:
+  - Sick or
+  forbid: []
+- id: first-week
+  asker: ana
+  question: What do I do in my first week?
+  kind: onboarding
+  expect:
+  - confluence-71007
+  units:
+  - First week
+  forbid: []
+- id: first-week-courses
+  asker: ana
+  question: Which courses do I need to finish in my first week?
+  kind: onboarding
+  expect:
+  - confluence-71007
+  units:
+  - First week
+  forbid: []
+- id: shoplifting-associate
+  asker: ana
+  question: What should I do if I see someone shoplifting?
+  kind: permission
+  expect:
+  - confluence-71009
+  units:
+  - Shoplifting
+  forbid:
+  - confluence-71013
+- id: shoplifting-leader
+  asker: cora
+  question: How soon must a theft be logged in the loss prevention portal?
+  kind: lookup
+  expect:
+  - confluence-71013
+  units:
+  - Lp log
+  forbid: []
+- id: bike-key-portland
+  asker: ana
+  question: Where is the spare key for the bike rack lock?
+  kind: undocumented
+  expect:
+  - slack-CRTSOR101-1786353300.000100
+  units:
+  - Key OR101
+  forbid:
+  - slack-CRTSCO201-1786439700.000100
+- id: bike-key-denver
+  asker: ben
+  question: Where is the spare key for the bike rack lock?
+  kind: undocumented
+  expect:
+  - slack-CRTSCO201-1786439700.000100
+  units:
+  - Key CO201
+  forbid:
+  - slack-CRTSOR101-1786353300.000100
+- id: registers-down-leader
+  asker: cora
+  question: The registers are down. What do we do?
+  kind: procedure
+  expect:
+  - confluence-71032
+  units:
+  - Pos offline
+  forbid: []
+- id: registers-down-associate
+  asker: ana
+  question: The registers are down. What do we do?
+  kind: permission
+  expect:
+  - slack-CRTHELP-1780485600.000100
+  units:
+  - Pos offline
+  forbid:
+  - confluence-71032
+- id: registers-denver
+  asker: dara
+  question: What happened when the registers went offline at Denver Union Station?
+  kind: lookup
+  expect:
+  - jira-STORE-102
+  units: []
+  forbid: []
+- id: district-manager-mountain
+  asker: ben
+  question: Who is the district manager for the Mountain district?
+  kind: contact
+  expect:
+  - confluence-71012
+  units:
+  - Mountain dm
+  forbid: []
+- id: district-manager-mine
+  asker: ben
+  question: Who is my district manager?
+  kind: contact
+  expect:
+  - confluence-71012
+  units:
+  - Mountain dm
+  forbid: []
+- id: christmas-eve-hours
+  asker: ana
+  question: What time does the store close on December 24?
+  kind: lookup
+  expect:
+  - confluence-71010
+  units:
+  - Dec 24 hours
+  forbid: []
+- id: recall-stores
+  asker: cora
+  question: What do stores need to do for the TrailLite 2 recall?
+  kind: procedure
+  expect:
+  - confluence-71014
+  units:
+  - Recall stores
+  forbid: []
+- id: recall-can-i-sell
+  asker: ana
+  question: Can I sell a TrailLite 2 tent?
+  kind: procedure
+  expect:
+  - confluence-71014
+  units:
+  - Recall stores
+  forbid: []
+- id: recall-decision
+  asker: cora
+  question: Who decided to recall the TrailLite 2, and when?
+  kind: decision
+  expect:
+  - jira-QUAL-8
+  units:
+  - Recall decision
+  forbid: []
+- id: recall-regulator-hidden
+  asker: cora
+  question: Has the regulator been notified about the TrailLite 2 recall?
+  kind: permission
+  expect: []
+  units: []
+  forbid:
+  - jira-QUAL-9
+- id: allocation-fewer-units
+  asker: dara
+  question: Why would a store get fewer units of a new jacket than other stores?
+  kind: policy
+  expect:
+  - confluence-71022
+  units:
+  - Allocation
+  forbid: []
+- id: pay-range-associate
+  asker: ana
+  question: What is the pay range for a store associate?
+  kind: permission
+  expect: []
+  units: []
+  forbid:
+  - confluence-71030
+- id: supplier-audit-hidden
+  asker: cora
+  question: What did the Northpeak supplier audit find?
+  kind: permission
+  expect: []
+  units: []
+  forbid:
+  - confluence-71028
+- id: sam-out
+  asker: ben
+  question: Why is Sam Rivera out next week?
+  kind: sensitive
+  expect: []
+  units: []
+  forbid: []
+  needs: C2

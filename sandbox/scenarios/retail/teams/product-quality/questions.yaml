@@ -1,0 +1,40 @@
+# The synthetic retailer's product-quality questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: product-quality
+cases:
+- id: recall-steps
+  asker: kai
+  question: What is the order of steps in a product recall?
+  kind: procedure
+  expect:
+  - confluence-71027
+  units:
+  - Recall steps
+  forbid: []
+- id: recall-regulator
+  asker: kai
+  question: Has the regulator been notified about the TrailLite 2 recall?
+  kind: lookup
+  expect:
+  - jira-QUAL-9
+  units:
+  - Recall regulator
+  forbid: []
+- id: recall-poles
+  asker: kai
+  question: When do the replacement poles for the TrailLite 2 ship?
+  kind: capture
+  expect:
+  - meeting-recall-standups-2026-05-14
+  units: []
+  forbid: []
+  needs: C3
+- id: recall-lesson
+  asker: kai
+  question: What did we learn from the last recall?
+  kind: lesson
+  expect:
+  - confluence-71027
+  units:
+  - Recall lesson
+  forbid: []

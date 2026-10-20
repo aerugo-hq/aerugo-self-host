@@ -1,0 +1,38 @@
+# The synthetic retailer's merchandising questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: merchandising
+cases:
+- id: sell-through
+  asker: gus
+  question: How is sell-through calculated in the weekly report?
+  kind: definition
+  expect:
+  - confluence-71021
+  units:
+  - Sell through
+  forbid: []
+- id: weeks-of-supply
+  asker: gus
+  question: What is weeks of supply?
+  kind: definition
+  expect:
+  - confluence-71021
+  units:
+  - Weeks of supply
+  forbid: []
+- id: pay-range-planner
+  asker: gus
+  question: What is the pay range for a store associate?
+  kind: permission
+  expect: []
+  units: []
+  forbid:
+  - confluence-71030
+- id: allocation-stale-hidden
+  asker: gus
+  question: Why was the allocation report stale on 22 July?
+  kind: permission
+  expect: []
+  units: []
+  forbid:
+  - jira-DATA-31

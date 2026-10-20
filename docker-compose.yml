@@ -268,6 +268,7 @@ services:
     volumes:
       - ./.secrets:/run/kl-secrets:ro
       - ./sandbox/knowledge:/seed-knowledge:ro   # so smoke can run knowledge CI on the seed bundles
+      - ./sandbox/scenarios/retail/teams:/question-sets:ro   # the retailer's question sets per team (F7)
       - kl-telemetry:/telemetry:ro                # so smoke can check exported telemetry for canaries
     depends_on:
       api:
