@@ -1990,6 +1990,19 @@ the truth says, nothing extracted, Recall@10 99% and MRR 0.72 over 52 counted qu
 for 15 of 26, the truth's 3 stale units and 1 gap; the lint at 0 errors and 43 warnings; the gallery's 3 browser tests
 passed. Not built: live only for other sources, a source's own ranking beyond the order it answers in (an issue search
 comes back in Jira's order), and searching live-only sources in parallel (one after another today).
+**The fresh-stack loop over F11a and F11b, 2026-10-20** (once after the two, at the top of the stack, f11b-live-only,
+with CI's settings): `make pins` passed; `make unit` 203 passed; `make smoke` 184 passed, 15 skipped, 0 failed (both
+storage checks among them; the web servers recreated first, so the optional web checks ran); the golden set hit@1 1.0,
+MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for
+24 of 25, no leak, no regression; `make eval-company` everyone opening exactly what the truth says, no leak, Recall@10
+100%, MRR 0.83 over 52 counted questions, Ask right for 27 of 27, the truth's 3 stale units and 1 gap, no regression
+(one case better, `registers-down-leader` #3 to #2, not recorded); `make atlas-eval` exact, no leak, no regression;
+`make eval-teams` 11 teams, no leak, no regression; the retailer as pointers no leak, Recall@10 99%, MRR 0.84, Ask right
+for 27 of 27, recorded as `company-pointer`; the retailer live only (Slack as pointers) no leak, Recall@10 99%, MRR 0.70,
+Ask right for 25 of 27 (both bike-key questions' store threads, Slack pointers found by meaning, now rank below the live
+Confluence pages the source search brings), recorded as `company-live`; no planted text in the API's, worker's, or MCP
+server's logs; `make e2e` 38 passed; `make test-web` 7 passed; the lint at 0 errors and 43 warnings. Every other set's
+record unchanged.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2000,8 +2013,8 @@ this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fi
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
-answers), with the fresh-stack loop over the three, F11a (pointer mode), and F11b (live only); next, the fresh-stack
-loop over F11a and F11b, then capture (C1 to C5).
+answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
+loop over the two; next, capture (C1 to C5).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
