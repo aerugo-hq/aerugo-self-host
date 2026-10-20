@@ -5031,7 +5031,8 @@ def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search(
 
     def set_sources(listed):
         jira = {"projects": {project: {"name": f"Live {tag}", "company_wide": False, "browsers": [atl[u] for u in listed], "issues": [
-            {"key": f"{project}-1", "summary": f"Live plan {tag}", "description": f"The {word} cutover lasts {mark['jira']} days."}]}}}
+            {"key": f"{project}-1", "summary": f"Live plan {tag}", "description": f"The {word} cutover lasts {mark['jira']} days.",
+             "attachments": [{"id": f"{int(tag, 16)}7", "filename": f"live-plan-{tag}.txt", "text": f"Attached plan {tag}."}]}]}}}
         conf = {"users": {a["accountId"]: {"email": a["emailAddress"], "name": a["displayName"]} for a in atl.values()}, "groups": {},
                 "spaces": {space: {"id": str(int(tag, 16) * 10 + 8), "name": f"Live space {tag}", "users": [atl[u]["accountId"] for u in listed],
                                    "pages": [{"id": page_id, "title": f"Live runbook {tag}", "version": 1,
@@ -5087,6 +5088,9 @@ def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search(
             time.sleep(3)
         docs = held()
         assert set(docs) == set(keys.values()) and all(d["storage"] == "live" and d["chunks"] == 0 for d in docs.values()), docs
+        with psycopg.connect(OWNER_DB) as conn:  # attachments aren't read live, so a live connection leaves them out
+            attached = conn.execute("SELECT count(*) FROM kl.documents WHERE external_key = %s", (f"jira-att-{int(tag, 16)}7",)).fetchone()[0]
+        assert attached == 0, "a live-only connection brought in an attachment it can never read"
         gone = {k: stored_anywhere(m) for k, m in mark.items()} | {"word": stored_anywhere(word)}
         assert not any(gone.values()), f"a live-only item's text is stored: {gone}"
         assert finds("alice") == set(keys.values()), f"the sources' own search didn't find what only their text holds: {finds('alice')}"

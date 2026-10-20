@@ -6,8 +6,9 @@ asker is among them (their own principals and the source accounts linked to them
 doesn't answer, an item it no longer has, or an asker it no longer lists reads as nothing. No transaction is open while
 a source answers (H5), and nothing read is logged or stored."""
 import logging
+from concurrent.futures import ThreadPoolExecutor, wait
 
-from . import confluence, jira, slack
+from . import confluence, jira, slack, source_http
 from .claims import STOP, WORD, words
 from .db import scoped
 
@@ -22,6 +23,16 @@ WHERE c.config->>'storage' = 'live' AND c.kind = ANY(%(kinds)s) AND c.status <> 
 ORDER BY c.id
 """
 MAX_WORDS = 8  # a question's words a source's search is asked for, its rarest-looking (longest) first
+SEARCH_SECONDS = 8.0  # every live-only source in scope is asked at once, and none is waited for longer
+SCOPE = {"jira": "projects", "confluence": "spaces"}  # what a source's search is kept within
+# The containers of each live-only connection where the asker opens at least one document (row-level security decides):
+# a source is searched only there, so an item the asker can't open never takes a result's place outside them.
+VISIBLE_SQL = """
+SELECT DISTINCT d.connection_id, d.container_ref FROM documents d
+JOIN workspace_documents wd ON wd.document_id = d.id
+JOIN workspaces w           ON w.id = wd.workspace_id
+WHERE d.storage = 'live' AND d.connection_id = ANY(%(connections)s) AND w.slug = ANY(%(targets)s)
+"""
 DOCS_SQL = """
 SELECT d.external_key, d.storage, d.container_ref, c.id AS connection_id, c.kind, c.config, c.credential_ref
 FROM documents d JOIN connections c ON c.id = d.connection_id
@@ -71,24 +82,52 @@ def interleave(found: list[list]) -> list:
     return out
 
 
-def search(org_id: str, caller, question: str, targets: list[str]) -> list[tuple]:
-    """F11b's runner: the documents each live-only connection in scope finds through its source's own search, run as the
-    connection's account, best first, as (connection id, key): a key is matched only to that connection's own document,
-    since two sites can hold the same one. Only keys come back, and every one still passes the caller's own gates
-    (row-level security, the post-check, and at answer time the source's own readers); a source that fails gives
-    nothing. Run with no transaction open."""
+def search(org_id: str, caller, question: str, targets: list[str]) -> dict:
+    """F11b's runner: {connection id: keys, best first} that each live-only connection in scope finds through its
+    source's own search, run as the connection's account, within only the projects or spaces where the caller already
+    opens something (a connection where they open nothing isn't asked). Every source is asked at once, each call tried
+    once and briefly (`source_http.answering`), and one that fails or takes longer than SEARCH_SECONDS gives nothing.
+    The keys still pass every gate of the caller's own (`merge` comes after them). Run with no transaction open."""
     asked = search_words(question)
     if not asked:
-        return []
+        return {}
+    seen: dict = {}
     with scoped(org_id, caller.principals) as conn:
         connections = conn.execute(LIVE_SQL, {"kinds": list(SEARCHES), "targets": targets}).fetchall()
-    found = []
-    for c in connections:
+        if connections:
+            for r in conn.execute(VISIBLE_SQL, {"connections": [c["id"] for c in connections], "targets": targets}).fetchall():
+                seen.setdefault(r["connection_id"], []).append(r["container_ref"])
+    wanted = [c for c in connections if c["id"] in seen]
+    if not wanted:
+        return {}
+
+    def ask(c) -> list[str]:
+        with source_http.answering():
+            cfg = {**(c["config"] or {}), SCOPE[c["kind"]]: sorted(seen[c["id"]])}
+            return SEARCHES[c["kind"]](SOURCES[c["kind"]][0](c), cfg, asked)
+
+    pool = ThreadPoolExecutor(max_workers=len(wanted))
+    futures = {c["id"]: pool.submit(ask, c) for c in wanted}
+    done, _ = wait(futures.values(), timeout=SEARCH_SECONDS)
+    pool.shutdown(wait=False, cancel_futures=True)
+    found = {}
+    for cid, future in futures.items():  # in LIVE_SQL's order, so the sources always take turns the same way
+        if future not in done:
+            log.warning("live search of connection %s took longer than %ss", cid, SEARCH_SECONDS)
+            continue
         try:
-            found.append([(c["id"], key) for key in SEARCHES[c["kind"]](SOURCES[c["kind"]][0](c), c["config"] or {}, asked)])
+            found[cid] = future.result()
         except Exception as e:  # noqa: BLE001 - a source that fails finds nothing; only its kind is logged
-            log.warning("live search of connection %s failed (%s)", c["id"], type(e).__name__)
-    return interleave(found)
+            log.warning("live search of connection %s failed (%s)", cid, type(e).__name__)
+    return found
+
+
+def merge(found: dict, rows: list[dict]) -> list[dict]:
+    """The rows the caller may see (SOURCE_SQL's), each source's in its own order and the sources taking turns. Hidden
+    keys are gone before anything is ordered, so an item's place, and its score, depend only on what the caller sees,
+    never on how many items they can't open a source ranked above it (invariant 11)."""
+    by = {(r["connection_id"], r["external_key"]): r for r in rows}
+    return interleave([[by[(cid, key)] for key in keys if (cid, key) in by] for cid, keys in found.items()])
 
 
 def read(org_id: str, caller, keys: list[str]) -> dict[str, Sections | str]:
@@ -104,9 +143,10 @@ def read(org_id: str, caller, keys: list[str]) -> dict[str, Sections | str]:
             continue
         make, fetch = SOURCES[d["kind"]]
         try:
-            if d["connection_id"] not in clients:
-                clients[d["connection_id"]] = make(d)
-            readers, sections = fetch(clients[d["connection_id"]], d["config"] or {}, d)
+            with source_http.answering():  # someone is waiting: one brief try per call, never a throttle's wait
+                if d["connection_id"] not in clients:
+                    clients[d["connection_id"]] = make(d)
+                readers, sections = fetch(clients[d["connection_id"]], d["config"] or {}, d)
         except Exception as e:  # noqa: BLE001 - any failure reads as nothing; only its kind is logged, never what was read
             log.warning("live read of %s failed (%s)", d["external_key"], type(e).__name__)
             out[d["external_key"]] = UNAVAILABLE

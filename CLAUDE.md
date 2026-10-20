@@ -1927,7 +1927,10 @@ truth's 3 stale units and its 1 gap; no planted text in the API's, worker's, or 
 taken after the check (which shows only that nothing was left behind: the check reads every table while the pointers
 exist); the lint at 0 errors and 43 warnings; the gallery's 3 browser tests passed. Not built: Terraform's `storage`
 (the provider's follow-up), pointers for other sources, attachments read live, and reading an answer's pointers at once
-(one after another today, so an Ask with six pointers waits on six sources in turn).
+(one after another today, so an Ask with six pointers waits on six sources in turn). CI on pull request 74: unit 195
+passed; smoke 181 passed, 17 skipped, 0 failed; the golden set, the scenario, the retailer, the Atlas, and the teams at
+their baselines, no leak and no regression; the retailer as pointers no leak, everyone opening exactly what the truth
+says, Recall@10 99%, MRR 0.84 (its baseline recorded in the loop); no planted text in the services' logs.
 F11b, live only (`docs/ENTERPRISE_PLAN.md` F11; approved 2026-10-20 with F11a). A Confluence or Jira connection can be
 `storage` `live`; Slack refuses it, saying why (its search needs a person's token), and so does every other source.
 Migration 0067 lets `documents.storage` be `live`. A live document keeps its key, address, title, version, and readers:
@@ -1959,8 +1962,25 @@ it failed (a chunk each); each restored (`cmp`) and green. Found while building:
 tied with weak meaning matches, which win ties, so alice's Ask left both items out of its six sources (it counts as two
 now); interleaving kept a key two sources returned at the same rank twice (its unit test caught it); the plurals
 `claims.words` trims ("errors" to "error") would have reached a source's search, which stems on its own side; and the
-source search first ran in keyword mode too, where the modes check caught a paraphrase found by one shared word. Proof,
-against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 199 passed; the live-only and
+source search first ran in keyword mode too, where the modes check caught a paraphrase found by one shared word. An
+independent review of the branch found four problems, each fixed: results from the sources were merged before the
+caller's filter, so a visible item's place and score counted the items they can't open that a source ranked above it,
+an exact count of hidden matches for a word of their choosing (invariant 11): now each source's keys stay apart, the
+caller's row-level security filters them (`SOURCE_SQL` returns each row's connection), and only then are they ordered,
+each source's in its order and the sources taking turns (`live.merge`); the source's result cap applied before the
+filter, so hidden matches could push a visible item off (an existence check, and lost recall): a source is now searched
+only within the projects or spaces where the caller already opens something (`VISIBLE_SQL`), a connection where they
+open nothing isn't asked, and each returns up to 50; a slow or throttled source held the request thread through the
+worker's retry waits and spent the account's rate the syncs and the readers refresh need: every call made while someone
+waits (searches and F11a's live reads alike) is now tried once with a 5-second timeout (`source_http.answering`, a
+context variable the helper reads), and the live-only sources are asked at once under one 8-second deadline
+(`SEARCH_SECONDS`), a late one left out; and a live connection still brought in attachments, findable by name and
+never readable: they're left out as a pointer connection's are. Also: focus brings an indexed document only with a
+chunk, as before, and the search's trace records how many sources were asked, never how many hits (some hidden). Red
+first for each: four unit tests (an item's place with hidden keys mixed in, the containers asked, the deadline, one try
+under a throttle) failed with their fixes undone, and the live check failed with attachments let back in (`make unit`
+203 passed after). Proof,
+against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 203 passed; the live-only and
 pointer checks passed, and so did semantic search, MCP search, E1, the reranker, conversations, and the Jira and
 Confluence checks; two failed on the stack's extra content, neither from F11b (Q4's lineage walk had no room left among
 the scenario's twenty curated pages; the modes check's meaning-mode page was crowded out by the scenario's pages and the

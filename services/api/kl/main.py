@@ -149,6 +149,7 @@ JOIN workspace_documents wd ON wd.document_id = d.id
 JOIN workspaces w           ON w.id = wd.workspace_id
 CROSS JOIN (SELECT replace(plainto_tsquery('english', %(q)s)::text, ' & ', ' | ')::tsquery AS query) q
 WHERE d.external_key = ANY(%(keys)s)
+  AND (c.id IS NOT NULL OR d.storage = 'live')
   AND w.slug = ANY(%(targets)s)
 ORDER BY d.id, rank DESC NULLS LAST, c.ordinal
 """
@@ -157,7 +158,7 @@ ORDER BY d.id, rank DESC NULLS LAST, c.ordinal
 SOURCE_SQL = """
 SELECT DISTINCT ON (d.id)
        d.external_key, d.title, d.source_uri, d.source_kind, d.source_version, d.classification, d.tier, d.audience,
-       NULL::text AS heading_path, NULL::text AS snippet, NULL::text AS body
+       NULL::text AS heading_path, NULL::text AS snippet, NULL::text AS body, d.connection_id
 FROM documents d
 JOIN workspace_documents wd ON wd.document_id = d.id
 JOIN workspaces w           ON w.id = wd.workspace_id
@@ -407,8 +408,8 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
         telemetry.set_attributes(s, models=len(vectors))
     with telemetry.span("retrieve.source") as s:  # F11b: live-only sources' own searches, also before any transaction;
         # smart mode only, since a source's search matches any of the words, looser than keyword mode's all of them
-        sourced = live.search(org_id, caller, q, targets) if mode == "smart" and not focus else []
-        telemetry.set_attributes(s, rows=len(sourced))
+        sourced = live.search(org_id, caller, q, targets) if mode == "smart" and not focus else {}
+        telemetry.set_attributes(s, sources=len(sourced))  # never how many it found: some may be hidden from the caller
     member_of = memberships(caller)
     returned, dropped = [], []
 
@@ -433,10 +434,9 @@ def _retrieve(org_id: str, caller: Caller, q: str, targets: list[str], limit: in
             aliased = sorted(conn.execute(ALIAS_SQL, {"q": " or ".join(f'"{n}"' for n in names), "targets": targets}).fetchall(),
                              key=lambda r: r["rank"], reverse=True) if names else []
             telemetry.set_attributes(s, names=len(names), rows=len(aliased))
-        order = {k: n for n, (_, k) in reversed(list(enumerate(sourced)))}  # a key's best rank, should two sites hold it
-        found = sorted(conn.execute(SOURCE_SQL, {"connections": [c for c, _ in sourced], "keys": [k for _, k in sourced],
-                                                 "targets": targets}).fetchall(),
-                       key=lambda r: order[r["external_key"]]) if sourced else []
+        pairs = [(cid, key) for cid, keys in sourced.items() for key in keys]
+        found = live.merge(sourced, conn.execute(SOURCE_SQL, {  # filtered by the caller's own readers first, then ordered
+            "connections": [cid for cid, _ in pairs], "keys": [key for _, key in pairs], "targets": targets}).fetchall()) if pairs else []
         weights = {"title": TITLE_WEIGHT, "alias": ALIAS_WEIGHT, "source": SOURCE_WEIGHT}
         # Curated knowledge wins a near tie with the evidence, never when the evidence clearly matches better.
         candidates = prefer_curated(fuse([("lexical", lexical), ("vector", vector), ("title", titled), ("alias", aliased),

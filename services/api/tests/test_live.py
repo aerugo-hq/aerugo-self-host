@@ -234,21 +234,70 @@ def test_search_words_are_the_questions_longest_content_words_and_sources_take_t
     assert live.interleave([]) == []
 
 
-def test_a_live_search_that_fails_finds_nothing_and_the_others_still_answer(monkeypatch, caplog):
-    connections = [{"id": "c-jira", "kind": "jira", "config": {}, "credential_ref": "r"},
+def live_search_stage(monkeypatch, searches, visible):
+    """live.search over two live connections, with the containers the caller opens something in."""
+    connections = [{"id": "c-jira", "kind": "jira", "config": {"projects": ["STORE", "HR"]}, "credential_ref": "r"},
                    {"id": "c-conf", "kind": "confluence", "config": {}, "credential_ref": "r"}]
 
     @contextmanager
     def scoped(org, principals):
-        yield type("Conn", (), {"execute": lambda self, sql, params=None: type("R", (), {"fetchall": lambda self: connections})()})()
-
-    def broken(client, cfg, words):
-        raise RuntimeError("the secret marker text")
+        rows = lambda sql: connections if "FROM connections" in sql else [
+            {"connection_id": cid, "container_ref": ref} for cid, refs in visible.items() for ref in refs]
+        yield type("Conn", (), {"execute": lambda self, sql, params=None: type("R", (), {"fetchall": lambda self: rows(sql)})()})()
     monkeypatch.setattr(live, "scoped", scoped)
     monkeypatch.setattr(live, "SOURCES", {"jira": (lambda c: object(), None), "confluence": (lambda c: object(), None)})
-    monkeypatch.setattr(live, "SEARCHES", {"jira": broken, "confluence": lambda client, cfg, words: ["confluence-1", "confluence-2"]})
-    caller = type("Caller", (), {"principals": ["user:ben"]})()
+    monkeypatch.setattr(live, "SEARCHES", searches)
+    return type("Caller", (), {"principals": ["user:ben"]})()
+
+
+def test_a_live_search_that_fails_finds_nothing_and_the_others_still_answer(monkeypatch, caplog):
+    def broken(client, cfg, words):
+        raise RuntimeError("the secret marker text")
+    caller = live_search_stage(monkeypatch, {"jira": broken, "confluence": lambda client, cfg, words: ["confluence-1", "confluence-2"]},
+                               {"c-jira": ["STORE"], "c-conf": ["STORES"]})
     with caplog.at_level(logging.WARNING):
-        assert live.search("org", caller, "returns window", ["stores"]) == [("c-conf", "confluence-1"), ("c-conf", "confluence-2")]
+        assert live.search("org", caller, "returns window", ["stores"]) == {"c-conf": ["confluence-1", "confluence-2"]}
     assert "RuntimeError" in caplog.text and "marker" not in caplog.text
-    assert live.search("org", caller, "the a an", ["stores"]) == []  # no content words: no source is asked
+    assert live.search("org", caller, "the a an", ["stores"]) == {}  # no content words: no source is asked
+
+
+def test_a_source_is_searched_only_where_the_caller_opens_something(monkeypatch):
+    asked = {}
+    record = lambda kind: lambda client, cfg, words: asked.setdefault(kind, cfg) and []
+    caller = live_search_stage(monkeypatch, {"jira": record("jira"), "confluence": record("confluence")}, {"c-jira": ["STORE"]})
+    assert live.search("org", caller, "till drawer", ["stores"]) == {"c-jira": []}
+    assert asked == {"jira": {"projects": ["STORE"]}}  # never HR, which the connection reads and the caller opens nothing in
+
+
+def test_a_slow_source_is_left_out_at_the_deadline(monkeypatch):
+    import time
+    def slow(client, cfg, words):
+        time.sleep(1.5)
+        return ["jira-STORE-1"]
+    caller = live_search_stage(monkeypatch, {"jira": slow, "confluence": lambda client, cfg, words: ["confluence-1"]},
+                               {"c-jira": ["STORE"], "c-conf": ["STORES"]})
+    monkeypatch.setattr(live, "SEARCH_SECONDS", 0.3)
+    started = time.monotonic()
+    assert live.search("org", caller, "till drawer", ["stores"]) == {"c-conf": ["confluence-1"]}
+    assert time.monotonic() - started < 1.0  # the search answered without waiting for it
+
+
+def test_an_items_place_never_counts_what_the_caller_cant_open():
+    row = lambda cid, key: {"connection_id": cid, "external_key": key}
+    visible = [row("c-jira", "jira-A-9"), row("c-conf", "confluence-1"), row("c-conf", "confluence-2")]
+    plain = live.merge({"c-jira": ["jira-A-9"], "c-conf": ["confluence-1", "confluence-2"]}, visible)
+    hidden = live.merge({"c-jira": ["jira-H-1", "jira-H-2", "jira-H-3", "jira-A-9"], "c-conf": ["confluence-1", "confluence-2"]}, visible)
+    assert plain == hidden == [visible[0], visible[1], visible[2]]  # three hidden issues ranked first move nothing
+
+
+def test_someone_waiting_never_waits_out_a_throttle(monkeypatch):
+    from kl import source_http
+    calls = []
+    monkeypatch.setattr(source_http.httpx, "request", lambda method, url, **kw: calls.append(kw.get("timeout")) or source_http.httpx.Response(429))
+    monkeypatch.setattr(source_http, "wait", lambda r, attempt: 0.0)
+    with source_http.answering():
+        assert source_http.get("https://acme.atlassian.net/x", timeout=30).status_code == 429
+    assert calls == [source_http.ANSWER_TIMEOUT]  # one try, and briefly
+    calls.clear()
+    source_http.get("https://acme.atlassian.net/x", timeout=30)  # a sync still waits a throttle out
+    assert len(calls) == source_http.RETRIES + 1 and calls[0] == 30

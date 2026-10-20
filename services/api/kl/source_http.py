@@ -10,10 +10,12 @@ the queue. Calls keep their own timeouts and follow no redirects, as before.
 A connection's calls are already one at a time: its jobs never overlap (the scheduler skips a connection with one
 pending, and a lease keeps one running), and each job calls its source in turn. ponytail: a per-connection
 semaphore here once a sync fetches in parallel."""
+import contextvars
 import logging
 import random
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
@@ -26,6 +28,19 @@ RETRIES = 5
 MAX_BACKOFF = 30.0  # seconds, for a source that doesn't say how long
 MAX_WAIT = 60.0     # the longest a source may ask a call to wait
 THROTTLED = (429, 503)
+ANSWER_TIMEOUT = 5.0  # seconds: a call made while someone waits for an answer (F11's live reads and searches)
+_answering = contextvars.ContextVar("kl_source_http_answering", default=False)
+
+
+@contextmanager
+def answering():
+    """Calls made while a person waits (F11): one try each, at most ANSWER_TIMEOUT seconds, never a throttle's wait, so a
+    slow or throttled source reads as nothing for that answer and the syncs keep the account's rate for themselves."""
+    token = _answering.set(True)
+    try:
+        yield
+    finally:
+        _answering.reset(token)
 
 
 def wait(r: httpx.Response, attempt: int) -> float | None:
@@ -47,6 +62,10 @@ def wait(r: httpx.Response, attempt: int) -> float | None:
 def send(method: str, url: str, *, throttled: Callable[[httpx.Response], bool] | None = None, **kwargs) -> httpx.Response:
     """One call to a source (httpx.request's arguments), tried again while it's throttled. Returns the last answer,
     for the caller to judge as before."""
+    if _answering.get():
+        timeout = kwargs.get("timeout")
+        kwargs["timeout"] = min(float(timeout), ANSWER_TIMEOUT) if isinstance(timeout, (int, float)) else ANSWER_TIMEOUT
+        return httpx.request(method, url, **kwargs)
     attempt = 0
     while True:
         r = httpx.request(method, url, **kwargs)

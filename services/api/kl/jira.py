@@ -172,7 +172,7 @@ class JiraClient:
             raise ValueError("unexpected issue key")
         return self._get(f"issue/{key}", fields=FIELDS)
 
-    def search_text(self, words: list[str], projects: list[str] | None, limit: int = 20) -> list[str]:
+    def search_text(self, words: list[str], projects: list[str] | None, limit: int = 50) -> list[str]:
         """The issues Jira's own search finds for any of these words, in its order (F11b's runner). Words are letters and
         digits alone and projects are keys, so nothing a person typed is ever JQL."""
         if not words or not all(WORD.fullmatch(w) for w in words) or not all(PROJECT.fullmatch(p) for p in projects or []):
@@ -264,7 +264,7 @@ def sync_project(conn, connection: dict, client: JiraClient, project: str, since
     cfg = connection["config"] or {}
     seen: dict[str, dict] = {}  # the accounts Jira named, as it reports them
     everyone_else = project_readers(client, cfg, project, seen)
-    pointer = storage_of(connection) == "pointer"  # F11a: attachments aren't read live, so a pointer connection leaves them out
+    pointer = storage_of(connection) != "index"  # F11: attachments aren't read live, so pointer and live connections leave them out
     items = []
     for issue in client.issues(project, since=since):
         acl = readers_of(client.browsers(issue=issue["key"]), seen) if restricted(issue) else everyone_else

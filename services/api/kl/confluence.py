@@ -313,7 +313,7 @@ class ConfluenceClient:
                 raise
         return {**self._get(f"api/v2/blogposts/{content_id}", **{"body-format": "storage"}), "_kind": "blogposts"}
 
-    def search_text(self, words: list[str], spaces: list[str] | None, limit: int = 20) -> list[str]:
+    def search_text(self, words: list[str], spaces: list[str] | None, limit: int = 50) -> list[str]:
         """The pages and posts Confluence's own search finds for any of these words, in its order (F11b's runner). Words
         are letters and digits alone and spaces their keys, quoted, so nothing a person typed is ever CQL."""
         if not words or not all(WORD.fullmatch(w) for w in words) or not all(SPACE_KEY.fullmatch(k) for k in spaces or []):
@@ -608,7 +608,7 @@ def sync_space(conn, connection: dict, client: ConfluenceClient, key: str, since
     except ValueError:
         then = None
     then = then - timedelta(minutes=OVERLAP_MINUTES) if then is not None and then.tzinfo is not None else None
-    items = items_for_space(client, connection["config"] or {}, key, seen, then, pointer=storage_of(connection) == "pointer")
+    items = items_for_space(client, connection["config"] or {}, key, seen, then, pointer=storage_of(connection) != "index")
     missing = [a for a, v in seen.items() if not v.get("email")]
     if missing:
         try:

@@ -28,12 +28,16 @@ read live is logged.
 ## How a live-only source is searched
 
 Aerugo keeps no text and no embeddings for a live-only connection, so a search (in smart mode) asks the source: Jira's search (JQL) or
-Confluence's (CQL), for the question's longest content words, within the connection's projects or spaces, as the
-connection's account. Only letters and digits ever reach the query, so nothing a person types becomes JQL or CQL. The
-account usually sees more than the person asking, so only the items' keys are used: each must be a document the person
-may open (Aerugo's own readers, then the authorization check), and an answer then reads it live as a pointer, checking
-the source's readers again. Nothing the source found that the person can't open is shown or counted. Slack can't be
-live only: its search reads as a person, never as a bot, so a Slack connection keeps pointers instead.
+Confluence's (CQL), for the question's longest content words, within only the projects or spaces where the person
+already opens something, as the connection's account. Only letters and digits ever reach the query, so nothing a
+person types becomes JQL or CQL. The account usually sees more than the person asking, so only the items' keys are
+used: each must be a document the person may open (Aerugo's own readers, then the authorization check) before anything
+is ordered, so nothing the source found that the person can't open is shown, counted, or moves what they can see; an
+answer then reads each live as a pointer, checking the source's readers again. Within those projects and spaces, an
+item the person can't open (under a security level or a page restriction) can still take one of the source's 50 result
+places. Every live-only source is asked at once and given a few seconds; a slow or throttled one is left out of that
+search. Slack can't be live only: its search reads as a person, never as a bot, so a Slack connection keeps pointers
+instead.
 
 ## Choosing it
 
@@ -47,7 +51,8 @@ live only: its search reads as a person, never as a bot, so a Slack connection k
 ## Trade-offs
 
 - Answers are slower and depend on the source being up: each pointer is a few calls to its source when it's used, and
-  each search asks every live-only source in scope.
+  each search asks every live-only source in scope. While someone waits, each call is tried once and briefly, never
+  waiting out a throttle, so a busy source drops out of that answer and the syncs keep the account's rate.
 - Search is weaker: with pointers, a question has to match an item's title or meaning, not a word buried in its text;
   live only depends on the source's own search.
 - Embeddings still reveal what a text is about. With pointers they're kept under the same readers as the item, and
