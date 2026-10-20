@@ -1609,6 +1609,59 @@ from the 2026 policy page she can't read), no regression. Not run: the full smok
 the Atlas, the browser tests, and the lint (CI's run on the pull request, and the loop after F6). The baseline isn't
 recorded again until the loop. Not built: contacts' current holders and scope by role and place (F8), units in search
 results and the change feed, rendering in the web app (D1), and a model judging which unit answers beyond its words.
+CI on pull request 68, at 3b91f0c: unit 153 passed; smoke 176 passed, 17 skipped, 0 failed; the golden set, the scenario
+(Recall@10 94%, MRR 0.81), the retailer (Recall@10 100%, MRR 0.85, leading with a right unit for 12 of 23, as locally),
+and the Atlas at their baselines; no leak and no regression.
+F8, who is asking (`docs/ENTERPRISE_PLAN.md` sections 4 and 5, principles 5 and 6; approved 2026-10-19 with F4 and F6).
+Migration 0062: a directory listing also holds each person's title, department, office, city, state, country, and
+manager's email (`directory_people`; 0037's row-level security). The directories read them as each names them
+(`directory.about`, short text, a manager only by a valid email): Okta's profile (title, department, city, state,
+country; it has no office or manager's email by default), Google's primary organization, first location, work address,
+and manager relation, and Entra's profile fields with the manager expanded (`$expand=manager`). `kl/context.py`: the
+asker's teams, and from their own listing (their identity provider's verified email, an active listing in a directory
+that isn't paused) their roles (title, department), places (office, city, state, country), and manager; none of these
+for a service account, or for someone the directory doesn't list (unknown is open, never a guess). Every answer uses
+it: Ask tells the model "Asked by: <role> at <place>." (only that, never an email; to a model the team chose, under the
+egress rules), and F4's scope matches a unit's roles (a role names a title or its head before a comma: "District
+manager" names "District manager, Mountain") and places to the asker's. Decided while building: a unit's scope says
+whom it applies to, not who may ask, so a unit for another role or place still answers someone asking about it (Ivy, a
+people partner, asking a store associate's pay range lost it when such units were dropped), its scope stated, and is
+left out only when the asker's own version answers at least as well (a Colorado associate asking about their sick leave
+gets Colorado's rule, never Oregon's); ranking now takes the closer match first and then the closer scope, so a
+question that names another place gets that place's rule first. Contacts: a contact unit names a role, and its current
+holder for this asker (`context.holder`, `holder_in`) is found up their manager chain (at most six, a loop or a break
+stops it), else as the one person still at the company with that title in the unit's places (or the asker's); two such
+people, or none, is no holder; never the asker; shown by name and title only, in the source ("Its current holder for
+the person asking: ...") and the citation's `unit.holder`; a unit's words now include what its structure names (a
+contact's role, a term, its steps). `/v1/whoami` shows a person their own context (`context`), and only theirs. The
+retailer: its fake Entra gives each person their store or office by code, their state, and their manager
+(`company.manager_of`: an associate to their store's manager, a store manager to the district's, a district manager to
+the head of store operations, anyone else to their team's lead); contact facts carry their role (`Fact.role`: the
+Mountain district's manager, now scoped to Colorado and Utah, and Risk on-call), loaded as the unit's structure; its
+three questions that waited on F8 now count (ben's and ana's sick leave, ben's district manager). Its Ask check now
+also holds each cited contact to the truth's holder (`expected_holder`, the same rule from the truth's people). Smoke:
+`answers_fit_who_is_asking` (a fake Okta lists alice, bob, and a leaver with bob's title; whoami shows alice her own
+context, bob his, carol none; alice's answer about refund caps has Colorado's rule and not Oregon's, and the model is
+told "Asked by: Payments lead, Payments at Denver, CO." and never her email; carol, unlisted, gets both rules and no such
+line; the refunds desk's contact resolves to bob, never the leaver). Unit: `tests/test_context.py` (7: role matching,
+the asked-by line, holders up the chain and by place, never two or the asker, loops, a listing's fields, the retailer's
+managers); `tests/test_unit_answers.py` now ranks the retailer for each asker's own place and title (the first unit
+right for 26 questions, F8's two now among them) and gains a test for another place's rule. Red first: with the
+context switched off in Ask, the smoke check failed (alice got Oregon's rule too); with the leaver filter removed from
+holders, two people held the title, so no holder (failing closed); each restored (`cmp`) and green. Found while
+building: the smoke check first expected exactly one unit for the refund question and got the Colorado-scoped contact
+unit too (it states "refunds" and the tag), which was right; the check now asserts what matters. And this long-lived
+stack kept the retailer's two contact units from before they had a role and scope (the loader matches by title and
+doesn't rewrite), so ben's question first led with the injury procedure; recreated, it leads with the Mountain unit. A
+fresh stack (CI) loads them right. Proof, at 2969ec5, against the running stack: `make unit` 161 passed; the new smoke
+check alone, the three directory checks (Okta, Google, Entra), and F4's check passed; `make eval-company`: everyone
+opening exactly what the truth says, no leak, no superseded unit, Recall@10 100%, MRR 0.83 over 52 counted questions
+(the three new ones found at #1 to #3), Ask citing a right page for 27 of 27, leading with a right unit for 15 of 26
+(ben's and ana's sick leave and ben's district manager among them), every cited contact resolved as the truth says (Dara
+Singh for ben), no regression. Not run: the full smoke suite and the other sets (CI, and the loop after F6). Not built:
+on-call rotations (an on-call source, O25), Okta managers (no standard email field), matching a person's places beyond
+equal codes and names (a store's city to its state, for one), scope in search results, and the people's own context
+editable in the app.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1617,8 +1670,8 @@ M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
-units first) are done, recorded above; next, F8 (who is asking: role and location from the directory, contacts'
-current holders), then F6 (lifecycle).
+units first), and F8 (who is asking) are done, recorded above; next, F6 (lifecycle: review cadences, staleness,
+owners told), then the fresh-stack loop over F4, F8, and F6.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

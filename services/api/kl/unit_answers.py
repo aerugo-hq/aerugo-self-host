@@ -14,8 +14,8 @@ the more trusted, then the one in force most recently. Scope is the asker's cont
 their role and place from the directory. A unit's scope says whom it applies to, not who may ask, so a unit for
 another role or place still answers (a people partner asking a store associate's pay range), its scope stated, unless
 the asker's own version answers at least as well: then the other is dropped (a Colorado associate asking about their
-sick leave gets Colorado's rule, never Oregon's). One the directory doesn't say is open. A contact names a role; its current holder for this asker
-is read from the directory (F8).
+sick leave gets Colorado's rule, never Oregon's). One the directory doesn't say is open. A contact names a role; its
+current holder for this asker is read from the directory (F8).
 
 A unit becomes a source as its text, its structure (a procedure's numbered steps, each with its role and condition; a
 contact's role and how to reach it), its scope, and the perspectives on it the asker reads (another team's view, said
