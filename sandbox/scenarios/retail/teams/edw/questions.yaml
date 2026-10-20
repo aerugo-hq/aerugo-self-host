@@ -1,0 +1,13 @@
+# The synthetic retailer's edw questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: edw
+cases:
+- id: inv-daily-late
+  asker: otto
+  question: What do I do when INV_DAILY is late?
+  kind: procedure
+  expect:
+  - confluence-79002
+  units:
+  - Inv daily late
+  forbid: []

@@ -1,0 +1,32 @@
+# The synthetic retailer's distribution questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: distribution
+cases:
+- id: late-shipment
+  asker: eli
+  question: A vendor shipment is two days late. What's the procedure?
+  kind: procedure
+  expect:
+  - confluence-71019
+  units:
+  - Late shipment
+  forbid: []
+- id: northpeak-last-time
+  asker: eli
+  question: What happened last time a Northpeak shipment was late?
+  kind: lesson
+  expect:
+  - jira-DC-55
+  - slack-CRTDCOPS-1758096600.000100
+  units:
+  - Northpeak lesson
+  forbid: []
+- id: forklift-dock-2
+  asker: eli
+  question: Which forklift do I use at dock 2 this week?
+  kind: capture
+  expect:
+  - teams-reno-dc-handover-2026-10-13
+  units: []
+  forbid: []
+  needs: C1

@@ -152,6 +152,7 @@ decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 - `make up`: build and start the stack. `make web`: the web app on http://localhost:3000.
 - `make smoke`: the smoke suite; it must pass before a task is done. It expects the plain seed.
 - `make e2e`: the browser tests. `make eval`: the golden set (slice M2); `make eval-mine` grows it from feedback.
+- `make eval-teams`: each team's question set (F7), asked as its people, each team held to its own baseline; `docs/question-sets.md`.
 - `make demo`: load the fictional migration company (`sandbox/scenarios/migration`). `make eval-scenario`: load it and score its questions; it fails only on a permission leak. Run `make reset && make up` before `make smoke` afterwards.
 - `make github-app ORG=<org>`: the dev GitHub App; credentials land in `.secrets/`.
 - `make reset && make up`: re-run init SQL and the realm import after schema or seed changes.
@@ -1772,6 +1773,37 @@ kept?", 3 askers), no regression. Two Ask checks failed on this long-lived stack
 (they expect the plain seed, and passed in the loop); the full suite is CI's and the loop's. Not built: routing a gap's
 question to an expert and keeping their answer (F5b), a gaps screen (D1), grouping by meaning (embeddings) beyond
 stemmed words, the asker's own history of questions, and votes moving a unit's confidence.
+F7, question sets per team (`docs/ENTERPRISE_PLAN.md` sections 4 and 10, principle 8; approved 2026-10-20 with F5a and
+F5b). A team keeps its questions in the company's onboarding repository beside its `team.yaml` and `sources.yaml`
+(`teams/<team>/questions.yaml`, owned through CODEOWNERS; `docs/question-sets.md`): its slug, optionally the model its
+people ask through, and its cases (who asks, a test account; the question; its kind; the pages a right answer draws on;
+the units it should lead with, by title; what that asker must never see; a slice it waits on). `kl/team_evals.py`:
+each file is checked before anything runs (`checked`: the version, slugs, ids once per team, a username, a question's
+length, only known keys, lists of names; one file per team, in its own folder), since people edit them; `make
+eval-teams` asks every question as its asker through search and, when the team names a model, Ask (`score`), and scores
+each team on its own (found in the top ten, the first right page, Ask citing a right page, leading with a right unit);
+a forbidden page in results or citations is a leak and fails the run; each team's scorecard is held to its own baseline
+(`teams` in evals_baseline.json, `gate`, by `evals.compare`), so a regression fails naming the team and the case; `make
+eval-baseline` records them fifth, and CI runs `make eval-teams` after the Atlas. `--mine <team>` prints candidate cases
+from what the team's people asked (F5a's questions): only wordings at least three different people used and were
+answered well, the asker left as `TODO-test-account` and the pages empty for a person to fill, never a real person's
+name; what they weren't answered well is listed as a gap. The retailer's 61 questions are generated into one file per
+team (`company.question_sets`, by the asker's team; `company.unit_title`, shared with the unit loader; `--write-retail`)
+under `sandbox/scenarios/retail/teams`, mounted into smoke's container at `/question-sets`, and a unit test holds the
+committed files to the truth. In the evaluation environment, askers sign in as the dev stack's test accounts do. Unit:
+`tests/test_team_evals.py` (13: nine malformed files refused, one file per team, the committed files the truth's,
+leaks in results and citations, answers and units scored, a team with no model searched only, a worse team failing by
+name). Red first: a baseline recorded from a green run on the stack, then units switched off in the API: Stores failed
+by name (its right unit first 0 of 26, each case named "Ask no longer leads with a right knowledge unit"); restored
+(`cmp`), green against that baseline. Proof, against the running stack: `make unit` 183 passed; `make eval-teams` 11
+teams, 61 questions, no leak (Stores Recall@10 100%, MRR 0.83, Ask right 27 of 27, the right unit first 15 of 26, as the
+retailer's own check; edp's one question at MRR 0.25, its migration page at #4 behind the scenario's own pages, as F10b
+found); `--mine stores` gave one candidate (December 24's hours, which three people asked and were helped with) and two
+gaps, one of them coarse ("How much sick leave do I earn?" grouped with California's, by shared words: grouping by
+meaning would part them). The teams' baselines are recorded at the loop after F5b, on a fresh stack in CI's order. Not
+built: an example `questions.yaml` in the provider repository's onboarding example (a small pull request there), graded
+answers per team (a judge model, as `make eval` has), askers who sign in to a real company's identity provider (the
+evaluation environment's test accounts only), and a screen for the scorecards (P9).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1781,8 +1813,8 @@ but for M10's real-vendor half (set aside), and its final report is above. Next,
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
-three, and F5a (questions, gaps, and corrections); next, F7 (question sets per team), then F5b (routing to experts
-and kept answers).
+three, F5a (questions, gaps, and corrections), and F7 (question sets per team); next, F5b (routing to experts and
+kept answers), then the fresh-stack loop over the three.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

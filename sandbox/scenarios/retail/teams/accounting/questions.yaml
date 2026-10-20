@@ -1,0 +1,22 @@
+# The synthetic retailer's accounting questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: accounting
+cases:
+- id: close-checklist
+  asker: hana
+  question: What's on the month-end close checklist?
+  kind: procedure
+  expect:
+  - confluence-71029
+  units:
+  - Close steps
+  forbid: []
+- id: close-september
+  asker: hana
+  question: What went wrong in the September close?
+  kind: lesson
+  expect:
+  - slack-CRTACCT-1791307200.000100
+  units:
+  - Close lesson
+  forbid: []

@@ -1,0 +1,22 @@
+# The synthetic retailer's marketing questions, generated from kl/company.py (python -m kl.team_evals --write-retail): don't edit by hand.
+version: 1
+team: marketing
+cases:
+- id: copy-approval
+  asker: lea
+  question: Who approves copy for the holiday campaign?
+  kind: contact
+  expect:
+  - confluence-71025
+  units:
+  - Copy approval
+  forbid: []
+- id: holiday-results
+  asker: lea
+  question: How did last year's holiday campaign do?
+  kind: lookup
+  expect:
+  - confluence-71026
+  units:
+  - Holiday results
+  forbid: []
