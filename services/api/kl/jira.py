@@ -19,7 +19,7 @@ from .connectors import Container, Health
 from .principals import is_valid
 from .attachments import MAX_BYTES as MAX_ATTACHMENT, MAX_PER_PAGE, attachment_item
 from .decisions import heading as decision_heading, is_decision
-from .sync_items import Item, record_identities, sync_container
+from .sync_items import Item, record_identities, storage_of, sync_container
 from .vault import vault
 from . import source_http
 
@@ -165,6 +165,12 @@ class JiraClient:
                 return out
         return out
 
+    def issue(self, key: str) -> dict:
+        """One issue, with the fields a sync reads: a pointer's text, read again live (F11a)."""
+        if not ISSUE.fullmatch(key):
+            raise ValueError("unexpected issue key")
+        return self._get(f"issue/{key}", fields=FIELDS)
+
     def open_to_everyone(self, project: str) -> bool:
         """Whether anyone with Jira access may browse the project."""
         scheme = self._get(f"project/{project}/permissionscheme", expand="permissions")
@@ -200,6 +206,30 @@ def readers_of(users: list[dict], seen: dict) -> list[str]:
     return sorted(out)
 
 
+def project_readers(client: JiraClient, cfg: dict, project: str, seen: dict) -> list[str]:
+    """Who may read a project's issues that have no security level: the whole org for a project anyone with Jira access
+    may browse, on a site its admin confirmed is the company's own; otherwise the people Jira names."""
+    if cfg.get("company_site") and client.open_to_everyone(project):
+        return [f"org:{config.ORG_SLUG}"]
+    return readers_of(client.browsers(project=project), seen)
+
+
+def restricted(issue: dict) -> bool:
+    return bool((issue.get("fields") or {}).get("security"))
+
+
+def live(client: JiraClient, cfg: dict, doc: dict) -> tuple[list[str], list[tuple[str | None, str]]]:
+    """A pointer issue as Jira holds it now (F11a): its readers, worked out as a sync works them out, and its sections. An
+    issue Jira moved (it answers under another key, perhaps in a project the connection leaves out) reaches nobody."""
+    key = doc["external_key"][len("jira-"):]
+    issue = client.issue(key)
+    project = str(issue.get("key") or "").rsplit("-", 1)[0]
+    if issue.get("key") != key or project != doc["container_ref"]:  # moved: reaches nobody until a sync says otherwise
+        return [], []
+    readers = readers_of(client.browsers(issue=issue["key"]), {}) if restricted(issue) else project_readers(client, cfg, project, {})
+    return readers, issue_sections(issue)[1]
+
+
 def minutes_since(cursor: str | None) -> int | None:
     """Whole minutes since a cursor (an ISO time), or None for no cursor, or one that isn't a time."""
     try:
@@ -217,17 +247,16 @@ def sync_project(conn, connection: dict, client: JiraClient, project: str, since
     started = datetime.now(timezone.utc).isoformat()
     cfg = connection["config"] or {}
     seen: dict[str, dict] = {}  # the accounts Jira named, as it reports them
-    everyone = bool(cfg.get("company_site")) and client.open_to_everyone(project)
-    project_readers = [f"org:{config.ORG_SLUG}"] if everyone else readers_of(client.browsers(project=project), seen)
+    everyone_else = project_readers(client, cfg, project, seen)
+    pointer = storage_of(connection) == "pointer"  # F11a: attachments aren't read live, so a pointer connection leaves them out
     items = []
     for issue in client.issues(project, since=since):
-        restricted = bool((issue.get("fields") or {}).get("security"))
-        acl = readers_of(client.browsers(issue=issue["key"]), seen) if restricted else project_readers
+        acl = readers_of(client.browsers(issue=issue["key"]), seen) if restricted(issue) else everyone_else
         items.append(Item(key=f"jira-{issue['key']}", uri=f"{client.base}/browse/{issue['key']}",
                           version=str((issue.get("fields") or {}).get("updated") or issue.get("id") or ""),
                           title=f"{issue['key']}: {(issue.get('fields') or {}).get('summary') or ''}",
                           path=issue["key"], acl=acl, sections=lambda issue=issue: issue_sections(issue)))
-        for a in ((issue.get("fields") or {}).get("attachment") or [])[:MAX_PER_PAGE]:  # Q7: with exactly the issue's readers
+        for a in [] if pointer else ((issue.get("fields") or {}).get("attachment") or [])[:MAX_PER_PAGE]:  # Q7: the issue's readers
             aid, content = str(a.get("id") or ""), str(a.get("content") or "")
             if not ATTACHMENT_ID.fullmatch(aid) or not content.startswith(f"{client.base}/rest/api/3/attachment/content/"):
                 continue

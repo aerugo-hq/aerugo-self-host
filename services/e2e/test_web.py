@@ -130,6 +130,10 @@ def test_a_team_admin_opens_the_slack_form(page):
     expect(form.get_by_label("Bot token")).to_have_attribute("type", "password")  # a token is never shown
     expect(form.get_by_label("History")).to_have_value("365")
     expect(form.get_by_text("This Slack workspace is our company's own.")).to_be_visible()
+    keep = form.get_by_label(re.compile(r"^Keep"))  # F11a: its text indexed (the default), or pointers only
+    expect(keep).to_have_value("index")
+    keep.select_option("pointer")
+    expect(keep).to_have_value("pointer")
 
 
 def test_a_team_admin_opens_the_microsoft_365_form(page):
@@ -147,6 +151,7 @@ def test_the_notion_form_says_who_will_read_it(page):
     form = page.get_by_role("form", name="Connect Notion")
     expect(form.get_by_label("Integration token")).to_have_attribute("type", "password")
     expect(form).to_contain_text("readable by this team's members, and no one else")
+    expect(form.get_by_label(re.compile(r"^Keep"))).to_have_count(0)  # only Confluence, Jira, and Slack keep pointers (F11a)
 
 
 def test_the_data_catalog_form_fits_each_catalog(page):

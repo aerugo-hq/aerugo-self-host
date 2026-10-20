@@ -1857,6 +1857,77 @@ eval-teams` 11 teams, 61 questions, no leak (Stores Ask right 27 of 27, the righ
 passed; `make test-web` passed; the lint at 0 errors and 43 warnings. The teams' baselines recorded on that stack after
 the other sets, as CI orders them (`kl.team_evals --record`: each team's Recall@10 100%; MRR from 0.25 for EDP's one
 question, behind the scenario's own pages as F10b found, to 1.0); every other set's record unchanged.
+F11a, pointer mode (`docs/ENTERPRISE_PLAN.md` F11; approved 2026-10-20 with F11b: pointer mode for Confluence, Jira,
+and Slack now, live only for Confluence and Jira next). A Confluence, Jira, or Slack connection keeps what it reads as
+`storage` `index` (as before) or `pointer` (in its config; creating and `PATCH` take it, its settings and the connections
+list read it back); every other source refuses pointer with a clear message (`IndexedOnly`, `POINTER_ONLY`). Migration
+0066: `chunks.body` may be NULL, and `documents.storage`. A pointer sync (`sync_items.sync_container`) reads each item
+into memory outside any transaction (the source fetch moved out for both modes), embeds its sections there with the
+team's models as the backfill would (`pointer_vectors`, Q2's opening line included), and writes chunks with neither body
+nor heading (so no full-text index over them) beside their embeddings. A document whose mode changed is read again, and
+on becoming a pointer loses everything made from its text (`FORGET_SQL`: its bronze page, entities, references,
+extraction's unconfirmed proposals, and those passes' records; units people confirmed stay theirs). The backfill, bronze
+pages, the personal-data scan, entities, references, and extraction skip pointers. Attachments aren't read live, so a
+pointer connection leaves them out (its full read removes those an indexed sync made). At answer time `kl/live.py`
+reads each pointer from its source with no transaction open (Jira's issue, `JiraClient.issue`; Confluence's page or post
+with its body, `ConfluenceClient.item`; a Slack thread, or a day through `history` bounded by `latest`), re-reads its
+readers there the way a sync works them out (each connector's `live`, on the sync's own readers code: `project_readers`,
+`space_readers` narrowed by every restriction from the page up, `readers_of`), and goes ahead only when the asker's
+principals and linked accounts (`kl.current_principals()`) are among them. Anything else reads as nothing: an error
+(logged by its kind alone), an item gone, a page moved out of its space, an asker the source no longer lists. Ask reads
+the pointers among its sources after egress, each passage the section sharing most of the question and those after it,
+up to `PASSAGE_CHARS` (2,400; `live.best`, so a thread carries its replies), drops the others (`dropped_by_source` in
+the audit), and keeps nothing read: a conversation keeps its answer's words and citations, a pointer's with no section.
+The reader (`/v1/documents/{key}/content`) reads a pointer live too: a 404 when the source no longer lists the reader, a
+502 when it doesn't answer, rate-limited (`KL_RATE_LIVE_PER_USER` 60 a minute, `KL_RATE_LIVE_PER_ORG` 1,200), audited
+with `live`. Search finds pointers by title and meaning, with no snippet and no section; the search page hides the
+empty snippet, and the reader says "Read live". The fakes: Jira's `issue/{key}`, Confluence's page and post by id with
+their body and space, Slack's history bounded by `latest`. The app: a "Keep" choice in the Confluence, Jira, and Slack
+forms and on Edit, and a "Pointers only" tag on the connection's row. `docs/connectors/storage-modes.md` says it for
+admins. Smoke: `pointer_mode_keeps_no_text_and_reads_it_live_for_who_the_source_lists` (a Jira issue, a Confluence
+page, and a Slack thread, each with a planted text, synced indexed first, the text stored and a bronze page made;
+switched to pointers, each keeps no body or heading, is embedded, has no bronze page or entities, and the issue's
+attachment is gone; the text is in no table of the database, every row read as text; search finds each by title with
+no snippet; Notion refuses pointers; alice's Ask puts all three passages in the model's prompt, and the reader shows the
+page; with the sources no longer listing alice and the index unchanged, her Ask gets none, each in `dropped_by_source`,
+and the reader a 404, while carol still gets all three; still nothing in any table, the conversations and the audit
+included). CI then greps the API's, worker's, and MCP server's logs for the planted text. `make eval-company-pointer`
+(`kl.company_eval --pointer`, CI's last evaluation): the retailer with its Confluence, Jira, and Slack connections as
+pointers, the same checks, held to its own baseline set (`company-pointer`; extraction expects no proposals); each run
+sets its connections' mode, so a run of the others switches them back. Unit: `tests/test_live.py` (8). Red first: with
+the live reader rule accepting anyone and the kind check dropped, exactly their 3 unit tests failed; in the stack, a
+pointer sync that kept its text failed the check ("a pointer kept text"), a live read that skipped the source's readers
+failed it ("someone the source no longer lists got its passage"), and a switch that kept what was made from the text
+failed it (the issue's bronze page stayed); each restored (`cmp`) and green. Found while building: a Slack thread is a
+section per message, so a passage of the best section alone left the thread's replies out (the check caught it: the
+reply's text never reached the model); the passage now carries what follows. And the reader had no rate limit, so one
+person opening a pointer again and again could spend its source's API quota; it has one now. An independent review
+of the diff found no way a pointer's text reaches someone it shouldn't, and five problems, each fixed: a Slack thread
+was titled by its opener's first line, message text a pointer kept (a pointer thread is now titled by its channel and
+day; the smoke check plants its text in the opener too); a failed embedding call stopped the whole sync, so after its
+attempts the connection went to `error` and its readers refresh stopped (the pointer is now written without vectors,
+the failure logged by its kind); a pointer got embeddings only when its content changed, so a model added later never
+reached it (`EXISTING_SQL`: a pointer missing an embedding of one of its team's models, at the current context, is read
+again; the smoke check deletes one's embeddings and its next sync makes them again); a moved Jira issue answered under
+its new key in a project the connection may leave out (it now reaches nobody, as a Confluence page moved out of its
+space doesn't); and compile drafted from a pointer's missing text as the word "None" (it leaves pointers out, since
+reading them live would put their text in the stored draft). Red first for each with a check: the two new unit tests
+(a moved issue, a pointer thread's title) failed with their fixes removed; in the stack, the check failed with the
+re-read of an unembedded pointer removed and with the opener's text as the title. It also noted, outside F11a, that
+Jira comments restricted to a group or role reach everyone who reads their issue, indexed or live (proposed as its own
+item). Proof, against the
+running stack (not fresh: it holds the scenario and the retailer): `make unit` 195 passed; the pointer check passed,
+and so did the Jira, Confluence, Slack, expired-cursor, decisions, extraction, units, lifecycle, attachments, and
+connection-ownership checks; under `ask_`, two failed on the stack's extra content, neither touching F11a
+(`ask_never_calls_model_without_sources`: the scenario's public Slack day, indexed, reached bob; Q6's who-to-ask waits
+for exactly the seed's curated pages), for the fresh loop to prove; `kl.company_eval --pointer` no leak, everyone opening
+exactly what the truth says, nothing extracted, Recall@10 100% and MRR 0.83 over 52 counted questions (the same as
+indexed), Ask citing a right page for 27 of 27 with every passage read live, the right unit first for 15 of 26, the
+truth's 3 stale units and its 1 gap; no planted text in the API's, worker's, or MCP server's logs, nor in a `pg_dump`
+taken after the check (which shows only that nothing was left behind: the check reads every table while the pointers
+exist); the lint at 0 errors and 43 warnings; the gallery's 3 browser tests passed. Not built: Terraform's `storage`
+(the provider's follow-up), pointers for other sources, attachments read live, and reading an answer's pointers at once
+(one after another today, so an Ask with six pointers waits on six sources in turn).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1867,7 +1938,8 @@ this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fi
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
-answers), with the fresh-stack loop over the three; next, F11 (storage modes), then capture (C1 to C5).
+answers), with the fresh-stack loop over the three, and F11a (pointer mode); next, F11b (live only, for Confluence and
+Jira), the fresh-stack loop over F11a and F11b, then capture (C1 to C5).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

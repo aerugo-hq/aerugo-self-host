@@ -4,11 +4,12 @@ who sees its content (slice 3), not the connection."""
 import re
 import secrets
 import uuid
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import config, confluence, dataplex, datahub, directory, gcp_secrets, gdrive, glue, jira, microsoft365, notion, purview, secret_refs, slack, unity
 from .hooks import HOOK_KINDS
@@ -17,12 +18,30 @@ from .db import resolve_org_id, scoped
 from .github import APP_REF, GitHubNotConfigured, load_app
 from .managed import forget_managed, managed_header, managed_info, note_managed
 from .policy import SLUG, audit, require_org_admin, require_workspace_admin
+from .sync_items import POINTER_KINDS
 from .vault import vault
 
 router = APIRouter(prefix="/v1/workspaces/{ws}")
 
+# F11a: how a connection keeps what it reads. `index` keeps its text (search's every channel, and the passes that read it);
+# `pointer` keeps only its address, title, readers, and embeddings, and reads its text from the source when someone asks.
+Storage = Literal["index", "pointer"]
+POINTER_ONLY = "only Confluence, Jira, and Slack can keep pointers only; every other source's text is indexed"
 
-class GitHubConnectionIn(BaseModel):
+
+class IndexedOnly(BaseModel):
+    """A source whose text can't be read again live, so it's always indexed (F11a)."""
+    storage: str = "index"
+
+    @field_validator("storage")
+    @classmethod
+    def indexed(cls, value: str) -> str:
+        if value != "index":
+            raise ValueError(POINTER_ONLY)
+        return value
+
+
+class GitHubConnectionIn(IndexedOnly):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
     installation_id: int = Field(gt=0)
     repositories: list[str] | None = Field(default=None, max_length=500)  # None: all the installation grants
@@ -74,7 +93,7 @@ def create_github_connection(ws: str, body: GitHubConnectionIn, caller: Caller =
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
-class GoogleConnectionIn(BaseModel):
+class GoogleConnectionIn(IndexedOnly):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
     service_account_key: str | None = Field(default=None, max_length=20000, repr=False)  # its JSON key (ADR 0011)
     credential_ref: str | None = Field(default=None, max_length=300)  # or one the team keeps in OpenBao itself
@@ -142,6 +161,7 @@ class JiraConnectionIn(BaseModel):
     projects: list[str] | None = Field(default=None, max_length=500)  # None: every project the account can browse
     company_site: bool = False  # its admin confirms this Jira site is the company's own (ADR 0011)
     every_minutes: int | None = Field(default=None, ge=5, le=10080)  # how often it syncs; None: the stack's default
+    storage: Storage = "index"  # F11a
 
 
 LABEL = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,99}$")  # Confluence's labels: lowercase, no spaces
@@ -158,6 +178,7 @@ class ConfluenceConnectionIn(BaseModel):
     page_trees: list[str] | None = Field(default=None, max_length=100)  # only these pages, and everything under them
     company_site: bool = False  # its admin confirms this Confluence site is the company's own (ADR 0011)
     every_minutes: int | None = Field(default=None, ge=5, le=10080)
+    storage: Storage = "index"  # F11a
 
 
 def confluence_scope(spaces, labels, page_trees) -> str | None:
@@ -214,7 +235,8 @@ def create_jira_connection(ws: str, body: JiraConnectionIn, caller: Caller = Dep
             """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
                VALUES (%s, %s, %s, 'jira', %s, %s, %s, %s) RETURNING id, name, kind, status""",
             (cid, org_id, ws_row["id"], body.name, Jsonb({"api_base": body.api_base.rstrip("/"), "projects": body.projects,
-                                                          "company_site": body.company_site, "every_minutes": body.every_minutes}),
+                                                          "company_site": body.company_site, "every_minutes": body.every_minutes,
+                                                          "storage": body.storage}),
              ref, caller.username),
         ).fetchone()
         note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
@@ -222,7 +244,8 @@ def create_jira_connection(ws: str, body: JiraConnectionIn, caller: Caller = Dep
                      (org_id, Jsonb({"connection_id": str(row["id"])})))
         audit(conn, org_id, caller.username, "connection.create", [ws],
               {"name": body.name, "kind": "jira", "site": body.api_base.rstrip("/"), "projects": body.projects,
-               "company_site": body.company_site, "credential": "reference" if body.credential_ref else "stored"})
+               "company_site": body.company_site, "storage": body.storage,
+               "credential": "reference" if body.credential_ref else "stored"})
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
@@ -279,7 +302,8 @@ def create_confluence_connection(ws: str, body: ConfluenceConnectionIn, caller: 
                VALUES (%s, %s, %s, 'confluence', %s, %s, %s, %s) RETURNING id, name, kind, status""",
             (cid, org_id, ws_row["id"], body.name,
              Jsonb({"api_base": body.api_base.rstrip("/"), "spaces": body.spaces, "labels": body.labels,
-                    "page_trees": body.page_trees, "company_site": body.company_site, "every_minutes": body.every_minutes}),
+                    "page_trees": body.page_trees, "company_site": body.company_site, "every_minutes": body.every_minutes,
+                    "storage": body.storage}),
              ref, caller.username),
         ).fetchone()
         note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
@@ -287,7 +311,7 @@ def create_confluence_connection(ws: str, body: ConfluenceConnectionIn, caller: 
                      (org_id, Jsonb({"connection_id": str(row["id"])})))
         audit(conn, org_id, caller.username, "connection.create", [ws],
               {"name": body.name, "kind": "confluence", "site": body.api_base.rstrip("/"), "spaces": body.spaces,
-               "labels": body.labels, "page_trees": body.page_trees, "company_site": body.company_site,
+               "labels": body.labels, "page_trees": body.page_trees, "company_site": body.company_site, "storage": body.storage,
                "credential": "reference" if body.credential_ref else "stored"})
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
@@ -301,6 +325,7 @@ class SlackConnectionIn(BaseModel):
     history_days: int | None = Field(default=None, ge=1, le=3650)  # how far back it reads; a year unless set
     api_base: str = slack.SLACK_API
     every_minutes: int | None = Field(default=None, ge=5, le=10080)
+    storage: Storage = "index"  # F11a
 
 
 @router.post("/connections/slack", status_code=201)
@@ -335,18 +360,20 @@ def create_slack_connection(ws: str, body: SlackConnectionIn, caller: Caller = D
                VALUES (%s, %s, %s, 'slack', %s, %s, %s, %s) RETURNING id, name, kind, status""",
             (cid, org_id, ws_row["id"], body.name,
              Jsonb({"api_base": body.api_base.rstrip("/"), "channels": body.channels, "company_workspace": body.company_workspace,
-                    "history_days": body.history_days, "every_minutes": body.every_minutes}), ref, caller.username),
+                    "history_days": body.history_days, "every_minutes": body.every_minutes, "storage": body.storage}),
+             ref, caller.username),
         ).fetchone()
         note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
                      (org_id, Jsonb({"connection_id": str(row["id"])})))
         audit(conn, org_id, caller.username, "connection.create", [ws],
               {"name": body.name, "kind": "slack", "channels": body.channels, "company_workspace": body.company_workspace,
-               "history_days": body.history_days, "credential": "reference" if body.credential_ref else "stored"})
+               "history_days": body.history_days, "storage": body.storage,
+               "credential": "reference" if body.credential_ref else "stored"})
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
-class NotionConnectionIn(BaseModel):
+class NotionConnectionIn(IndexedOnly):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
     token: str | None = Field(default=None, min_length=20, max_length=300, repr=False)  # an internal integration's secret
     credential_ref: str | None = Field(default=None, max_length=300)
@@ -393,7 +420,7 @@ def create_notion_connection(ws: str, body: NotionConnectionIn, caller: Caller =
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
-class MicrosoftConnectionIn(BaseModel):
+class MicrosoftConnectionIn(IndexedOnly):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
     tenant_id: str = Field(max_length=36)
     client_id: str = Field(max_length=36)  # its app registration, holding Sites.Selected
@@ -451,7 +478,7 @@ def create_microsoft_connection(ws: str, body: MicrosoftConnectionIn, caller: Ca
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
-class CatalogConnectionIn(BaseModel):
+class CatalogConnectionIn(IndexedOnly):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
     provider: str = Field(pattern=r"^(dataplex|unity|glue|purview|datahub)$")
     api_base: str | None = Field(default=None, max_length=300)  # the catalog's address; Dataplex's and Glue's are their own
@@ -656,6 +683,7 @@ def list_connections(ws: str, caller: Caller = Depends(authenticate)):
     with scoped(org_id, caller.principals) as conn:
         rows = conn.execute(
             """SELECT c.name, c.kind, c.status, c.updated_at, c.last_synced_at, c.config->>'every_minutes' AS every_minutes,
+                      coalesce(c.config->>'storage', 'index') AS storage,
                       greatest(c.readers_refreshed_at, c.last_synced_at) AS readers_read_at, c.config ? 'webhook_ref' AS webhook
                FROM connections c JOIN workspaces w ON w.id = c.workspace_id WHERE w.slug = %s ORDER BY c.name""", (ws,)).fetchall()
         managers = managed_info(conn, "connection", [f"{ws}/{r['name']}" for r in rows])
@@ -744,7 +772,8 @@ def remove_webhook(ws: str, name: str, caller: Caller = Depends(authenticate)):
 # one the team gave (its own secret); a secret Aerugo stored itself is never named.
 SETTINGS = ("api_base", "projects", "company_site", "every_minutes", "domain", "drives", "repositories", "provider",
             "spaces", "labels", "page_trees", "admin_email", "tenant_id", "client_id", "channels", "company_workspace",
-            "history_days", "sites", "location", "catalogs", "region", "role_arn", "databases", "collections", "platforms")
+            "history_days", "sites", "location", "catalogs", "region", "role_arn", "databases", "collections", "platforms",
+            "storage")
 
 
 def settings_of(ws: str, cfg: dict, credential_ref: str | None) -> dict:
@@ -855,6 +884,7 @@ class ConnectionPatch(BaseModel):
     bot_token: str | None = Field(default=None, min_length=10, max_length=300, repr=False)  # Slack: a rotation
     token: str | None = Field(default=None, min_length=20, max_length=300, repr=False)  # Notion: a rotation
     every_minutes: int | None = Field(default=None, ge=5, le=10080)   # how often it syncs (ADR 0011)
+    storage: Storage | None = None  # F11a: Confluence, Jira, and Slack; a change reads everything again in the new form
     api_token: str | None = Field(default=None, min_length=8, max_length=4000, repr=False)  # Jira, Okta: a rotation
     email: str | None = Field(default=None, min_length=3, max_length=254)  # Jira: the account, with a new token
     service_account_key: str | None = Field(default=None, max_length=20000, repr=False)  # Google: a rotation
@@ -916,6 +946,8 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             raise HTTPException(422, "channels are named by their ids, like C0123ABCD")
         if body.bot_token and not body.bot_token.startswith("xoxb-"):
             raise HTTPException(422, "that isn't a bot token (xoxb-...): a user token would read as a person")
+        if body.storage is not None and c["kind"] not in POINTER_KINDS:
+            raise HTTPException(422, POINTER_ONLY)
         scope = {"spaces": body.spaces, "labels": body.labels, "page_trees": body.page_trees}
         if any(v is not None for v in scope.values()):
             if c["kind"] != "confluence":
@@ -938,6 +970,9 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if body.every_minutes is not None:
             cfg["every_minutes"] = body.every_minutes
             changed.append("schedule")
+        if body.storage is not None and body.storage != (cfg.get("storage") or "index"):  # discovery's full read rewrites each
+            cfg["storage"] = body.storage
+            changed.append("storage")
         if body.repositories is not None:
             cfg["repositories"] = body.repositories
             changed.append("repositories")

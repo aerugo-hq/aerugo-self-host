@@ -28,7 +28,7 @@ from .jira import SITE, account
 from .sync_github import team_for
 from .attachments import MAX_BYTES as MAX_ATTACHMENT, MAX_PER_PAGE, attachment_item
 from .decisions import confluence_items, heading as decision_heading
-from .sync_items import Item, record_identities, sync_container
+from .sync_items import Item, record_identities, storage_of, sync_container
 from .vault import vault
 from . import source_http
 
@@ -302,6 +302,17 @@ class ConfluenceClient:
             page = self._get(nxt[len("/wiki/"):])
         return out
 
+    def item(self, content_id: str) -> dict:
+        """A page or a blog post with its body in the storage format: a pointer's text, read again live (F11a)."""
+        if not CONTENT_ID.fullmatch(content_id):
+            raise ValueError("unexpected content id")
+        try:
+            return {**self._get(f"api/v2/pages/{content_id}", **{"body-format": "storage"}), "_kind": "pages"}
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+        return {**self._get(f"api/v2/blogposts/{content_id}", **{"body-format": "storage"}), "_kind": "blogposts"}
+
     def page(self, page_id: str) -> dict:
         """One page, without its body: its title and parent, for a changed page whose ancestors didn't change (H6)."""
         return self._get(f"api/v2/pages/{page_id}")
@@ -419,14 +430,61 @@ def narrowed(readers, levels: list[set]):
     return readers
 
 
-def items_for_space(client, cfg: dict, key: str, seen: dict, since: datetime | None = None) -> list[Item]:
+def space_readers(client, cfg: dict, space: dict, readers: _Readers):
+    """Who the space lets read its pages: anyone (EVERYONE) only on a company site anyone, or its default group, may
+    read; otherwise its grants' people."""
+    users, groups, anyone = client.space_grants(str(space["id"]))
+    everyone = bool(cfg.get("company_site")) and (anyone or any(DEFAULT_GROUP.fullmatch(client.group_name(g) or "") for g in groups))
+    return EVERYONE if everyone else readers.of(users, groups)
+
+
+def acl_of(allowed) -> list[str]:
+    return [f"org:{config.ORG_SLUG}"] if allowed == EVERYONE else sorted(p for p in (account(a) for a in allowed) if p)
+
+
+def page_sections(c: dict, attached: list[dict]) -> tuple[str, list[tuple[str | None, str]]]:
+    """A page's sections: its storage format by heading, its decision items (Q5), and its attachments' names."""
+    storage = ((c.get("body") or {}).get("storage") or {}).get("value") or ""
+    title, parts = storage_sections(storage, c.get("title") or "")
+    at = str((c.get("version") or {}).get("createdAt") or "")[:10] or None
+    parts += [(decision_heading(None, at), text) for text in confluence_items(storage)]
+    files = [a.get("title") for a in attached if a.get("title")]
+    if files:
+        parts.append(("Attachments", "\n".join(f"- {name}" for name in files)))
+    return title, parts
+
+
+def live(client, cfg: dict, doc: dict) -> tuple[list[str], list[tuple[str | None, str]]]:
+    """A pointer page as Confluence holds it now (F11a): its readers, its space's narrowed by every restriction from the
+    page up (a restriction or a parent that can't be read raises, and the caller fails closed), and its sections. A page
+    moved out of the space it was indexed in reaches nobody until a sync says otherwise."""
+    c = client.item(doc["external_key"][len("confluence-"):])
+    space = client.space(doc["container_ref"])
+    if not space or str(c.get("spaceId")) != str(space["id"]):
+        return [], []
+    readers = _Readers(client, {})
+    allowed, ids, parent = space_readers(client, cfg, space, readers), [str(c["id"])], c.get("parentId")
+    while parent:
+        if str(parent) in ids or len(ids) > 200:
+            return [], []
+        ids.append(str(parent))
+        try:
+            parent = client.page(str(parent)).get("parentId")
+        except httpx.HTTPStatusError:
+            parent = client.parent_of(str(parent))  # a folder
+    for i in ids:
+        r = client.restriction(i)
+        if r:
+            allowed = narrowed(allowed, [readers.of(*r)])
+    return acl_of(allowed), page_sections(c, client.attachments(str(c["id"]), c["_kind"]))[1]
+
+
+def items_for_space(client, cfg: dict, key: str, seen: dict, since: datetime | None = None, pointer: bool = False) -> list[Item]:
     space = client.space(key)
     if not space:
         return []
     readers = _Readers(client, seen)
-    users, groups, anyone = client.space_grants(str(space["id"]))
-    everyone = bool(cfg.get("company_site")) and (anyone or any(DEFAULT_GROUP.fullmatch(client.group_name(g) or "") for g in groups))
-    space_readers = EVERYONE if everyone else readers.of(users, groups)
+    granted = space_readers(client, cfg, space, readers)
     labels = {l.strip() for l in cfg.get("labels") or [] if l and l.strip()}
     roots = {str(r) for r in cfg.get("page_trees") or []}
 
@@ -499,8 +557,7 @@ def items_for_space(client, cfg: dict, key: str, seen: dict, since: datetime | N
             continue
         if labels and not (labels & client.labels(cid, c["_kind"])):
             continue
-        allowed = narrowed(space_readers, levels)
-        acl = [f"org:{config.ORG_SLUG}"] if allowed == EVERYONE else sorted(p for p in (account(a) for a in allowed) if p)
+        acl = acl_of(narrowed(granted, levels))
         if not acl:  # nobody may read it: it isn't indexed at all
             continue
         known = {**ancestors, **everything}
@@ -510,19 +567,10 @@ def items_for_space(client, cfg: dict, key: str, seen: dict, since: datetime | N
 
         attached = client.attachments(cid, c["_kind"])[:MAX_PER_PAGE]  # this page's own, bound to its sections below
 
-        def sections(c=c, cid=cid, attached=attached):
-            storage = ((c.get("body") or {}).get("storage") or {}).get("value") or ""
-            title, parts = storage_sections(storage, c.get("title") or "")
-            at = str((c.get("version") or {}).get("createdAt") or "")[:10] or None
-            parts += [(decision_heading(None, at), text) for text in confluence_items(storage)]  # Q5: its decision items
-            files = [a.get("title") for a in attached if a.get("title")]
-            if files:
-                parts.append(("Attachments", "\n".join(f"- {name}" for name in files)))
-            return title, parts
-
         items.append(Item(key=f"confluence-{cid}", uri=uri, version=str((c.get("version") or {}).get("number") or ""),
-                          title=c.get("title") or f"Page {cid}", path=SEPARATOR.join(titles), acl=acl, sections=sections))
-        for a in attached:  # Q7: each attachment its own document, with exactly this page's readers
+                          title=c.get("title") or f"Page {cid}", path=SEPARATOR.join(titles), acl=acl,
+                          sections=lambda c=c, attached=attached: page_sections(c, attached)))
+        for a in [] if pointer else attached:  # Q7: each its own document, with this page's readers; never live (F11a)
             aid, link = str(a.get("id") or ""), str(a.get("downloadLink") or "")
             if not ATTACHMENT_ID.fullmatch(aid) or not link.startswith("/download/"):
                 continue
@@ -544,7 +592,7 @@ def sync_space(conn, connection: dict, client: ConfluenceClient, key: str, since
     except ValueError:
         then = None
     then = then - timedelta(minutes=OVERLAP_MINUTES) if then is not None and then.tzinfo is not None else None
-    items = items_for_space(client, connection["config"] or {}, key, seen, then)
+    items = items_for_space(client, connection["config"] or {}, key, seen, then, pointer=storage_of(connection) == "pointer")
     missing = [a for a, v in seen.items() if not v.get("email")]
     if missing:
         try:

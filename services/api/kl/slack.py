@@ -26,7 +26,7 @@ import httpx
 from . import config
 from .connectors import Container, Health
 from .principals import is_valid
-from .sync_items import Item, record_identities, sync_container
+from .sync_items import Item, record_identities, storage_of, sync_container
 from .vault import vault
 from . import source_http
 
@@ -129,8 +129,9 @@ class SlackClient:
                            for u in self._pages("users.list", "members", limit=200) if USER.fullmatch(u.get("id") or "")}
         return self._users
 
-    def history(self, channel: str, oldest: float) -> list[dict]:
-        return self._pages("conversations.history", "messages", channel=channel, oldest=f"{oldest:.6f}", limit=200)
+    def history(self, channel: str, oldest: float, latest: float | None = None) -> list[dict]:
+        return self._pages("conversations.history", "messages", channel=channel, oldest=f"{oldest:.6f}", limit=200,
+                           **({"latest": f"{latest:.6f}"} if latest is not None else {}))
 
     def replies(self, channel: str, ts: str) -> list[dict]:
         return self._pages("conversations.replies", "messages", channel=channel, ts=ts, limit=200)
@@ -178,15 +179,18 @@ def permalink(team_url: str, channel: str, ts: str) -> str:
 
 
 def items_for(client: SlackClient, channel_id: str, name: str, acl: list[str], names: dict[str, str], team_url: str,
-              oldest: float) -> list[Item]:
-    """A channel's threads (one document each) and its other messages, one document per day."""
+              oldest: float, pointer: bool = False) -> list[Item]:
+    """A channel's threads (one document each) and its other messages, one document per day. A thread is titled by its
+    opener's first line, except for a pointer (F11a), which keeps no message text: by its channel and day."""
     items, days = [], {}
     for m in client.history(channel_id, oldest):
         if not kept(m):
             continue
-        if m.get("reply_count") and m.get("thread_ts") == m["ts"]:
+        if threaded(m):
             thread = [r for r in client.replies(channel_id, m["ts"]) if kept(r)]
             first = plain(m.get("text") or "", names).split("\n", 1)[0][:120] or "Thread"
+            if pointer:
+                first = f"thread on {datetime.fromtimestamp(float(m['ts']), timezone.utc).strftime('%Y-%m-%d')}"
             items.append(Item(key=f"slack-{channel_id}-{m['ts']}", uri=permalink(team_url, channel_id, m["ts"]), version=version(thread),
                               title=f"{name}: {first}", path=f"{name} › Threads", acl=acl,
                               sections=lambda thread=thread, first=first: (f"{name}: {first}", sections_of(thread, names))))
@@ -199,6 +203,32 @@ def items_for(client: SlackClient, channel_id: str, name: str, acl: list[str], n
                           title=f"{name}, {day}", path=name, acl=acl,
                           sections=lambda messages=messages, day=day: (f"{name}, {day}", sections_of(messages, names))))
     return items
+
+
+def threaded(m: dict) -> bool:
+    """A message that starts a thread: the thread is its own document."""
+    return bool(m.get("reply_count")) and m.get("thread_ts") == m["ts"]
+
+
+def live(client: SlackClient, cfg: dict, doc: dict) -> tuple[list[str], list[tuple[str | None, str]]]:
+    """A pointer thread or day as Slack holds it now (F11a): the channel's readers, worked out as a sync works them out
+    (nobody once the bot has left it), and its messages' sections."""
+    channel, _, rest = doc["external_key"][len("slack-"):].partition("-")
+    if not CHANNEL.fullmatch(channel):
+        raise ValueError("unexpected channel")
+    info = client.channel(channel)
+    if not info.get("is_member"):
+        return [], []
+    team, users = client.team(), client.users()
+    readers = readers_of(info, client.members(channel), users, team["id"], bool(cfg.get("company_workspace")), config.ORG_SLUG)
+    names = {uid: u["name"] for uid, u in users.items()}
+    if TS.fullmatch(rest):  # a thread
+        messages = [r for r in client.replies(channel, rest) if kept(r)]
+    else:  # a day's other messages
+        start = datetime.strptime(rest, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        messages = [m for m in client.history(channel, start, start + 86400)
+                    if kept(m) and not threaded(m) and start <= float(m["ts"]) < start + 86400]
+    return readers, sections_of(messages, names)
 
 
 def since_time(cursor: str | None) -> float | None:
@@ -226,5 +256,6 @@ def sync_channel(conn, connection: dict, client: SlackClient, channel_id: str, s
     last = since_time(since)
     recent = None if last is None else min(last - 600, time.time() - 86400 * RECENT_DAYS) // 86400 * 86400  # a whole day
     oldest = window if recent is None or recent <= window else recent
-    items = items_for(client, channel_id, f"#{info.get('name') or channel_id}", acl, names, team["url"], oldest)
+    items = items_for(client, channel_id, f"#{info.get('name') or channel_id}", acl, names, team["url"], oldest,
+                      pointer=storage_of(connection) == "pointer")
     return sync_container(conn, connection, channel_id, "slack", items, complete=oldest == window, cursor=started)

@@ -116,7 +116,8 @@ WHERE x.a < x.b AND x.score >= %(min_score)s
 DUE_SCANS_SQL = """
 SELECT d.id, d.org_id, d.content_hash, d.title
 FROM documents d LEFT JOIN entity_scans s ON s.document_id = d.id
-WHERE s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash
+WHERE d.storage = 'index'  -- a pointer keeps no text to read entities from (F11a)
+  AND (s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash)
 ORDER BY d.id
 LIMIT 200
 """
@@ -217,7 +218,8 @@ WHERE k.aliases IS NOT NULL
 DUE_REFERENCE_SCANS_SQL = """
 SELECT d.id, d.org_id, d.external_key, d.content_hash, d.title
 FROM documents d LEFT JOIN reference_scans s ON s.document_id = d.id
-WHERE s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash OR s.names_hash IS DISTINCT FROM %(names_hash)s
+WHERE d.storage = 'index'  -- a pointer keeps no text to read references from (F11a)
+  AND (s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash OR s.names_hash IS DISTINCT FROM %(names_hash)s)
 ORDER BY d.id
 LIMIT 200
 """

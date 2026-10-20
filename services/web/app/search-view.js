@@ -160,7 +160,7 @@ export default function SearchView({ me, initial = "", team = "" }) {
           h("a", { className: "result", href: inScope(`#/documents/${encodeURIComponent(r.id)}`, team) }, // opens any document, in place
             h("div", { className: "result-title" }, h(SourceIcon, { kind: r.source_kind, label: sourceName(r.source_kind) }), h("span", null, r.title)),
             r.section ? h("div", { className: "faint small" }, r.section) : null,
-            h("p", { className: "result-snippet" }, r.snippet),
+            r.snippet ? h("p", { className: "result-snippet" }, r.snippet) : null, // a pointer keeps no text to show (F11a)
             h("div", { className: "meta" }, h(Tier, { tier: r.tier }), r.source_kind ? h("span", null, sourceName(r.source_kind)) : null,
               r.container && r.container.name ? h("span", null, `in ${r.container.name}`) : null,
               h("span", { className: "mono" }, r.id),

@@ -62,7 +62,8 @@ def detect(title: str, sections: list[tuple[str | None, str]]) -> tuple[dict, st
 DUE_SQL = """
 SELECT d.id, d.org_id, d.title, d.content_hash, d.classification, f.status, f.kinds
 FROM documents d LEFT JOIN privacy_flags f ON f.document_id = d.id
-WHERE f.document_id IS NULL OR f.content_hash IS DISTINCT FROM d.content_hash
+WHERE d.storage = 'index'  -- a pointer keeps no text to scan (F11a)
+  AND (f.document_id IS NULL OR f.content_hash IS DISTINCT FROM d.content_hash)
 ORDER BY d.id
 LIMIT 200
 """

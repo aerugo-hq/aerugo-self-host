@@ -266,6 +266,8 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 - [ ] **F11.** Storage modes: index, pointer, and live only, per source; pointer mode fetching passages live with the
       asker's permission and keeping no text anywhere (smoke proves nothing of a pointer-mode source's text is in the
       database, a cache, a log, or a stored answer); the admin's choice shown per source; answer quality measured per mode.
+      (F11a, pointer mode for Confluence, Jira, and Slack: built 2026-10-20, its proof in `CLAUDE.md`. F11b, live only
+      for Confluence and Jira, next; Slack can't be live only, since its search needs a person's token.)
 
 ### Capture
 - [ ] **C1.** Teams: the message action, the bot, opted-in standard channels (resource-specific consent); sensitive topics excluded; exclusions honored.

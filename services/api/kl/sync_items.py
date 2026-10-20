@@ -5,12 +5,70 @@ whenever its content does, and its readers, already mapped from the source and f
 rest, the same way for every source: content is fetched and indexed only when its version changed; readers are
 re-checked on every sync, because sharing changes without edits; the authorization store gets only the differences;
 and anything the source no longer has, or no longer lets anyone read, is removed with its grants."""
+import logging
 from dataclasses import dataclass
 from typing import Callable
 
 from . import shutdown
 from .authz import fga
+from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
 from .sync_github import leave_former_teams, team_for
+from .vault import vault
+
+log = logging.getLogger(__name__)
+
+POINTER_KINDS = ("jira", "confluence", "slack")  # F11a: the sources whose text can be read again live, for each asker
+# A team's embedding models, as the backfill picks them: its own, else the org's default.
+TEAM_MODELS_SQL = """
+SELECT m.id, m.provider, m.model, m.dims, m.base_url, m.credential_ref FROM embedding_models m
+WHERE m.status = 'active' AND m.org_id = %(org)s
+  AND (m.workspace_id = %(team)s OR (m.workspace_id IS NULL AND NOT EXISTS (
+       SELECT 1 FROM embedding_models o WHERE o.workspace_id = %(team)s AND o.status = 'active')))
+"""
+# A connection's documents in a container; a pointer missing an embedding of one of its team's models (one added since,
+# or one that failed at its sync) is read again, since nothing else can make it without the text (F11a).
+EXISTING_SQL = """
+SELECT d.id, d.external_key, d.content_hash, d.storage,
+       d.storage = 'pointer' AND EXISTS (
+         SELECT 1 FROM chunks c CROSS JOIN unnest(%(models)s::uuid[]) AS m(id)
+         WHERE c.document_id = d.id AND NOT EXISTS (
+           SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = c.id AND e.model_id = m.id AND e.context >= %(context)s)) AS unembedded
+FROM documents d
+WHERE d.source_kind = %(kind)s AND d.container_ref = %(container)s AND d.connection_id = %(connection)s
+"""
+# Everything derived from a document's text, gone when it becomes a pointer (F11a): its bronze page, the entities and
+# references read from it, and the proposals extracted from it (a unit someone confirmed is theirs, and stays), with the
+# passes' records, so each runs again should it be indexed again.
+FORGET_SQL = (
+    "DELETE FROM concepts WHERE document_id = %(doc)s AND tier = 'bronze'",
+    "DELETE FROM entity_mentions WHERE document_id = %(doc)s",
+    "DELETE FROM entity_scans WHERE document_id = %(doc)s",
+    "DELETE FROM reference_links WHERE source_id = %(doc)s",
+    "DELETE FROM reference_scans WHERE document_id = %(doc)s",
+    "DELETE FROM knowledge_units WHERE created_by = 'extraction' AND status = 'proposed' AND evidence = ARRAY[%(doc)s]::uuid[]",
+    "DELETE FROM extraction_state WHERE document_id = %(doc)s",
+)
+
+
+def storage_of(connection: dict) -> str:
+    """How a connection keeps what it reads: `pointer` (F11a) only for a source whose text can be read live again."""
+    pointer = (connection.get("config") or {}).get("storage") == "pointer" and connection.get("kind") in POINTER_KINDS
+    return "pointer" if pointer else "index"
+
+
+def pointer_vectors(models: list[dict], title: str, sections: list[tuple[str | None, str]]) -> list[tuple[dict, list]]:
+    """A pointer document's embeddings, made from its text while it's in memory, the way the backfill makes them (Q2's
+    opening line included), so the text itself never has to be kept: [(model, a vector per section)]."""
+    opening = opening_line(sections[0][1]) if sections else None
+    texts = [passage_text(title, heading, body, opening if i else None) for i, (heading, body) in enumerate(sections)]
+    out = []
+    for m in models:
+        api_key = vault.get(m["credential_ref"]).get("api_key") if m["credential_ref"] else None
+        vectors = embed(m["provider"], m["model"], texts, base_url=m["base_url"], api_key=api_key)
+        if len(vectors) != len(texts) or any(len(v) != m["dims"] for v in vectors):
+            raise RuntimeError(f"{m['model']} returned {len(vectors)} vectors for {len(texts)} sections, or the wrong dimension")
+        out.append((m, vectors))
+    return out
 
 
 @dataclass
@@ -45,12 +103,16 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
     the container counts as reconciled. An incremental sync (H6) lists only what changed since the container's cursor,
     so it adds and updates, and leaves deletions to the next full read, except the keys a source says are gone
     (`removed`, as Graph's delta does). `cursor` is where the next one starts, in the connector's own terms; a readers
-    refresh moves neither."""
+    refresh moves neither.
+
+    With `storage` pointer on the connection (F11a), a document keeps no text: its sections are read into memory,
+    embedded there, and its chunks keep neither body nor heading; a document that changes mode is read again."""
     org_id, team = connection["org_id"], team_for(connection, container)
-    readers_only = bool(connection.get("readers_only"))
-    existing = {r["external_key"]: r for r in conn.execute(
-        "SELECT id, external_key, content_hash FROM documents WHERE source_kind = %s AND container_ref = %s AND connection_id = %s",
-        (source_kind, container, connection["id"]))}
+    readers_only, storage = bool(connection.get("readers_only")), storage_of(connection)
+    models = conn.execute(TEAM_MODELS_SQL, {"org": org_id, "team": team}).fetchall() if storage == "pointer" else []
+    existing = {r["external_key"]: r for r in conn.execute(EXISTING_SQL, {
+        "models": [m["id"] for m in models], "context": CONTEXT, "kind": source_kind, "container": container,
+        "connection": connection["id"]})}
     keep, changed, unreadable, writes, deletes = set(), 0, [], set(), set()
     for item in shutdown.each(items):  # a worker asked to stop stops between items (C1)
         if not item.acl:  # nobody may read it: it isn't indexed at all
@@ -58,32 +120,51 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
         prev = existing.get(item.key)
         if readers_only and not prev:
             continue
+        # Its content changed, or the connection now keeps it the other way (F11a): read it again, outside any transaction
+        rewrite = not readers_only and (not prev or prev["content_hash"] != item.version or prev["storage"] != storage
+                                        or prev["unembedded"])
+        if rewrite:
+            try:
+                title, sections = item.sections()
+            except Exception as e:  # one unreadable item never stops the rest
+                unreadable.append({"item": item.path[:200], "reason": str(e)[:200]})
+                continue
+            try:
+                vectors = pointer_vectors(models, title or item.title, sections) if storage == "pointer" else []
+            except Exception as e:  # noqa: BLE001 - a model that fails is logged by its kind; the pointer waits for a later sync
+                log.warning("embedding %s failed (%s): it's written without, and embedded on a later sync", item.key, type(e).__name__)
+                vectors = []
         with conn.transaction():
-            if not readers_only and (not prev or prev["content_hash"] != item.version):
-                try:
-                    title, sections = item.sections()
-                except Exception as e:  # one unreadable item never stops the rest
-                    unreadable.append({"item": item.path[:200], "reason": str(e)[:200]})
-                    continue
+            if rewrite:
                 row = conn.execute(
                     """INSERT INTO documents (org_id, source_kind, source_uri, source_version, external_key, title,
                                               content_hash, classification, acl_principals, container_ref, source_path,
-                                              connection_id)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                              connection_id, storage)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (org_id, external_key) DO UPDATE SET
                          source_uri = EXCLUDED.source_uri, source_version = EXCLUDED.source_version, title = EXCLUDED.title,
-                         content_hash = EXCLUDED.content_hash, acl_principals = EXCLUDED.acl_principals, acl_synced_at = now()
+                         content_hash = EXCLUDED.content_hash, acl_principals = EXCLUDED.acl_principals, acl_synced_at = now(),
+                         storage = EXCLUDED.storage
                        WHERE documents.connection_id = EXCLUDED.connection_id AND documents.container_ref = EXCLUDED.container_ref
                        RETURNING id""",
                     (org_id, source_kind, item.uri, item.version, item.key, (title or item.title)[:300], item.version,
-                     classification, item.acl, container, item.path[:500], connection["id"])).fetchone()
+                     classification, item.acl, container, item.path[:500], connection["id"], storage)).fetchone()
                 if not row:  # the key belongs to another connection, or another container: never take it over
                     continue
                 doc_id = row["id"]
                 conn.execute("DELETE FROM chunks WHERE document_id = %s", (doc_id,))
+                if storage == "pointer":  # no text kept, nor anything made from it; only its embeddings
+                    for sql in FORGET_SQL:
+                        conn.execute(sql, {"doc": doc_id})
                 for ordinal, (heading, body) in enumerate(sections):
-                    conn.execute("INSERT INTO chunks (org_id, document_id, ordinal, heading_path, body, acl_principals) "
-                                 "VALUES (%s, %s, %s, %s, %s, %s)", (org_id, doc_id, ordinal, heading, body, item.acl))
+                    kept = (heading, body) if storage == "index" else (None, None)
+                    chunk = conn.execute("INSERT INTO chunks (org_id, document_id, ordinal, heading_path, body, acl_principals) "
+                                         "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                                         (org_id, doc_id, ordinal, *kept, item.acl)).fetchone()["id"]
+                    for m, vecs in vectors:
+                        conn.execute("INSERT INTO chunk_embeddings (chunk_id, model_id, org_id, acl_principals, embedding, context) "
+                                     "VALUES (%s, %s, %s, %s, %s::vector, %s)",
+                                     (chunk, m["id"], org_id, item.acl, vector_literal(vecs[ordinal]), CONTEXT))
                 changed += 1
             else:  # the same content; its readers may have changed
                 doc_id = prev["id"]

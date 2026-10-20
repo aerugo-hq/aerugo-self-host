@@ -197,6 +197,7 @@ JOIN documents d             ON d.id = wd.document_id
 LEFT JOIN privacy_flags f    ON f.document_id = d.id
 LEFT JOIN extraction_state s ON s.workspace_id = t.workspace_id AND s.document_id = d.id
 WHERE d.source_kind <> ALL(%(chat)s)
+  AND d.storage = 'index'  -- a pointer keeps no text to extract from (F11a)
   AND (s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash OR s.model_id IS DISTINCT FROM t.model_id
        OR (s.outcome = 'skipped_classification' AND d.classification = ANY(m.allowed_classifications)))
 ORDER BY t.workspace_id, d.id

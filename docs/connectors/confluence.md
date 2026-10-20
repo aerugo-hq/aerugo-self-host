@@ -34,6 +34,8 @@ reads: the account sets what's indexed, and each page keeps Confluence's own rea
 - **It fails closed:** an unreadable restriction or folder leaves that page and everything under it out; a space
   role it can't expand, or a group it can't, grants nothing.
 - **It never writes** to Confluence.
+- **Its text can stay in the source:** with pointers only, Aerugo keeps each item's title, readers, and embeddings, and
+  reads its text live, for each person the source still lists; see `storage-modes.md`.
 
 ## Connecting it
 

@@ -67,7 +67,7 @@ The sources stay the system of record; Aerugo never becomes a second Confluence.
 | Mode | Keeps | Doesn't keep | Trade-off |
 |---|---|---|---|
 | **A. Index** (today) | Pointers and metadata, permissions, small derived facts, embeddings, text passages | | Best answers, fastest, works when a source is down; a protected copy of text exists |
-| **B. Pointer** | Pointers and metadata, permissions, small derived facts, embeddings | Text | No second copy of content; slower; depends on the source being up; embeddings still reveal meaning, so protect them |
+| **B. Pointer** (built for Confluence, Jira, and Slack: F11a) | Pointers and metadata, permissions, small derived facts, embeddings | Text, and what's read out of it | No second copy of content; slower; depends on the source being up; embeddings still reveal meaning, so protect them |
 | **C. Live only** | Pointers and metadata, permissions | Facts, embeddings, text | Almost nothing stored; weakest answers, slowest, no map |
 
 In pointer mode, a question runs: the person asks; candidates are found from pointers, embeddings, and facts; the
@@ -75,6 +75,15 @@ person's permission is checked in the source; only the passages needed are fetch
 citations; the text is discarded. The map can't be pointer-only: "who uses this table", "what feeds this report" are
 worked out ahead of time and kept as small facts with pointers to their evidence, carrying their sources' permissions.
 Everything kept stays inside the company's own cloud project and region.
+
+F11a built B for Confluence, Jira, and Slack, a setting per connection (`storage`). A pointer keeps each item's address,
+title, version, readers, and embeddings (made while its text is in memory at the sync); its chunks keep no body and no
+heading, and nothing is read out of its text (no bronze page, entities, references, personal-data scan, or extraction
+proposals; units people confirmed stay theirs). At answer time `kl/live.py` reads each pointer from its source,
+re-reads its readers there the way a sync works them out, and goes ahead only for an asker the source still lists,
+failing closed; the passage goes to the model and is dropped, and a stored answer keeps only its words and citations.
+Its attachments aren't read live, so a pointer connection leaves them out. `docs/connectors/storage-modes.md` says it
+for admins.
 
 ## 4. How a question gets answered
 
@@ -167,6 +176,6 @@ what people ask kept for a month, what several of them weren't answered well sho
 never who asked, and corrections sent to a unit's owners; and question sets per team (F7), each team's questions in its
 onboarding repository, asked as its people, each team held to its own baseline; and routing to experts (F5b), a
 question sent to someone who-to-ask suggests, their reply kept as knowledge for the audience they choose. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, storage modes (F11), then capture (C1 to C5). A connector only adds raw material;
+but for M10's real-vendor half, set aside; storage modes are next (F11a, pointer mode, built; F11b, live only), then capture (C1 to C5). A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.
