@@ -130,8 +130,8 @@ def serve(world: company.World) -> dict:
     return httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT}, timeout=30).json()
 
 
-def plan(world: company.World) -> list[tuple[str, str, dict]]:
-    """Each team's connection to each source: (team, kind, body)."""
+def plan(world: company.World, storage: str = "index") -> list[tuple[str, str, dict]]:
+    """Each team's connection to each source: (team, kind, body), keeping what it reads as `storage` says (F11a)."""
     out = []
     for source, scope in (("confluence", "spaces"), ("jira", "projects"), ("slack", "channels")):
         for slug, _, _ in company.TEAMS:
@@ -139,20 +139,26 @@ def plan(world: company.World) -> list[tuple[str, str, dict]]:
             if not held:
                 continue
             body = {"name": f"retail-{source}-{slug}", "api_base": SITES[source] + ("/api" if source == "slack" else ""),
-                    scope: held, "every_minutes": 10080, **CREDENTIALS[source]}
+                    scope: held, "every_minutes": 10080, "storage": storage, **CREDENTIALS[source]}
             body |= {"company_site": True} if source in ("confluence", "jira") else {"company_workspace": True, "history_days": 3650}
             out.append((slug, source, body))
     return out
 
 
-def connect(world: company.World, app: dict) -> list[tuple[str, str]]:
-    """Make each connection, or sync it again; the directory is made again. Returns (team, name) of each."""
+def connect(world: company.World, app: dict, storage: str = "index") -> list[tuple[str, str]]:
+    """Make each connection, or sync it again, switching it to this run's storage when it keeps the other (F11a: its
+    full read rewrites everything); the directory is made again. Returns (team, name) of each."""
     made = []
-    for team, kind, body in plan(world):
+    for team, kind, body in plan(world, storage):
         path = f"/v1/workspaces/{team}/connections/{body['name']}"
-        exists = api("GET", path, ADMIN).status_code == 200
-        r = api("POST", f"{path}/refresh", ADMIN) if exists else api("POST", f"/v1/workspaces/{team}/connections/{kind}", ADMIN, json=body)
-        if r.status_code not in (201, 202):
+        held = api("GET", path, ADMIN)
+        if held.status_code != 200:
+            r = api("POST", f"/v1/workspaces/{team}/connections/{kind}", ADMIN, json=body)
+        elif (held.json()["settings"].get("storage") or "index") != storage:
+            r = api("PATCH", path, ADMIN, json={"storage": storage})
+        else:
+            r = api("POST", f"{path}/refresh", ADMIN)
+        if r.status_code not in (200, 201, 202):
             raise SystemExit(f"{body['name']}: {r.status_code} {r.text[:200]}")
         made.append((team, body["name"]))
     path = f"/v1/workspaces/company/connections/{DIRECTORY}"
@@ -271,14 +277,14 @@ def load_units(world: company.World) -> dict[str, str]:
     return ids
 
 
-def load(world: company.World) -> dict[str, str]:
+def load(world: company.World, storage: str = "index") -> dict[str, str]:
     wrong = company.problems(world)
     if wrong:
         raise SystemExit("the company's truth is inconsistent:\n  " + "\n  ".join(wrong))
     keycloak_people(world)
     teams()
     started = datetime.now(timezone.utc)
-    made = connect(world, serve(world))
+    made = connect(world, serve(world), storage)
     wait_synced(made, started)
     for p in (p for p in world.people if p.username):  # signing in links each person to their accounts, by email
         r = api("GET", "/v1/whoami", p.username)
@@ -529,16 +535,23 @@ WHERE u.created_by = 'extraction' AND u.status = 'proposed' AND w.slug = ANY(%s)
 """
 
 
-def extraction_check(world: company.World) -> tuple[list[str], list[str]]:
+def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[str], list[str]]:
     """F2 on the retailer: two teams opt in with the fake model; every proposal cites one of their pages or tickets,
     never a chat thread, and each person sees exactly the proposals whose document they can open. Which documents are
-    pages and tickets comes from the truth, never from the code under test. Returns (leaks, missing)."""
+    pages and tickets comes from the truth, never from the code under test. With pointers only (F11a), nothing is
+    proposed at all: a pointer keeps no text to extract from. Returns (leaks, missing)."""
     pages = sorted({d.source for d in world.docs if d.source in company.LOADED} - {"slack"})
     for team in EXTRACT_TEAMS:
         model_for_stores(team)
         r = api("PUT", f"/v1/workspaces/{team}/extraction", ADMIN, json={"model": "smoke-fake"})
         if r.status_code != 200:
             raise SystemExit(f"extraction for {team}: {r.status_code} {r.text[:200]}")
+    if pointer:
+        time.sleep(90)  # a pass a minute: long enough for one to run, had it anything to read
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            found = conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall()
+        print(f"\nExtraction (F2) with pointers only: {len(found)} proposals (none, since no text is kept)\n")
+        return [f"a proposal ({p['id']}) was extracted from {p['external_key']}, a pointer" for p in found], []
     deadline, counts = time.monotonic() + 600, {}
     with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
         while time.monotonic() < deadline:
@@ -662,15 +675,17 @@ def main(argv: list[str]) -> int:
     arg = lambda name, default: int(argv[argv.index(name) + 1]) if name in argv else default
     seed, stores = arg("--seed", DEFAULT[0]), arg("--stores", DEFAULT[1])
     world = company.build(seed, stores)
+    pointer = "--pointer" in argv  # F11a: Confluence, Jira, and Slack keep pointers only; measured as its own set
+    name = "company-pointer" if pointer else "company"
     api_ready()
-    ids = load(world)
+    ids = load(world, "pointer" if pointer else "index")
     if "--load-only" in argv:
         print(f"{company.COMPANY} is loaded ({stores} stores, seed {seed}): sign in as ana, cora, kai, or another of its people "
               "(password: <name>-dev-only).")
         return 0
     leaks, missing = readers_check(world)
     unit_leaks, unit_missing = units_check(world, ids)
-    extract_leaks, extract_missing = extraction_check(world)
+    extract_leaks, extract_missing = extraction_check(world, pointer)
     merge_leaks, merge_missing = consolidation_check(world, ids)
     leaks, missing = leaks + unit_leaks + extract_leaks + merge_leaks, missing + unit_missing + extract_missing + merge_missing
     card, retrieval_leaks, wrong_units = score(world, out, ids)
@@ -688,10 +703,10 @@ def main(argv: list[str]) -> int:
         print(f"  Not held to the baseline: it's recorded for seed {DEFAULT[0]} and {DEFAULT[1]} stores.", file=out)
         return 0
     if recording:
-        print(json.dumps(evals.with_set("company", card), indent=2, sort_keys=True), file=baseline_out)
-        print(f"  Recorded as the company's baseline: commit {evals.BASELINE.name}.", file=out)
+        print(json.dumps(evals.with_set(name, card), indent=2, sort_keys=True), file=baseline_out)
+        print(f"  Recorded as the {name} baseline: commit {evals.BASELINE.name}.", file=out)
         return 0
-    return evals.gate("company", card, out, {q.id: q.kind for q in world.questions})
+    return evals.gate(name, card, out, {q.id: q.kind for q in world.questions})
 
 
 if __name__ == "__main__":

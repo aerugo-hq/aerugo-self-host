@@ -142,7 +142,8 @@ JOIN embedding_models m ON m.status = 'active' AND m.org_id = c.org_id
        OR (m.workspace_id IS NULL AND NOT EXISTS (
              SELECT 1 FROM embedding_models o WHERE o.workspace_id = wd.workspace_id AND o.status = 'active')))
 LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id AND e.model_id = m.id
-WHERE e.chunk_id IS NULL OR e.context < %s  -- not embedded yet, or embedded the older way (Q2)
+WHERE c.body IS NOT NULL  -- a pointer's chunks are embedded at its sync, from text never kept (F11a)
+  AND (e.chunk_id IS NULL OR e.context < %s)  -- not embedded yet, or embedded the older way (Q2)
 LIMIT 512
 """
 EMBED_BATCH = 64
@@ -190,6 +191,7 @@ SELECT d.id, d.org_id, d.external_key, d.title, d.source_uri, d.source_version, 
 FROM documents d
 LEFT JOIN concepts c ON c.document_id = d.id AND c.tier = 'bronze'
 WHERE d.tier = 'evidence'  -- curated documents are concepts already
+  AND d.storage = 'index'  -- a pointer keeps no text to make one from (F11a)
   AND (c.id IS NULL OR c.source_hash IS DISTINCT FROM d.content_hash
        OR c.acl_principals IS DISTINCT FROM d.acl_principals)
 LIMIT 200

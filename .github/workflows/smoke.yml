@@ -67,6 +67,12 @@ jobs:
       - name: Question sets per team, F7 (each team's questions asked as its people; no leak; each team at its baseline)
         run: make eval-teams
 
+      - name: The retailer with pointers only, F11a (no text kept; answers read it live, for who the source lists; no leak; no regression)
+        run: make eval-company-pointer
+
+      - name: No pointer's text in the services' logs (F11a's smoke check plants it in every source it reads)
+        run: test "$(docker compose --profile smoke logs --no-color api worker mcp 2>&1 | grep -c ptr-marker)" = 0
+
       - name: Service logs
         if: failure()
         run: docker compose --profile smoke logs --no-color --tail=300

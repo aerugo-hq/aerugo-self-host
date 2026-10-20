@@ -716,10 +716,15 @@ class Handler(BaseHTTPRequestHandler):
         read = lambda kind, who: {"principal": {"type": kind, "id": who}, "operation": {"key": "read", "targetType": "space"}}
         if rest == "rest/api/user/current":
             return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
-        if len(parts) == 4 and parts[:3] == ["api", "v2", "pages"] and parts[3] in content:  # one page, its body left out
-            c = content[parts[3]]
-            return self._json(200, {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"),
-                                    "version": {"number": c.get("version", 1), "createdAt": c.get("modified", "2026-01-01T00:00:00.000Z")}})
+        kind_of = {str(c["id"]): kind for s in spaces.values() for kind in ("pages", "blogposts") for c in s.get(kind, [])}
+        space_of = {str(c["id"]): str(s["id"]) for s in spaces.values() for kind in ("pages", "blogposts") for c in s.get(kind, [])}
+        if len(parts) == 4 and parts[:3] in (["api", "v2", "pages"], ["api", "v2", "blogposts"]) and kind_of.get(parts[3]) == parts[2]:
+            c = content[parts[3]]  # one page or post; its body only when asked for (a pointer's, read live: F11a)
+            if q.get("body-format") == "storage":
+                state.setdefault("page_reads", []).append(parts[3])
+            return self._json(200, {"id": str(c["id"]), "title": c["title"], "parentId": c.get("parentId"), "spaceId": space_of[parts[3]],
+                                    "version": {"number": c.get("version", 1), "createdAt": c.get("modified", "2026-01-01T00:00:00.000Z")},
+                                    **({"body": {"storage": {"value": c.get("body", "")}}} if q.get("body-format") == "storage" else {})})
         if rest == "api/v2/spaces":
             keys = set(q["keys"].split(",")) if q.get("keys") else None
             return self._json(200, {"results": [{"id": str(s["id"]), "key": k, "name": s["name"]} for k, s in spaces.items()
@@ -849,7 +854,8 @@ class Handler(BaseHTTPRequestHandler):
             oldest = float(q.get("oldest") or 0)
             if q.get("cursor") is None:
                 state.setdefault("history_calls", []).append({"channel": q.get("channel"), "oldest": oldest})  # H6
-            top = sorted((m for m in channel.get("messages", []) if float(m["ts"]) > oldest), key=lambda m: -float(m["ts"]))
+            latest = float(q.get("latest") or "inf")
+            top = sorted((m for m in channel.get("messages", []) if oldest < float(m["ts"]) < latest), key=lambda m: -float(m["ts"]))
             return page("messages", [{k: v for k, v in m.items() if k != "replies"} for m in top], has_more=False)
         if method == "conversations.replies":
             parent = next((m for m in channel.get("messages", []) if m["ts"] == q.get("ts")), None)
@@ -971,6 +977,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"accountId": "aerugo-bot", "displayName": "Aerugo bot"})
         if rest == "project/search":
             return self._json(200, {"values": [{"id": k, "key": k, "name": p["name"]} for k, p in projects.items()], "isLast": True})
+        as_issue = lambda i: {"id": i["key"], "key": i["key"], "fields": {
+            "summary": i["summary"], "description": doc(i.get("description", "")), "updated": i.get("updated", "2026-10-01T10:00:00.000+0000"),
+            "security": i.get("security"), "issuetype": {"name": "Task"}, "status": {"name": "To Do"}, "labels": [],
+            "assignee": i.get("assignee"), "reporter": {"displayName": "Smoke"},
+            "resolution": i.get("resolution"), "resolutiondate": i.get("resolutiondate"),
+            "attachment": [{"id": a["id"], "filename": a["filename"], "size": len(a["text"]),
+                            "content": f"http://{self.headers.get('Host')}/{url.path.split('/')[1]}/rest/api/3/attachment/content/{a['id']}"} for a in i.get("attachments", [])],
+            "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": c.get("created", "2026-10-01T10:00:00.000+0000"),
+                                      "body": doc(c["body"])} for c in i.get("comments", [])]}}}
         if rest == "search/jql":  # project = KEY, and when a sync asks for changes only (H6), AND updated >= -Nm
             from datetime import datetime, timedelta, timezone
             jql = q.get("jql", "")
@@ -979,18 +994,13 @@ class Handler(BaseHTTPRequestHandler):
             within = re.search(r"updated >= -(\d+)m", jql)
             recent = lambda i: not within or datetime.strptime(i.get("updated", "2026-10-01T10:00:00.000+0000"), "%Y-%m-%dT%H:%M:%S.%f%z") \
                 >= datetime.now(timezone.utc) - timedelta(minutes=int(within[1]))
-            issues = [{"id": i["key"], "key": i["key"], "fields": {
-                "summary": i["summary"], "description": doc(i.get("description", "")), "updated": i.get("updated", "2026-10-01T10:00:00.000+0000"),
-                "security": i.get("security"), "issuetype": {"name": "Task"}, "status": {"name": "To Do"}, "labels": [],
-                "assignee": i.get("assignee"), "reporter": {"displayName": "Smoke"},
-                "resolution": i.get("resolution"), "resolutiondate": i.get("resolutiondate"),
-                "attachment": [{"id": a["id"], "filename": a["filename"], "size": len(a["text"]),
-                                "content": f"http://{self.headers.get('Host')}/{url.path.split('/')[1]}/rest/api/3/attachment/content/{a['id']}"} for a in i.get("attachments", [])],
-                "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": c.get("created", "2026-10-01T10:00:00.000+0000"),
-                                          "body": doc(c["body"])} for c in i.get("comments", [])]}}}
-                for i in projects.get(key, {}).get("issues", []) if recent(i)]
+            issues = [as_issue(i) for i in projects.get(key, {}).get("issues", []) if recent(i)]
             return self._json(200, {"issues": issues, "isLast": True})
         parts = rest.split("/")
+        if len(parts) == 2 and parts[0] == "issue":  # one issue: a pointer's text, read live (F11a), each read recorded
+            found = next((i for p in projects.values() for i in p.get("issues", []) if i["key"] == parts[1]), None)
+            site.setdefault("issue_reads", []).append(parts[1])
+            return self._json(200, as_issue(found)) if found else self._json(404, {"errorMessages": ["Issue does not exist"]})
         if len(parts) == 3 and parts[:2] == ["attachment", "content"]:  # an attachment's bytes (Q7)
             time.sleep(min(float(site.get("delay") or 0), 5))  # a slow site, when smoke asks: a sync then takes a while (C1)
             found = next((a for p in projects.values() for i in p.get("issues", []) for a in i.get("attachments", []) if a["id"] == parts[2]), None)

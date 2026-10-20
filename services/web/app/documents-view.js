@@ -193,6 +193,7 @@ export function Reader({ id, team, doc = null, spaceName = "" }) {
       h(Tier, { tier: tierOf(shown.tier) }),
       about && about.classification ? h("span", null, cap(about.classification)) : null,
       about && about.source ? h("span", null, `From ${kindLabel(about.source)}`) : null,
+      about && about.storage === "pointer" ? h("span", { title: "Aerugo keeps only its title and readers: its text was read from the source just now, for you" }, "Read live") : null,
       about && about.created_at ? h("span", null, `Added ${ago(about.created_at)}`) : null),
     h("div", { className: "prose doc-body" }, body.length ? body : h("p", { className: "muted" }, "This document has no text to show.")),
     related.length ? h("section", { className: "reader-related", "aria-labelledby": "related-h" },

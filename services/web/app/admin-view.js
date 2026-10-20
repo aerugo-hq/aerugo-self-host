@@ -365,9 +365,9 @@ export const CONNECTORS = [
   { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta, Google Workspace, or Microsoft Entra): a leaver's matched access goes at once. Google's and Entra's groups also reach the files shared with them.", ready: true, action: "Connect" },
 ];
 const EVERY = [[15, "Every 15 minutes"], [60, "Every hour"], [360, "Every 6 hours"], [1440, "Every day"]];
-const blankJira = { name: "jira", api_base: "", email: "", api_token: "", projects: "", company_site: false, every_minutes: 60, credential_ref: "" };
+const blankJira = { name: "jira", api_base: "", email: "", api_token: "", projects: "", company_site: false, every_minutes: 60, credential_ref: "", storage: "index" };
 const blankConfluence = { name: "confluence", api_base: "", email: "", api_token: "", spaces: "", labels: "", page_trees: "",
-                          company_site: false, every_minutes: 60, credential_ref: "" };
+                          company_site: false, every_minutes: 60, credential_ref: "", storage: "index" };
 const list = (text, upper = false) => (text.trim() ? text.split(/[\s,]+/).filter(Boolean).map((x) => (upper ? x.toUpperCase() : x)) : null);
 const blankDrive = { name: "drive", key: "", domain: "", drives: "", every_minutes: 60, credential_ref: "" };
 const blankNotion = { name: "notion", token: "", every_minutes: 60, credential_ref: "" };
@@ -382,7 +382,10 @@ const CATALOG_KINDS = {
   datahub: { label: "DataHub", lede: "Create a DataHub user for Aerugo and an access token for it. DataHub's view policies can't be read with a token, so a dataset is readable only by the people DataHub names as its owners." },
 };
 const blankM365 = { name: "microsoft", tenant_id: "", client_id: "", certificate: "", sites: "", every_minutes: 60, credential_ref: "" };
-const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "" };
+const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "", storage: "index" };
+// F11a: how a connection keeps what it reads; only these sources can read their text again live
+const POINTER_KINDS = new Set(["jira", "confluence", "slack"]);
+const STORAGE = [["index", "Its text, indexed"], ["pointer", "Pointers only: text read live when someone asks"]];
 const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_token: "", key: "", admin_email: "", tenant_id: "", client_id: "",
                          certificate: "", every_minutes: 60, credential_ref: "" };
 // The scope list each kind has, to edit in place: its field, its label, and an example.
@@ -529,7 +532,7 @@ function Connections({ ws, teams, orgAdmin }) {
         name: form.name.trim(), api_base: form.api_base.trim().replace(/\/+$/, ""),
         email: byRef ? null : form.email.trim(), api_token: byRef ? null : form.api_token, credential_ref: byRef || null,
         projects: form.projects.trim() ? form.projects.split(/[\s,]+/).filter(Boolean).map((p) => p.toUpperCase()) : null,
-        company_site: form.company_site, every_minutes: Number(form.every_minutes) } });
+        company_site: form.company_site, every_minutes: Number(form.every_minutes), storage: form.storage } });
       setChosen(null);
       setGallery(false);
       setForm(blankJira);
@@ -612,7 +615,7 @@ function Connections({ ws, teams, orgAdmin }) {
       await kl(`workspaces/${enc(ws)}/connections/slack`, { method: "POST", body: {
         name: sl.name.trim(), bot_token: byRef ? null : sl.bot_token.trim(), credential_ref: byRef || null,
         channels: list(sl.channels, true), company_workspace: sl.company_workspace, history_days: Number(sl.history_days),
-        every_minutes: Number(sl.every_minutes) } });
+        every_minutes: Number(sl.every_minutes), storage: sl.storage } });
       setChosen(null);
       setGallery(false);
       setSl(blankSlack);
@@ -633,7 +636,7 @@ function Connections({ ws, teams, orgAdmin }) {
         name: cf.name.trim(), api_base: cf.api_base.trim().replace(/\/+$/, "").replace(/\/wiki$/, ""),
         email: byRef ? null : cf.email.trim(), api_token: byRef ? null : cf.api_token, credential_ref: byRef || null,
         spaces: list(cf.spaces, true), labels: list(cf.labels.toLowerCase()), page_trees: list(cf.page_trees),
-        company_site: cf.company_site, every_minutes: Number(cf.every_minutes) } });
+        company_site: cf.company_site, every_minutes: Number(cf.every_minutes), storage: cf.storage } });
       setChosen(null);
       setGallery(false);
       setCf(blankConfluence);
@@ -700,7 +703,8 @@ function Connections({ ws, teams, orgAdmin }) {
       const d = await kl(`workspaces/${enc(ws)}/connections/${enc(c.name)}`);
       const scope = SCOPES[c.kind];
       const held = (d.settings || {});
-      setEdit({ every_minutes: held.every_minutes ? String(held.every_minutes) : "", scope: scope ? (held[scope[0]] || []).join(", ") : "" });
+      setEdit({ every_minutes: held.every_minutes ? String(held.every_minutes) : "", scope: scope ? (held[scope[0]] || []).join(", ") : "",
+                storage: held.storage || "index", held_storage: held.storage || "index" });
     } catch (e) {
       setEditing(null);
       setError(e.message);
@@ -711,6 +715,7 @@ function Connections({ ws, teams, orgAdmin }) {
     const scope = SCOPES[c.kind];
     const body = {};
     if (edit.every_minutes) body.every_minutes = Number(edit.every_minutes);
+    if (POINTER_KINDS.has(c.kind) && edit.storage !== edit.held_storage) body.storage = edit.storage;
     if (scope && edit.scope.trim()) body[scope[0]] = edit.scope.split(/[\s,]+/).filter(Boolean).map((x) => (c.kind === "jira" || c.kind === "confluence" ? x.toUpperCase() : x));
     say(c.name, "idle", "Saving…");
     try {
@@ -752,6 +757,8 @@ function Connections({ ws, teams, orgAdmin }) {
   const setN = (key) => (e) => setNt({ ...nt, [key]: e.target.value });
   const setK = (key) => (e) => setCt({ ...ct, [key]: e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
+  const storageField = (value, onChange) => field("Keep", h("select", { className: "select", value, onChange }, STORAGE.map(([v, label]) => h("option", { key: v, value: v }, label))),
+    "Pointers only keeps titles, readers, and embeddings, never the text: answers read it from the source for each asker, keyword search and attachments are left out, and changing this reads everything again.");
   const api = `${typeof window === "undefined" ? "" : window.location.origin.replace(":3000", ":8000")}/v1/workspaces/${ws}`;
   const steps = {
     jira: () => h("form", { className: "panel-body connector-form", onSubmit: connectJira },
@@ -762,6 +769,7 @@ function Connections({ ws, teams, orgAdmin }) {
       form.credential_ref ? null : field("API token", h("input", { className: "input mono", type: "password", value: form.api_token, onChange: set("api_token"), required: true, autoComplete: "off" }), "Stored in OpenBao and never shown again."),
       field("Projects", h("input", { className: "input mono", value: form.projects, onChange: set("projects"), placeholder: "EDP, PAY" }), "Leave empty for every project the account can browse."),
       field("Sync", h("select", { className: "select", value: form.every_minutes, onChange: set("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      storageField(form.storage, set("storage")),
       h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: form.company_site, onChange: set("company_site") }),
         h("span", null, h("b", null, "This Jira site is our company's own. "), "Then a project anyone in Jira may browse is readable by everyone in the org. Leave it off for a partner's or a vendor's site: its projects stay with the people Jira names.")),
       h("details", { className: "connector-wide" }, h("summary", null, "Use a secret the team keeps in OpenBao instead"),
@@ -780,6 +788,7 @@ function Connections({ ws, teams, orgAdmin }) {
       field("Labels", h("input", { className: "input mono", value: cf.labels, onChange: setC("labels"), placeholder: "runbook, decision" }), "Only pages with one of these labels. Leave empty for every page."),
       field("Page trees", h("input", { className: "input mono", value: cf.page_trees, onChange: setC("page_trees"), placeholder: "123456789" }), "Only these pages and everything under them, by the number in a page's address."),
       field("Sync", h("select", { className: "select", value: cf.every_minutes, onChange: setC("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      storageField(cf.storage, setC("storage")),
       h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: cf.company_site, onChange: setC("company_site") }),
         h("span", null, h("b", null, "This Confluence site is our company's own. "), "Then a space anyone in Confluence may view is readable by everyone in the org, and restrictions still narrow it. Leave it off for a partner's or a vendor's site.")),
       h("details", { className: "connector-wide" }, h("summary", null, "Use a secret the team keeps instead"),
@@ -830,6 +839,7 @@ function Connections({ ws, teams, orgAdmin }) {
       field("History", h("input", { className: "input", type: "number", min: 1, max: 3650, value: sl.history_days, onChange: setS("history_days"), required: true }),
         "Days back it reads. Older messages leave the index."),
       field("Sync", h("select", { className: "select", value: sl.every_minutes, onChange: setS("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      storageField(sl.storage, setS("storage")),
       h("label", { className: "check connector-wide" }, h("input", { type: "checkbox", checked: sl.company_workspace, onChange: setS("company_workspace") }),
         h("span", null, h("b", null, "This Slack workspace is our company's own. "), "Then a public channel is readable by everyone in the org. Leave it off otherwise: each channel stays with its members. A channel shared with another organization always stays with this workspace's members.")),
       h("details", { className: "connector-wide" }, h("summary", null, "Use a token the team keeps in OpenBao instead"),
@@ -980,6 +990,7 @@ function Connections({ ws, teams, orgAdmin }) {
     return h("form", { className: "connector-form connection-edit", onSubmit: (e) => saveEdit(e, c), "aria-label": `Edit ${c.name}` },
       field("Sync", h("select", { className: "select", value: edit.every_minutes, onChange: (e) => setEdit({ ...edit, every_minutes: e.target.value }) },
         h("option", { value: "" }, "The deployment's default"), choices.map(([m, label]) => h("option", { key: m, value: String(m) }, label)))),
+      POINTER_KINDS.has(c.kind) ? storageField(edit.storage, (e) => setEdit({ ...edit, storage: e.target.value })) : null,
       scope ? field(scope[1], h("input", { className: "input mono", value: edit.scope, placeholder: scope[2], onChange: (e) => setEdit({ ...edit, scope: e.target.value }) }),
         "Comma-separated. It can change, not be removed: to read everything again, connect it again.") : null,
       h("div", { className: "actions connector-wide" },
@@ -1005,7 +1016,8 @@ function Connections({ ws, teams, orgAdmin }) {
           h("tbody", null, items.flatMap((c) => [h("tr", { key: c.name },
             h("td", null, h("div", { className: "title" }, c.name,
                 c.managed_by ? h("span", { className: "tag tf-tag", title: managedTitle(c.managed_by) }, toolName(c.managed_by.by)) : null),
-              h("div", { className: "sub" }, h(SourceIcon, { kind: c.kind }), " ", c.kind)),
+              h("div", { className: "sub" }, h(SourceIcon, { kind: c.kind }), " ", c.kind,
+                c.storage === "pointer" ? h("span", { className: "tag", title: "Its text isn't kept: answers and the reader read it from the source for each person" }, "Pointers only") : null)),
             h("td", null, note[c.name] ? h(Status, { tone: note[c.name][0] }, note[c.name][1])
               : h(Status, { tone: tone(c.status) }, c.status.charAt(0).toUpperCase() + c.status.slice(1))),
             h("td", { className: "hide-sm" }, every(c.every_minutes)),

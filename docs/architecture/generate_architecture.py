@@ -171,7 +171,7 @@ p = Page("3. What's stored", "Data residency: does Aerugo keep a copy?",
 modes = [("<b>A. Index</b> (today)", 60, [True, True, True, True, True],
           "<b>Best answers, fastest.</b> Works when a source is down. A protected copy of text exists: encrypted, "
           "permission-checked, deleted when the source deletes it."),
-         ("<b>B. Pointer</b> (recommended when copies aren't allowed)", 560, [True, True, True, True, False],
+         ("<b>B. Pointer</b> (built for Confluence, Jira, and Slack)", 560, [True, True, True, True, False],
           "<b>No second copy of content.</b> Text is fetched from the source at answer time and thrown away after. "
           "Slower, and depends on the source being up. Embeddings still reveal meaning: protect them."),
          ("<b>C. Live only</b>", 1060, [True, True, False, False, False],
@@ -189,7 +189,7 @@ for title, x, flags, note in modes:
 p.box("<b>How B works when someone asks</b>", 60, 630, 600, 30, "text;html=1;fontSize=14;")
 flow = ["Person asks", "Find candidates: pointers, embeddings, facts", "Check their permission in the source",
         "Fetch only the passages needed, live", "Answer with citations", "Discard the text: nothing kept"]
-fb = [p.box(t, 60 + i * 255, 680, 225, 70, S_PEOPLE if i in (0, 4) else (S_SEC if i == 2 else S_NEW)) for i, t in enumerate(flow)]
+fb = [p.box(t, 60 + i * 255, 680, 225, 70, S_PEOPLE if i in (0, 4) else (S_SEC if i == 2 else S_BUILT)) for i, t in enumerate(flow)]
 for a, b in zip(fb, fb[1:]):
     p.edge(a, b)
 p.box("<b>What can't be pointer-only:</b> the map. \"Who uses this table\", \"what feeds this report\", \"which repos "
@@ -208,7 +208,7 @@ steps = [("Ask", "in Teams, the web app, a phone, or the IDE", S_PEOPLE),
          ("Who's asking", "sign-in, their team, role, and location", S_SEC),
          ("Find", "knowledge units first, then documents and the Atlas", S_BUILT),
          ("Filter", "only what this person may see, in the database itself", S_SEC),
-         ("Fetch", "in pointer mode, the passages needed, live from the source", S_NEW),
+         ("Fetch", "in pointer mode, the passages needed, live from the source", S_BUILT),
          ("Think", "a playbook's steps, with the company's approved model", S_NEW),
          ("Check", "every claim against its evidence; drop what isn't supported", S_SEC),
          ("Answer", "citations, confidence, and both sides when teams disagree", S_PEOPLE),

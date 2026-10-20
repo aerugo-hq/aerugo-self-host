@@ -4858,6 +4858,167 @@ def slack_hooks_are_signed_fresh_and_taken_once():
             conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:slack.U%{tag}",))
 
 
+POINTER_MARK = "ptr-marker"  # F11a: in every source text the pointer check plants, so CI can grep the API's and worker's logs
+
+
+def stored_anywhere(text: str) -> list[str]:
+    """The tables holding `text` in any column, read as the owner (no row-level security), every schema of the database."""
+    from psycopg import sql
+    with psycopg.connect(OWNER_DB) as conn:
+        tables = conn.execute("SELECT schemaname, tablename FROM pg_tables "
+                              "WHERE schemaname NOT IN ('pg_catalog', 'information_schema')").fetchall()
+        return [f"{s}.{t}" for s, t in tables
+                if conn.execute(sql.SQL("SELECT count(*) FROM {}.{} x WHERE x::text LIKE %s").format(sql.Identifier(s), sql.Identifier(t)),
+                                (f"%{text}%",)).fetchone()[0]]
+
+
+@check
+def pointer_mode_keeps_no_text_and_reads_it_live_for_who_the_source_lists():
+    """F11a, pointer mode: a Confluence, Jira, and Slack connection switched from indexed to pointers only keeps none of their text (no body or heading, no bronze page, entities, or references, nothing in any table), and any other source refuses it; search finds them by title with no snippet; Ask and the reader read each from its source now, only for someone the source still lists (one it stopped listing gets nothing, though the index still names them), the text reaching the model's prompt and stored nowhere, not even in the conversation"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    mark = {k: f"{POINTER_MARK}-{k}-{tag.lower()}" for k in ("jira", "confluence", "slack")}
+    atl = {u: {"accountId": f"557058:ptr{u}{tag.lower()}", "emailAddress": f"{u}@acme.test", "displayName": u.title()} for u in ("alice", "carol")}
+    uid = {u: f"UPTR{u.upper()}{tag}" for u in ("alice", "carol")}
+    project, space, channel, page_id = f"PTR{tag}", f"PTRC{tag}", f"CPTR{tag}", str(int(tag, 16) * 10 + 1)
+    ts = lambda n: f"17600{n:05d}.000{n:03d}"
+
+    def jira(browsers):
+        return {"projects": {project: {"name": f"Pointer {tag}", "company_wide": False, "browsers": [atl[u] for u in browsers], "issues": [
+            {"key": f"{project}-1", "summary": f"Pointer plan {tag}", "description": f"The dual run lasts {mark['jira']} days.",
+             "attachments": [{"id": f"{int(tag, 16)}9", "filename": "plan.txt", "text": f"Attached plan {tag}."}]}]}}}
+
+    def confluence(restricted):
+        return {"users": {a["accountId"]: {"email": a["emailAddress"], "name": a["displayName"]} for a in atl.values()}, "groups": {},
+                "spaces": {space: {"id": str(int(tag, 16) * 10 + 9), "name": f"Pointer space {tag}", "users": [a["accountId"] for a in atl.values()],
+                                   "pages": [{"id": page_id, "title": f"Pointer runbook {tag}", "version": 1,
+                                              "body": f"<h2>Rollback {tag}</h2><p>Roll back with {mark['confluence']}.</p>",
+                                              **({"restricted_users": [atl[u]["accountId"] for u in restricted]} if restricted else {})}]}}}
+
+    def slack_state(members):
+        return {"users": [{"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}} for u in uid],
+                "channels": {channel: {"name": f"ptr-{tag.lower()}", "private": True, "members": [uid[u] for u in members], "messages": [
+                    {"ts": ts(1), "user": uid["carol"], "text": f"Pointer thread {tag}: {mark['slack']}-opener", "thread_ts": ts(1), "reply_count": 1,
+                     "replies": [{"ts": ts(2), "user": uid["alice"], "text": f"Use {mark['slack']} for the cutover", "thread_ts": ts(1)}]}]}}}
+
+    def set_sources(listed):
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=jira(listed), timeout=10).status_code == 200
+        assert httpx.post(f"{FAKE_CONFLUENCE}/setup", json=confluence([] if listed == ("alice", "carol") else listed), timeout=10).status_code == 200
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=slack_state(listed), timeout=10).status_code == 200
+
+    keys = {"jira": f"jira-{project}-1", "confluence": f"confluence-{page_id}", "slack": f"slack-{channel}-{ts(1)}"}
+    names = {k: f"ptr-{k}-{tag.lower()}" for k in keys}
+    bodies = {"jira": {"api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [project]},
+              "confluence": {"api_base": FAKE_CONFLUENCE, "email": "confluence-bot@acme.test", "api_token": "smoke-confluence-token", "spaces": [space]},
+              "slack": {"api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel], "history_days": 3650}}
+    principals = [(u, f"ext:atlassian.{atl[u]['accountId'].replace(':', '.')}") for u in atl] + [(u, f"ext:slack.{uid[u]}") for u in uid]
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in principals}
+    conversations = []
+
+    def docs() -> dict:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return {r["external_key"]: r for r in conn.execute(
+                """SELECT d.external_key, d.storage, count(c.id) AS chunks, count(c.body) AS bodies, count(c.heading_path) AS headings,
+                          (SELECT count(*) FROM kl.chunk_embeddings e JOIN kl.chunks x ON x.id = e.chunk_id WHERE x.document_id = d.id) AS embedded,
+                          (SELECT count(*) FROM kl.concepts k WHERE k.document_id = d.id AND k.tier = 'bronze') AS bronze,
+                          (SELECT count(*) FROM kl.entity_mentions m WHERE m.document_id = d.id) AS entities
+                   FROM kl.documents d LEFT JOIN kl.chunks c ON c.document_id = d.id
+                   WHERE d.external_key = ANY(%s) OR d.external_key LIKE %s GROUP BY d.id""",
+                (list(keys.values()), f"jira-att-{int(tag, 16)}%")).fetchall()}
+
+    def until(ok, seconds=150):
+        deadline = time.monotonic() + seconds
+        while not ok():
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(3)
+        return True
+
+    def asked(user):  # one conversation, answering from the three documents; returns the answer and what the model read
+        reset_fake()
+        r = api("POST", "/v1/conversations", user, json={"question": f"What do the pointer pages {tag} say?", "model": "payments/smoke-fake",
+                                                         "focus": list(keys.values())})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:300]}"
+        conversations.append((user, r.json()["conversation"]["id"]))
+        return r.json(), "\n".join(fake_prompts())
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in principals:  # both have linked their Atlassian and Slack accounts
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    ensure_fake_models()
+    try:
+        set_sources(("alice", "carol"))
+        refused = api("POST", "/v1/workspaces/payments/connections/notion", "alice",
+                      json={"name": f"ptr-notion-{tag.lower()}", "token": "ntn_" + "x" * 30, "storage": "pointer"})
+        assert refused.status_code == 422 and "only Confluence, Jira, and Slack" in refused.text, f"{refused.status_code} {refused.text[:200]}"
+        for k, body in bodies.items():  # indexed first, as before F11a
+            r = api("POST", f"/v1/workspaces/payments/connections/{k}", "alice", json={"name": names[k], "every_minutes": 60, **body})
+            assert r.status_code == 201, f"{k}: {r.status_code} {r.text[:200]}"
+        assert until(lambda: all(docs().get(key, {}).get("bodies") for key in keys.values())), f"the indexed documents never arrived: {docs()}"
+        assert until(lambda: docs()[keys["jira"]]["bronze"] == 1), "the indexed issue never got its bronze page"
+        assert {mark["jira"], mark["confluence"]} <= {m for m in mark.values() if stored_anywhere(m)}, "the indexed text isn't stored, so nothing is proven"
+        assert any(k.startswith("jira-att-") for k in docs()), "the indexed issue's attachment never arrived"
+
+        for k in keys:  # pointers only, now: discovery's full read rewrites each document
+            r = api("PATCH", f"/v1/workspaces/payments/connections/{names[k]}", "alice", json={"storage": "pointer"})
+            assert r.status_code == 200 and "storage" in r.json()["changed"], f"{k}: {r.status_code} {r.text[:200]}"
+        assert until(lambda: all(docs().get(key, {}).get("storage") == "pointer" for key in keys.values())), f"the switch never landed: {docs()}"
+        held = docs()
+        for k, key in keys.items():
+            d = held[key]
+            assert d["chunks"] and not d["bodies"] and not d["headings"], f"{k}: a pointer kept text: {d}"
+            assert d["embedded"] >= d["chunks"], f"{k}: a pointer wasn't embedded at its sync: {d}"
+            assert not d["bronze"] and not d["entities"], f"{k}: something made from its text stayed: {d}"
+        assert not any(k.startswith("jira-att-") for k in held), "an attachment stayed, though pointers never read one live"
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # its embeddings lost (a model added since, or one that failed)
+            conn.execute("DELETE FROM kl.chunk_embeddings WHERE chunk_id IN (SELECT c.id FROM kl.chunks c JOIN kl.documents d "
+                         "ON d.id = c.document_id WHERE d.external_key = %s)", (keys["jira"],))
+        assert api("POST", f"/v1/workspaces/payments/connections/{names['jira']}/refresh", "alice").status_code == 202
+        assert until(lambda: docs()[keys["jira"]]["embedded"] >= docs()[keys["jira"]]["chunks"]), \
+            "a pointer that lost its embeddings didn't get them back on its next sync"
+        listed = {c["name"]: c for c in api("GET", "/v1/workspaces/payments/connections", "alice").json()["connections"]}
+        assert all(listed[names[k]]["storage"] == "pointer" for k in keys), "the connections' rows don't say they keep pointers"
+        assert api("GET", f"/v1/workspaces/payments/connections/{names['jira']}", "alice").json()["settings"]["storage"] == "pointer"
+        hits = {h["id"]: h for h in api("GET", "/v1/search", "alice", params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+        assert set(keys.values()) <= set(hits), f"search lost a pointer: {sorted(hits)}"
+        assert all(hits[key]["snippet"] is None and hits[key]["section"] is None for key in keys.values()), "search showed a pointer's text"
+        gone = {k: stored_anywhere(m) for k, m in mark.items()}
+        assert not any(gone.values()), f"a pointer's text is still stored: {gone}"
+
+        answer, prompt = asked("alice")
+        assert {c["id"] for c in answer["answer"]["citations"]} == set(keys.values()), answer["answer"]["citations"]
+        assert all(m in prompt for m in mark.values()), "a pointer's passage, read live, never reached the model"
+        read = api("GET", f"/v1/documents/{keys['confluence']}/content", "alice")
+        assert read.status_code == 200 and mark["confluence"] in read.text and read.json()["storage"] == "pointer", read.text[:300]
+
+        set_sources(("carol",))  # the sources stop listing alice; the index, not synced since, still names her
+        answer, prompt = asked("alice")
+        assert not any(m in prompt for m in mark.values()), "someone the source no longer lists got its passage"
+        assert answer["answer"]["citations"] == [], answer["answer"]["citations"]
+        with psycopg.connect(OWNER_DB) as conn:
+            dropped = conn.execute("SELECT details->'dropped_by_source' FROM kl.audit_events WHERE action = 'ask' AND actor = 'alice' "
+                                   "ORDER BY id DESC LIMIT 1").fetchone()[0]
+        assert set(dropped) == set(keys.values()), f"the live check isn't what kept them out: {dropped}"
+        assert api("GET", f"/v1/documents/{keys['jira']}/content", "alice").status_code == 404, "the reader showed what the source no longer lets her read"
+        answer, prompt = asked("carol")
+        assert all(m in prompt for m in mark.values()), "someone the source still lists lost the passages"
+        gone = {k: stored_anywhere(m) for k, m in mark.items()}
+        assert not any(gone.values()), f"a passage read live was stored (the conversations, the audit, anywhere): {gone}"
+    finally:
+        for k in keys:
+            api("DELETE", f"/v1/workspaces/payments/connections/{names[k]}", "alice")
+        for user, cid in conversations:
+            api("DELETE", f"/v1/conversations/{cid}", user)
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
+            conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s OR external_id LIKE %s",
+                         (f"%ptr%{tag.lower()}", f"UPTR%{tag}"))
+
+
 @check
 def credentials_can_live_in_vault_aws_or_azure_fenced_per_team():
     """G3, the company's own secret stores: a connection's credential can be a reference to HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault, each read by the worker as the runner itself (Vault's JWT login, an assumed role, workload identity federation), never stored; each store is fenced per team by the secret's name, so another team's secret, a store or place the deployment doesn't allow, and a malformed reference are refused"""

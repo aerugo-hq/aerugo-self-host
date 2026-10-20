@@ -43,6 +43,8 @@ reads: the bot sets what's indexed, and each message keeps its channel's own rea
   of the window all carry over on that sync. Older messages aren't indexed.
 - **Rate limits:** a 429 is waited out for as long as Slack's `Retry-After` says, then the sync carries on.
 - **It never writes** to Slack.
+- **Its text can stay in the source:** with pointers only, Aerugo keeps each item's title, readers, and embeddings, and
+  reads its text live, for each person the source still lists; see `storage-modes.md`.
 
 ## Connecting it
 

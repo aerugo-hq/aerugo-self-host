@@ -34,7 +34,7 @@ from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .units import router as units_router
-from . import context as asking, experts, gaps, unit_answers, units as unit_store
+from . import context as asking, experts, gaps, live, unit_answers, units as unit_store
 from .extraction import router as extraction_router
 from .gateway import month_usage
 from .connections_api import router as connections_router
@@ -686,6 +686,8 @@ RATE_DEFAULTS = {  # requests a minute: (per person, per team, or per org for se
     "ask": (int(os.environ.get("KL_RATE_ASK_PER_USER", "30")), int(os.environ.get("KL_RATE_ASK_PER_TEAM", "300"))),
     "compile": (int(os.environ.get("KL_RATE_COMPILE_PER_USER", "10")), int(os.environ.get("KL_RATE_COMPILE_PER_TEAM", "60"))),
     "route": (int(os.environ.get("KL_RATE_ROUTE_PER_USER", "10")), int(os.environ.get("KL_RATE_ROUTE_PER_ORG", "300"))),  # F5b
+    # F11a: a pointer opened in the reader is read from its source, so its reads are capped like Ask's, sparing the source
+    "live": (int(os.environ.get("KL_RATE_LIVE_PER_USER", "60")), int(os.environ.get("KL_RATE_LIVE_PER_ORG", "1200"))),
 }
 BUDGET_WARN = 0.8  # past this share of a monthly budget, the team's admins are warned in their audit trail
 
@@ -2254,6 +2256,22 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         alerting.signal(conn, "withheld", "ask", len(withheld))
         if sources:
             budget, refused = budget_gate(conn, org_id, caller, model, endpoint)
+    # F11a: a pointer document's passage, read from its source now, only if the source still lists the asker; dropped after
+    pointers = {r["external_key"] for r in sources if not r.get("unit") and r.get("body") is None}
+    from_source = []  # pointers the source didn't let this asker read just now, or that it couldn't give
+    if pointers:
+        fetched = live.read(org_id, caller, sorted(pointers))
+        kept = []
+        for r in sources:
+            if r["external_key"] in pointers:
+                got = fetched.get(r["external_key"])
+                passage = live.best(question, got) if isinstance(got, list) else None
+                if passage is None:
+                    from_source.append(r["external_key"])
+                    continue
+                r = {**r, "body": passage}
+            kept.append(r)
+        sources = kept
     answer, usage = NOT_FOUND, {}
     answered = bool(sources) and not refused
     if answered:  # the model answers with no transaction open (H5): a slow one holds no database connection
@@ -2291,7 +2309,8 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         audit(conn, org_id, caller.username, "ask", targets, {
             "question": question, "model": model,
             "sources": [r["external_key"] for r in sources], "withheld_by_egress": withheld,
-            "dropped_by_post_check": dropped, "usage": usage, "answer_chars": len(answer), "over_budget": bool(refused),
+            "dropped_by_post_check": dropped, "dropped_by_source": from_source, "usage": usage, "answer_chars": len(answer),
+            "over_budget": bool(refused),
             "follow_up": bool(earlier), "focus": focus or [], "mode": mode, "confidence": sure["level"],
             "units": [r["unit"]["id"] for r in sources if r.get("unit")]})
     if refused:
@@ -2489,7 +2508,7 @@ CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
 TEAM_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 DOCUMENTS_SQL = """
 SELECT d.external_key, d.title, d.tier, d.classification, d.source_kind, d.source_uri, d.created_at, d.audience,
-       d.container_ref, d.source_path,
+       d.container_ref, d.source_path, d.storage,
        -- the container's own name (spaces by name): a connection's, an import's or a pipeline's, or a curated bundle's;
        -- a document a connection owns is named by that connection's container, never another site's of the same key
        coalesce((SELECT cc.display_name FROM connection_containers cc
@@ -2560,6 +2579,7 @@ def list_documents(scope: str = "org", key: str | None = Query(None, max_length=
                        "source": r["source_kind"], "source_uri": r["source_uri"], "workspaces": r["workspaces"],
                        "container": {"ref": r["container_ref"], "name": r["container_name"]},
                        "path": r["source_path"],  # its place in its source: a Confluence page's ancestors
+                       "storage": r["storage"],  # pointer: its text is read from its source when opened (F11a)
                        "created_at": r["created_at"].isoformat()} for r in shown],
         "next_offset": offset + limit if more else None,
         "sources": sources,
@@ -2584,10 +2604,21 @@ def document_content(key: str, caller: Caller = Depends(authenticate)):
     if not found:
         raise HTTPException(404, "document not found")
     org_id = resolve_org_id(config.ORG_SLUG)
+    pointer = found[0].get("storage") == "pointer"
     with scoped(org_id, caller.principals) as conn:
-        rows = conn.execute("SELECT c.heading_path, c.body FROM chunks c JOIN documents d ON d.id = c.document_id "
-                            "WHERE d.external_key = %s ORDER BY c.ordinal LIMIT 2000", (key,)).fetchall()
-        audit(conn, org_id, caller.username, "document.read", [], {"document": key, "sections": len(rows)})
+        rows = [] if pointer else conn.execute(
+            "SELECT c.heading_path, c.body FROM chunks c JOIN documents d ON d.id = c.document_id "
+            "WHERE d.external_key = %s ORDER BY c.ordinal LIMIT 2000", (key,)).fetchall()
+    if pointer:  # F11a: read from its source now, only if it still lists the reader; nothing of it is kept
+        rate_limit(org_id, caller, "live", None)
+        got = live.read(org_id, caller, [key]).get(key)
+        if got == live.UNAVAILABLE:
+            raise HTTPException(502, "its source didn't answer just now; try again")
+        if not isinstance(got, list):
+            raise HTTPException(404, "document not found")
+        rows = [{"heading_path": heading, "body": body} for heading, body in got[:2000]]
+    with scoped(org_id, caller.principals) as conn:
+        audit(conn, org_id, caller.username, "document.read", [], {"document": key, "sections": len(rows), "live": pointer})
     sections, size = [], 0
     for r in rows:
         size += len(r["body"] or "")
@@ -3480,7 +3511,8 @@ def compile_concept(ws: str, body: CompileIn, caller: Caller = Depends(authentic
             raise HTTPException(404, "model not found")
     # Curated concepts aren't compiler input, so ask for extra candidates and keep the top evidence.
     _, visible, dropped = retrieve(org_id, caller, body.topic, [ws], body.max_sources * 3)  # its own transactions (H5)
-    evidence = [r for r in visible if (r.get("tier") or "evidence") == "evidence"][:body.max_sources]
+    evidence = [r for r in visible if (r.get("tier") or "evidence") == "evidence"  # a pointer has no text to draft from (F11a)
+                and r.get("body") is not None][:body.max_sources]
     allowed = set(endpoint["allowed_classifications"])
     withheld = [r["external_key"] for r in evidence if r["classification"] not in allowed]
     with scoped(org_id, caller.principals) as conn:  # who reads each source, and whether the budget allows a draft
