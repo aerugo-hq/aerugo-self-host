@@ -158,7 +158,8 @@ may see its evidence; and the retailer's data estate (F10b), its warehouse movin
 of every node and edge, so each engineering item after it is measured against what's really there; and knowledge units
 (F1), the store the foundation's pipelines fill, each shown only to someone who can read all of its evidence; and
 extraction (F2), a team's own model proposing units from its pages and tickets, each held to its source; and
-consolidation (F3), copies linked and contradictions sent to their owners, never overwritten. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, answers from units (F4): scope, trust, freshness, procedures as checklists. A connector only adds raw material;
+consolidation (F3), copies linked and contradictions sent to their owners, never overwritten; and answers from units
+(F4), the units that answer a question leading Ask's sources with their steps and other views. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
+but for M10's real-vendor half, set aside; next, who is asking (F8): role and location from the directory. A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.

@@ -6306,6 +6306,109 @@ def consolidation_links_duplicates_and_sends_contradictions_to_owners():
 
 
 @check
+def ask_answers_from_knowledge_units_first():
+    """F4, answers from knowledge units first: the unit that answers a question leads Ask's sources, as its text, its steps, and the other views on it, and its citation carries them for a client to show; only someone who reads every piece of its evidence gets it; a superseded version and a model's unconfirmed proposal are never used; a unit goes to a model only when the model may receive every one of its evidence's classifications; a confirmed one counts as verified; MCP answers the same way; and a stored answer that cited a unit is hidden once the unit can't be read"""
+    import uuid
+    from .pipelines import document_key
+    tag = uuid.uuid4().hex[:8]
+    topic, name, repo = f"smoke-f4-{tag}", f"f4-{tag}", f"acme/f4-{tag}"
+    steps = {"steps": [{"text": "Page the payments on-call", "role": "Payments on-call"},
+                       {"text": "Page the finance lead", "condition": "the refund is over $500"}]}
+    question = f"Who handles refunds {tag} over $500?"
+
+    def create(body):
+        r = api("POST", "/v1/workspaces/payments/units", "alice", json={"topic": topic, "evidence": [{"document": "pay-runbook"}], **body})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        return r.json()["id"]
+
+    def ask(user, q=question, model="payments/smoke-fake"):
+        r = ask_as(user, q, model)
+        assert r.status_code == 200, f"{user}: {r.status_code} {r.text[:200]}"
+        return r.json()
+
+    def units_in(answer):
+        return [c["id"] for c in answer["citations"] if c["id"].startswith("unit:")]
+    try:
+        ensure_fake_models()
+        old = create({"kind": "procedure", "title": f"Refund escalation {tag}", "structure": steps,
+                      "text": f"Refunds {tag} over $300 go to the payments on-call."})
+        new = create({"kind": "procedure", "title": f"Refund escalation {tag}", "structure": steps, "supersedes": old,
+                      "text": f"Refunds {tag} over $500 go to the payments on-call, who pages the finance lead."})
+        r = api("POST", f"/v1/units/{new}/perspectives", "alice", json={
+            "holder_kind": "role", "holder": "Finance controller", "context": "month-end",
+            "text": f"Finance approves refunds {tag} over $500 itself.", "evidence": [{"document": "handbook"}]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+
+        reset_fake()
+        got = ask("alice")
+        assert units_in(got) == [f"unit:{new}"] and got["citations"][0]["id"] == f"unit:{new}", \
+            f"the unit didn't lead, or the superseded version came too: {[c['id'] for c in got['citations']]}"
+        cited = got["citations"][0]["unit"]
+        assert cited["kind"] == "procedure" and cited["structure"] == steps and cited["status"] == "proposed", cited
+        assert [p["holder"] for p in cited["perspectives"]] == ["Finance controller"], cited["perspectives"]
+        assert [e["document"] for e in cited["evidence"]] == ["pay-runbook"], cited["evidence"]
+        prompt = " ".join(fake_prompts())
+        assert "1. Page the payments on-call (Payments on-call)." in prompt and "Another view, held by Finance controller" in prompt, \
+            "the unit's steps or the other view didn't reach the model"
+        assert f"Refunds {tag} over $300" not in prompt, "a superseded version reached the model"
+        assert api("POST", f"/v1/units/{new}/confirm", "alice").status_code == 200
+        sure = ask("alice")["confidence"]
+        assert any("verified" in reason for reason in sure["reasons"]), f"a confirmed unit didn't count as verified: {sure}"
+        assert units_in(ask("bob", model="finance/smoke-fake")) == [], "a unit reached someone who can't read its evidence"
+
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            org = str(conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()["id"])
+            team = str(conn.execute("SELECT id FROM kl.workspaces WHERE slug = 'payments'").fetchone()["id"])
+            runbook = conn.execute("SELECT id::text AS id FROM kl.documents WHERE external_key = 'pay-runbook'").fetchone()["id"]
+        with psycopg.connect(INGEST_DB, autocommit=True) as conn:
+            conn.execute("SELECT set_config('kl.org_id', %s, false)", (org,))
+            conn.execute("INSERT INTO kl.knowledge_units (org_id, owner_team, kind, topic, title, body, trust, evidence, sections, created_by) "
+                         "VALUES (%s, %s, 'fact', %s, %s, %s, 'inferred', %s::uuid[], %s, 'smoke')",
+                         (org, team, f"{topic}-inferred", f"Chargebacks {tag}", f"Chargebacks {tag} are answered by the disputes desk.",
+                          [runbook], [""]))
+        assert units_in(ask("alice", f"Who answers chargebacks {tag} at the disputes desk?")) == [], "a model's unconfirmed proposal was used"
+
+        r = api("POST", "/v1/workspaces/payments/pipelines", "alice", json={"name": name, "issuer": FAKE_CI, "repository": repo})
+        assert r.status_code == 201, f"register: {r.status_code} {r.text[:200]}"
+        hold_key = document_key(r.json()["id"], "holds.md")
+        token = httpx.post(f"{FAKE_CI}/token", json={"repository": repo}, timeout=10).json()["token"]
+        r = httpx.post(f"{API}/v1/workspaces/payments/documents", timeout=30, headers={"Authorization": f"Bearer {token}"}, json={"upserts": [{
+            "key": "holds.md", "title": f"Account holds {tag}", "classification": "confidential", "readers": ["group:payments"],
+            "uri": f"https://github.com/{repo}/blob/main/holds.md", "markdown": f"# Account holds {tag}\n\nLitigation holds freeze refunds."}]})
+        assert r.status_code == 202, f"push: {r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 120
+        while api("GET", f"/v1/documents/{hold_key}/content", "alice").status_code != 200 and time.monotonic() < deadline:
+            time.sleep(2)
+        held = create({"kind": "fact", "title": f"Litigation holds {tag}", "evidence": [{"document": "pay-runbook"}, {"document": hold_key}],
+                       "text": f"Litigation holds {tag} freeze refunds for the account under hold."})
+        reset_fake()
+        blocked = ask("alice", f"Do litigation holds {tag} freeze refunds?")
+        assert f"unit:{held}" not in units_in(blocked) and blocked["withheld_by_policy"] >= 1, \
+            f"a unit with confidential evidence went to a model allowed only public and internal: {blocked['citations']}"
+        assert f"freeze refunds for the account" not in " ".join(fake_prompts()), "a confidential unit's text reached the model"
+
+        out = mcp_call("alice", "ask", {"question": question, "model": "payments/smoke-fake"})
+        assert f"unit:{new}" in [c["id"] for c in out["citations"]], f"MCP's answer lacked the unit: {out.get('citations')}"
+
+        r = api("POST", "/v1/conversations", "alice", json={"question": question, "model": "payments/smoke-fake"})
+        assert r.status_code == 201 and f"unit:{new}" in [c["id"] for c in r.json()["answer"]["citations"]], r.text[:200]
+        cid = r.json()["conversation"]["id"]
+        assert not api("GET", f"/v1/conversations/{cid}", "alice").json()["messages"][1].get("hidden"), "a readable answer was hidden"
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # its evidence now names a document that's gone
+            conn.execute("UPDATE kl.knowledge_units SET evidence = evidence || %s::uuid, sections = sections || ''::text WHERE id = %s",
+                         (str(uuid.uuid4()), new))
+        assert api("GET", f"/v1/conversations/{cid}", "alice").json()["messages"][1].get("hidden"), \
+            "a stored answer kept a unit its reader can no longer read"
+        api("DELETE", f"/v1/conversations/{cid}", "alice")
+        print("      unit answers: the unit led with its steps and the other view, never for bob, never superseded, inferred, or past egress")
+    finally:
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.knowledge_units WHERE topic LIKE %s", (f"{topic}%",))
+        api("DELETE", f"/v1/workspaces/payments/pipelines/{name}", "alice")
+        reset_fake()
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid

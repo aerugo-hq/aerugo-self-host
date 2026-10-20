@@ -249,7 +249,8 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
       2026-10-19: from pages and tickets; chat threads wait for C1 and C2's channel opt-in.)
 - [x] **F3.** Consolidation: merging, superseding, contradiction detection, conflicts to owners. (Decided
       2026-10-19: copies linked, not combined, so no unit's readers shrink; resolutions applied within a team.)
-- [ ] **F4.** Answers from units first: scope, trust, freshness; procedures as checklists; contacts resolved; perspectives shown.
+- [x] **F4.** Answers from units first: scope, trust, freshness; procedures as checklists; contacts resolved; perspectives shown.
+      (Contacts' current holders, and scope by role and place, come with F8.)
 - [ ] **F5.** The learning loop: feedback and corrections to owners; gaps from questions; routing to experts; answers kept with consent.
 - [ ] **F6.** Lifecycle: review cadences, staleness, effective dates, retirement; owners told.
 - [ ] **F7.** Question sets per team, a baseline, CI holding to it.

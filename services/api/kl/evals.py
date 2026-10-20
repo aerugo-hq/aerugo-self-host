@@ -381,8 +381,9 @@ def people_checks() -> list[str]:
             if api("GET", f"/v1/concepts/{page}/people", user).status_code != 404]
 
 
-def scorecard(rows, answers: dict | None = None, scenario: str = SCENARIO) -> dict:
-    """The scorecard as data: each counted case's result, the totals, and (M10) which cases Ask cited a right page for."""
+def scorecard(rows, answers: dict | None = None, scenario: str = SCENARIO, units: dict | None = None) -> dict:
+    """The scorecard as data: each counted case's result, the totals, (M10) which cases Ask cited a right page for, and
+    (F4) which ones Ask led with a right knowledge unit for."""
     counted = [(case, found, first) for case, found, first, _ in rows if case.expect and not case.needs]
     return {
         "scenario": scenario, "k": K,
@@ -390,6 +391,7 @@ def scorecard(rows, answers: dict | None = None, scenario: str = SCENARIO) -> di
         "mrr": round(sum(1 / first if first else 0 for _, _, first in counted) / len(counted), 4) if counted else 0.0,
         "cases": {case.id: {"found": len(found), "of": len(case.expect), "first": first} for case, found, first in counted},
         **({"answers": answers} if answers is not None else {}),
+        **({"units": units} if units is not None else {}),
     }
 
 
@@ -482,6 +484,9 @@ def compare(card: dict, baseline: dict, kinds: dict | None = None) -> tuple[list
     for case_id, cited_right in sorted(baseline.get("answers", {}).items()):
         if cited_right and not card.get("answers", {}).get(case_id, False):
             worse.append(f"{case_id}: Ask no longer cites a right page")
+    for case_id, led_right in sorted(baseline.get("units", {}).items()):
+        if led_right and not card.get("units", {}).get(case_id, False):
+            worse.append(f"{case_id}: Ask no longer leads with a right knowledge unit")
     if card["mrr"] < baseline.get("mrr", 0) - MRR_TOLERANCE:
         worse.append(f"MRR {card['mrr']:.2f}, down from {baseline['mrr']:.2f} (more than {MRR_TOLERANCE} lower)")
     new = sorted(set(card["cases"]) - set(baseline.get("cases", {})))

@@ -204,7 +204,7 @@ p = Page("4. Answering a question", "How a question gets answered",
          "is, and it never uses anything the person isn't allowed to see.")
 steps = [("Ask", "in Teams, the web app, a phone, or the IDE", S_PEOPLE),
          ("Who's asking", "sign-in, their team, role, and location", S_SEC),
-         ("Find", "knowledge units first, then documents and the Atlas", S_NEW),
+         ("Find", "knowledge units first, then documents and the Atlas", S_BUILT),
          ("Filter", "only what this person may see, in the database itself", S_SEC),
          ("Fetch", "in pointer mode, the passages needed, live from the source", S_NEW),
          ("Think", "a playbook's steps, with the company's approved model", S_NEW),
