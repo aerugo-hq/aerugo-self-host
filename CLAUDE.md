@@ -1843,6 +1843,16 @@ loop's. Not built: routing from a page that isn't curated (who-to-ask is for cur
 has none, so F5b is proven in smoke only; documents' own authors and owners, and units' owner teams, would let any page
 route), telling an expert outside the app, an expert declining or passing a question on, and editing a kept answer
 (the unit's owners confirm, retire, or supersede it, as any unit).
+**The fresh-stack loop over F5a, F7, and F5b, 2026-10-20** (once after the three, at the top of the stack, f5b-experts,
+with CI's settings): `make pins` passed; `make unit` 185 passed; `make smoke` 182 passed, 15 skipped, 0 failed (each
+new check among them); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10
+94%, MRR 0.81 over 43 counted cases, no leak, no regression; `make eval-company` everyone opening exactly what the
+truth says, no leak, Recall@10 100%, MRR 0.83 over 52 counted questions, leading with a right unit for 15 of 26, the
+truth's 3 of 48 units stale, exactly its 1 gap, no regression; `make atlas-eval` exact, no leak, no regression; `make
+eval-teams` 11 teams, 61 questions, no leak (Stores Ask right 27 of 27, the right unit first 15 of 26); `make e2e` 38
+passed; `make test-web` passed; the lint at 0 errors and 43 warnings. The teams' baselines recorded on that stack after
+the other sets, as CI orders them (`kl.team_evals --record`: each team's Recall@10 100%; MRR from 0.25 for EDP's one
+question, behind the scenario's own pages as F10b found, to 1.0); every other set's record unchanged.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1853,7 +1863,7 @@ this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fi
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
-answers); next, the fresh-stack loop over the three, then F11 (storage modes) and capture (C1 to C5).
+answers), with the fresh-stack loop over the three; next, F11 (storage modes), then capture (C1 to C5).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
