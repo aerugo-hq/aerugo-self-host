@@ -76,6 +76,19 @@ KEY_SPOTS = ("in the key box in the manager's office, on hook 4", "in the front 
 LIFECYCLE_DUE = "dec-24-hours"
 LIFECYCLE_CHANGED = ("weeks-of-supply", "merch-glossary", ("over the last 4 weeks", "over the last 6 weeks"))
 
+# What the store people ask that no page answers, for F5a's gaps check: (id, a gap?, helped?, (asker, wording)...). A gap
+# once three different people weren't answered; not when only two asked, nor when the answer helped them, and a question
+# about one person's health is never kept at all.
+GAP_QUESTIONS = (
+    ("ladder-keys", True, False, (("ana", "Where are the spare ladder keys kept?"), ("ben", "Where do we keep the spare ladder keys?"),
+                                  ("cora", "Where are spare ladder keys stored?"))),
+    ("weekend-parking", False, False, (("ana", "Where can staff park on weekends?"), ("ben", "Where do staff park on weekends?"))),
+    ("helped", False, True, (("ana", "When do stores open on 24 December?"), ("ben", "What time do stores open on 24 December?"),
+                             ("cora", "When do the stores open on 24 December?"))),
+    ("someones-health", False, False, (("ana", "Is Sam Rivera back from surgery?"), ("ben", "Is Sam Rivera back after his surgery?"),
+                                       ("cora", "When is Sam Rivera back from surgery?"))),
+)
+
 # The people who sign in (kl.company_eval makes their accounts): username, name, title, team, place, leads people
 PERSONAS = (
     ("ana", "Ana Ruiz", "Store associate", "stores", "OR101", False),

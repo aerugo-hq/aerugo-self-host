@@ -27,6 +27,8 @@ Then six checks:
   conflict shown exactly to the people who read both sides.
 - Lifecycle (F6): one unit's review comes due and one page changes under another; exactly those two go stale, each in
   its owner team's review queue, refused to another team.
+- Gaps (F5a): the store people ask what no page answers; exactly the truth's gaps reach Stores' curator, never naming
+  who asked, and a question about someone's health is never kept.
 - Retrieval: each question, asked as its person, scored as kl.evals scores the migration scenario (found, first
   right page, Recall@10, MRR), held to its own baseline ("company" in kl/evals_baseline.json); a forbidden page in
   the results is a leak. Questions waiting on a slice (F8, C1 to C3) are shown, not counted.
@@ -461,6 +463,48 @@ def lifecycle_check(world: company.World, unit_ids: dict[str, str], out) -> tupl
     return [], missing
 
 
+def gaps_check(world: company.World, out) -> tuple[list[str], list[str]]:
+    """F5a on the retailer: the store people ask what no page answers (company.GAP_QUESTIONS) and say whether it helped;
+    exactly the truth's gaps reach Stores' curator, each by how many people and never by whom, another team is refused
+    (every store persona is a curator here, so smoke proves a member's refusal), and a question about someone's health
+    was never kept."""
+    model_for_stores()
+    curators = sorted({spec.writer for spec in unit_plan(world)[0] if spec.team == ASK_TEAM})  # the loader made each a curator
+    curator = curators[0]
+    leaks, missing = [], []
+    for _, _, helped, asked in company.GAP_QUESTIONS:
+        for user, question in asked:
+            r = ask_as(user, question, ASK_MODEL)
+            if r.status_code != 200 or not r.json().get("question"):
+                raise SystemExit(f"Ask as {user}: {r.status_code} {r.text[:200]}")
+            api("POST", "/v1/feedback", user, json={"kind": "ask", "query": question, "verdict": "helpful" if helped else "not_helpful",
+                                                    "question": r.json()["question"]})
+    wordings = {gid: {q for _, q in asked} for gid, _, _, asked in company.GAP_QUESTIONS}
+    want = {gid for gid, gap, _, _ in company.GAP_QUESTIONS if gap}
+    got: dict[str, dict] = {}
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        listed = api("GET", f"/v1/workspaces/{ASK_TEAM}/gaps", curator).json().get("gaps", [])
+        got = {gid: g for g in listed for gid, qs in wordings.items() if g["question"] in qs}
+        if want <= set(got):
+            break
+        time.sleep(5)
+    missing += [f"{gid} never became a gap" for gid in sorted(want - set(got))]
+    missing += [f"{gid} became a gap, which the truth says it isn't" for gid in sorted(set(got) - want)]
+    names = {p.username for p in world.people if p.username} | {p.name for p in world.people}
+    leaks += [f"the gap {gid} named who asked" for gid, g in got.items() if any(n in json.dumps(g) for n in names)]
+    outsider = next(p.username for p in world.people if p.username and p.team != ASK_TEAM)
+    if api("GET", f"/v1/workspaces/{ASK_TEAM}/gaps", outsider).status_code != 403:
+        leaks.append(f"{outsider} read {ASK_TEAM}'s gaps without being its curator")
+    with psycopg.connect(OWNER_DB) as conn:
+        if conn.execute("SELECT 1 FROM kl.questions WHERE text ILIKE %s", ("%surgery%",)).fetchone():
+            leaks.append("a question about someone's health was kept")
+    print(f"\nGaps (F5a): {len(got)} of the truth's questions became gaps; the truth says {len(want)}\n", file=out)
+    for gid, g in sorted(got.items()):
+        print(f"  {gid}: {g['question']!r}, asked {g['asked']} times by {g['askers']} people; seen by {curator}, refused to {outsider}", file=out)
+    return leaks, missing
+
+
 def model_for_stores(team: str = ASK_TEAM) -> None:
     """The fake model, registered for a team (Stores, so Ask is checked for its people), its key put back after a restart."""
     r = api("POST", f"/v1/workspaces/{team}/models", ADMIN, json={
@@ -631,7 +675,8 @@ def main(argv: list[str]) -> int:
     leaks, missing = leaks + unit_leaks + extract_leaks + merge_leaks, missing + unit_missing + extract_missing + merge_missing
     card, retrieval_leaks, wrong_units = score(world, out, ids)
     life_leaks, life_missing = lifecycle_check(world, ids, out)  # after Ask's: a stale unit ranks differently
-    leaks, missing = leaks + life_leaks, missing + life_missing
+    gap_leaks, gap_missing = gaps_check(world, out)
+    leaks, missing = leaks + life_leaks + gap_leaks, missing + life_missing + gap_missing
     problems = ([f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
                 + [f"WRONG: {line}" for line in wrong_units])
     if problems:

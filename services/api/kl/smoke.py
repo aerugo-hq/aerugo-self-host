@@ -6577,6 +6577,90 @@ def knowledge_units_age_and_their_owners_are_told():
 
 
 @check
+def questions_become_gaps_and_corrections_reach_owners():
+    """F5a, the learning loop: Ask keeps what each person asked and how well it was answered, and the asker alone rates their own answer; something three different people asked and weren't answered well becomes a gap the askers' teams' curators see, with how often and by how many, never by whom, while two people's question doesn't, and a question about someone's surgery is never kept; a curator may dismiss a gap; and "this unit is wrong" from someone who reads it reaches its owner team's review queue without saying who sent it, until the unit is confirmed again"""
+    import uuid
+    tag = uuid.uuid4().hex[:8]
+    topic = f"smoke-f5a-{tag}"
+    ladder, badge, health = f"Where is the spare ladder key {tag} kept?", f"Who reorders visitor badges {tag}?", f"Is Jamie Doe back from surgery {tag}?"
+    models = {"alice": "payments/smoke-fake", "carol": "payments/smoke-fake", "bob": "finance/smoke-fake"}
+
+    def ask(user, question):
+        r = ask_as(user, question, models[user])
+        assert r.status_code == 200 and r.json().get("question"), f"{user}: {r.status_code} {r.text[:200]}"
+        assert api("POST", "/v1/feedback", user, json={"kind": "ask", "query": question, "verdict": "not_helpful",
+                                                     "question": r.json()["question"]}).status_code == 201
+        return r.json()["question"]
+
+    def owner(sql, *args):
+        with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
+            cur = conn.execute(sql, args)
+            return cur.fetchall() if cur.description else []
+
+    def gaps(user="alice", **params):
+        r = api("GET", "/v1/workspaces/payments/gaps", user, params=params)
+        return r if r.status_code != 200 else {g["question"]: g for g in r.json()["gaps"]}
+    try:
+        ensure_fake_models()
+        asked = {user: ask(user, ladder) for user in ("alice", "carol", "bob")}
+        for user in ("alice", "carol"):
+            ask(user, badge)
+        for user in ("alice", "carol", "bob"):
+            ask(user, health)
+        kept = owner("SELECT text, teams FROM kl.questions WHERE id = %s", asked["bob"])[0]
+        assert kept["text"] == ladder and kept["teams"] == ["finance"], kept
+        assert not owner("SELECT 1 FROM kl.questions WHERE text LIKE %s", f"%surgery {tag}%"), "a question about someone's surgery was kept"
+        assert api("POST", "/v1/feedback", "carol", json={"kind": "ask", "query": ladder, "verdict": "helpful",
+                                                        "question": asked["alice"]}).status_code == 404, "someone rated another's answer"
+
+        deadline = time.monotonic() + 150
+        while ladder not in gaps() and time.monotonic() < deadline:
+            time.sleep(3)
+        found = gaps()
+        assert ladder in found, f"three people's unanswered question didn't become a gap: {list(found)}"
+        gap = found[ladder]
+        assert gap["askers"] == 3 and gap["asked"] == 3 and gap["state"] == "open", gap
+        assert not any(name in json.dumps(gap) for name in ("alice", "carol", "bob")), "a gap named who asked"
+        assert "closest" in gap, "the gap didn't say which pages are closest, for its reader"
+        assert badge not in found, "two people's question became a gap"
+        assert not any(tag in q and "surgery" in q for q in found), "a question about someone's surgery became a gap"
+        assert gaps("carol").status_code == 403, "a member who isn't a curator read the team's gaps"
+        assert gaps("dave").status_code == 403, "someone outside the team read its gaps"
+
+        with psycopg.connect(APP_DB, autocommit=True) as conn:  # the database itself: carol never reads alice's question
+            org = owner("SELECT id::text AS id FROM kl.orgs WHERE slug = 'acme'")[0]["id"]
+            conn.execute("SELECT set_config('kl.org_id', %s, false), set_config('kl.principals', 'user:carol,group:payments', false)", (org,))
+            assert not conn.execute("SELECT id FROM kl.questions WHERE id = %s", (asked["alice"],)).fetchall(), \
+                "the database showed one person's question to another"
+
+        assert api("POST", f"/v1/workspaces/payments/gaps/{gap['id']}/dismiss", "alice").status_code == 200
+        assert ladder not in gaps() and ladder in gaps(state="dismissed"), "a dismissed gap stayed open"
+
+        r = api("POST", "/v1/workspaces/payments/units", "alice", json={
+            "kind": "fact", "topic": topic, "title": f"Refund approvals {tag}", "text": f"Refunds {tag} over $500 need the finance lead.",
+            "evidence": [{"document": "pay-runbook"}]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        unit = r.json()["id"]
+        assert api("POST", f"/v1/units/{unit}/confirm", "alice").status_code == 200
+        correction = {"kind": "unit", "query": "correction", "verdict": "wrong", "unit": unit, "note": f"It's $750 since October {tag}."}
+        assert api("POST", "/v1/feedback", "bob", json=correction).status_code == 404, "someone who can't read a unit corrected it"
+        assert api("POST", "/v1/feedback", "carol", json={**correction, "note": " "}).status_code == 422, "an empty correction was taken"
+        assert api("POST", "/v1/feedback", "carol", json=correction).status_code == 201
+        queue = api("GET", "/v1/workspaces/payments/review", "alice").json()
+        sent = [c for c in queue["corrections"] if c["unit"]["id"] == unit]
+        assert [c["note"] for c in sent] == [correction["note"]], f"the correction didn't reach the owners: {queue['corrections']}"
+        assert "carol" not in json.dumps(sent), "a correction said who sent it"
+        assert api("POST", f"/v1/units/{unit}/confirm", "alice").status_code == 200
+        assert not [c for c in api("GET", "/v1/workspaces/payments/review", "alice").json()["corrections"] if c["unit"]["id"] == unit], \
+            "a correction stayed after its unit was confirmed again"
+        print("      learning loop: three people's question a gap without their names, two people's and a sensitive one not; a correction to its owners")
+    finally:
+        owner("DELETE FROM kl.questions WHERE text LIKE %s OR (text IS NULL AND id IN (SELECT id FROM kl.questions ORDER BY id DESC LIMIT 3))", f"%{tag}%")
+        owner("DELETE FROM kl.knowledge_gaps WHERE question LIKE %s", f"%{tag}%")
+        owner("DELETE FROM kl.knowledge_units WHERE topic LIKE %s", f"{topic}%")
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid

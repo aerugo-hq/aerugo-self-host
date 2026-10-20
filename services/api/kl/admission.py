@@ -91,12 +91,18 @@ def forget_mode() -> None:
     _mode = ("org", 0.0)
 
 
+def own_teams(caller: Caller) -> set[str]:
+    """The teams a person holds a role on, granted to them or to one of their groups. A grant to the whole org doesn't
+    count: it would make everyone a member of that team (G4's pilot, F5a's gaps)."""
+    out: set[str] = set()
+    for who in (caller.fga_user, *(f"group:{g}#member" for g in caller.groups)):
+        out |= {t["object"].split(":", 1)[1] for t in fga.read({"user": who, "object": "workspace:"}) if t["relation"] in TEAM_ROLES}
+    return out
+
+
 def onboarded(caller: Caller) -> bool:
     """A role on a team, granted to the caller or to one of their groups. A grant to the whole org doesn't count."""
-    for who in (caller.fga_user, *(f"group:{g}#member" for g in caller.groups)):
-        if any(t["relation"] in TEAM_ROLES for t in fga.read({"user": who, "object": "workspace:"})):
-            return True
-    return False
+    return bool(own_teams(caller))
 
 
 def admitted(caller: Caller) -> bool:

@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, catalogs, config, confluence, consolidation, curator, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
+from . import alerting, catalogs, config, confluence, consolidation, curator, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -549,7 +549,8 @@ def handle_retention_apply(conn, job) -> dict:
         counts = conn.execute("SELECT kl.apply_retention() AS c").fetchone()["c"] or {}
         pruned = conn.execute("SELECT kl.prune_changes(%s) AS n", (config.CHANGE_FEED_DAYS,)).fetchone()["n"]  # P3
         ended = conn.execute("SELECT kl.sweep_web_sessions() AS n").fetchone()["n"]  # H3: web sessions that have ended
-    return {**counts, "tuples": len(tuples), "changes_pruned": pruned, "web_sessions_swept": ended}
+        asked = gaps.prune(conn)  # F5a: questions past their window, and the gaps built from them
+    return {**counts, "tuples": len(tuples), "changes_pruned": pruned, "web_sessions_swept": ended, "questions_pruned": asked}
 
 
 def handle_pipeline_push(conn, job) -> dict:
@@ -710,7 +711,8 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "pipeline.push": handle_pipeline_push, "pipeline.retire": handle_pipeline_retire, "manifest.apply": handle_manifest_apply,
             "import.apply": handle_import_apply, "import.retire": handle_import_retire, "units.extract": handle_units_extract,
             "units.consolidate": lambda conn, job: consolidation.run(conn),
-            "units.lifecycle": lambda conn, job: lifecycle.run(conn)}
+            "units.lifecycle": lambda conn, job: lifecycle.run(conn),
+            "gaps.refresh": lambda conn, job: gaps.run(conn)}
 RETENTION_SQL = ("INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'retention.apply' WHERE NOT EXISTS "
                  "(SELECT 1 FROM jobs WHERE kind = 'retention.apply' AND created_at > now() - interval '1 hour')")
 
@@ -908,6 +910,10 @@ def main() -> None:
                             conn.execute(lifecycle.QUEUE_SQL)
                         except Exception as e:  # noqa: BLE001
                             log.warning("lifecycle not scheduled: %s", type(e).__name__)
+                        try:  # gaps (F5a): a pass a minute while new questions came in
+                            conn.execute(gaps.QUEUE_SQL)
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("gaps not scheduled: %s", type(e).__name__)
                         try:  # retention (slice I2): at most one run an hour, as a job like any other
                             conn.execute(RETENTION_SQL)
                         except Exception as e:  # noqa: BLE001

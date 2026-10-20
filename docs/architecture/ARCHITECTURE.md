@@ -162,7 +162,9 @@ consolidation (F3), copies linked and contradictions sent to their owners, never
 (F4), the units that answer a question leading Ask's sources with their steps and other views; and who is asking
 (F8), each answer fitted to the asker's role and place from the directory, contacts resolved to a role's current
 holder; and lifecycle (F6), units going stale when their review comes due or their evidence changes, retired at
-their end date, each change recorded, and their owners told in the app. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; next, the fresh-stack loop over F4, F8, and F6, then F5 (the learning loop). A connector only adds raw material;
+their end date, each change recorded, and their owners told in the app; and the learning loop's first half (F5a),
+what people ask kept for a month, what several of them weren't answered well shown to their teams' curators as gaps,
+never who asked, and corrections sent to a unit's owners. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
+but for M10's real-vendor half, set aside; next, question sets per team (F7), then routing to experts and kept answers (F5b). A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.
