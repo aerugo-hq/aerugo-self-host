@@ -222,6 +222,7 @@ def unit_body(world: company.World, spec: UnitSpec) -> dict:
     return {"kind": spec.fact.kind, "topic": spec.topic, "title": (spec.fact.id[0].upper() + spec.fact.id[1:]).replace("-", " "),
             "text": spec.fact.text, "evidence": [{"document": world.doc(e).key} for e in spec.fact.evidence],
             "scope": {"places": where, "roles": [s for s in spec.fact.scope if s not in where]},
+            **({"structure": {"role": spec.fact.role}} if spec.fact.role else {}),  # F8: a contact's role, resolved per asker
             **({"valid_until": spec.fact.valid_until} if spec.fact.valid_until else {}),
             **({"valid_from": spec.valid_from} if spec.valid_from else {})}
 
@@ -457,6 +458,22 @@ def extraction_check(world: company.World) -> tuple[list[str], list[str]]:
     return leaks, missing
 
 
+def expected_holder(world: company.World, asker: str, fact: company.Fact) -> str | None:
+    """F8's truth for a contact's current holder: up the asker's managers, else the one person still here with that title
+    in the fact's places (or the asker's), as kl.context decides it from the directory."""
+    from .context import role_matches
+    me, state = world.person(asker), {p.code: p.state for p in world.places}
+    boss, seen = company.manager_of(world, me), set()
+    while boss and boss.email not in seen:
+        seen.add(boss.email)
+        if role_matches(fact.role, boss.title):
+            return boss.name
+        boss = company.manager_of(world, boss)
+    where = {s for s in fact.scope if s in state or s in state.values()} or {me.place, state[me.place]}
+    here = [p for p in world.people if p.active and p != me and role_matches(fact.role, p.title) and {p.place, state[p.place]} & where]
+    return here[0].name if len(here) == 1 else None
+
+
 def score(world: company.World, out, unit_ids: dict[str, str]) -> tuple[dict, list[str], list[str]]:
     key = lambda names: tuple(world.doc(n).key for n in names)
     cases = [evals.Case(q.id, q.asker, q.text, q.kind, key(q.expect), key(q.forbid), q.needs) for q in world.questions]
@@ -476,7 +493,7 @@ def score(world: company.World, out, unit_ids: dict[str, str]) -> tuple[dict, li
         wait = f"  (waits on {case.needs})" if case.needs else ""
         print(f"  {mark:4}  {case.id:26}  {case.kind:12}  as {case.user:5}  {detail}{wait}", file=out)
     model_for_stores()
-    answers, units, wrong_units = {}, {}, []
+    answers, units, wrong_units, resolved = {}, {}, [], []
     facts, fact_of = {f.id: f for f in world.facts}, {f"unit:{uid}": fid for fid, uid in unit_ids.items()}
     print(f"\nAsk's citations, through {ASK_MODEL}\n", file=out)
     stores_people = {p.username for p in world.people if p.username and p.team == ASK_TEAM}
@@ -496,6 +513,12 @@ def score(world: company.World, out, unit_ids: dict[str, str]) -> tuple[dict, li
         q = next(x for x in world.questions if x.id == case.id)
         if q.facts:
             units[case.id] = bool(led) and led[0] in q.facts
+        for c in r.json().get("citations") or []:  # F8: each contact cited names its role's current holder for this asker
+            f = facts.get(fact_of.get(c["id"], ""))
+            if f and f.role:
+                want, got = expected_holder(world, case.user, f), (c["unit"].get("holder") or {}).get("name")
+                (resolved.append if want == got else wrong_units.append)(
+                    f"{f.id} for {case.user}: holder {got or 'none'}" + ("" if want == got else f", where the truth says {want or 'none'}"))
         if case.expect:
             answers[case.id] = any(k in case.expect for k in cited)
         mark = "LEAK" if any(k in case.forbid for k in cited) else ("ok" if not case.expect or answers[case.id] else "miss")
@@ -505,6 +528,8 @@ def score(world: company.World, out, unit_ids: dict[str, str]) -> tuple[dict, li
           f"{sum(1 for c in cases if c.needs)} wait on slices not built yet", file=out)
     print(f"  Ask cited a right page for {sum(answers.values())} of {len(answers)} questions", file=out)
     print(f"  Ask led with a right knowledge unit for {sum(units.values())} of {len(units)} questions with facts", file=out)
+    for line in resolved:
+        print(f"  CONTACT: {line}, as the truth says", file=out)
     for line in wrong_units:
         print(f"  WRONG: {line}", file=out)
     for line in sensitive:

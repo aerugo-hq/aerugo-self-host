@@ -53,7 +53,7 @@ def test_the_truth_holds_every_kind_of_trap(world):
     assert facts["recall-decision"].kind == "decision"
     kinds = {q.kind for q in world.questions}
     assert {"stale", "decision", "location", "permission", "undocumented", "sensitive", "capture", "two-source"} <= kinds
-    assert {q.needs for q in world.questions} >= {"F8", "C1", "C2", "C3"}
+    assert {q.needs for q in world.questions} >= {"C1", "C2", "C3"}  # F8's questions count since it was built
     max_weber = next(p for p in world.people if p.name == "Max Weber")
     assert not max_weber.active and not any(max_weber.email in members for members in world.groups.values())
 

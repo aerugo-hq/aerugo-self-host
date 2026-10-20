@@ -6409,6 +6409,82 @@ def ask_answers_from_knowledge_units_first():
 
 
 @check
+def answers_fit_who_is_asking():
+    """F8, who is asking: the directory says each person's title, department, and place, and a person sees only their own; Ask tells the model the asker's role and place and nothing else; a unit for the asker's own place answers them and another place's version doesn't, while someone the directory doesn't list gets both, each with its scope; a contact resolves to its role's current holder in its place, never someone who has left"""
+    import uuid
+    tag = uuid.uuid4().hex[:8]
+    topic, name = f"smoke-f8-{tag}", f"okta-f8-{tag}"
+    desk = f"Refunds desk lead {tag}"
+    person = lambda email, first, title, status="ACTIVE": {"status": status, "profile": {
+        "email": email, "firstName": first, "lastName": "Smoke", "title": title, "department": "Payments", "city": "Denver", "state": "CO"}}
+    users = [person("alice@acme.test", "Alice", "Payments lead"), person("bob@acme.test", "Bob", desk),
+             person(f"former-{tag}@acme.test", "Former", desk, "DEPROVISIONED")]
+    path = f"/v1/workspaces/payments/connections/{name}"
+
+    def create(body):
+        r = api("POST", "/v1/workspaces/payments/units", "alice", json={"topic": topic, "evidence": [{"document": "pay-runbook"}], **body})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        return r.json()["id"]
+
+    def ask(user, q):
+        r = ask_as(user, q, "payments/smoke-fake")
+        assert r.status_code == 200, f"{user}: {r.status_code} {r.text[:200]}"
+        return r.json()
+
+    def units_in(answer):
+        return {c["id"] for c in answer["citations"] if c["id"].startswith("unit:")}
+
+    def listed():
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT title FROM kl.directory_people d JOIN kl.connections c ON c.id = d.connection_id "
+                                "WHERE c.name = %s AND d.email = 'alice@acme.test'", (name,)).fetchone()
+    try:
+        assert httpx.post(f"{FAKE_OKTA}/setup", json={"users": users}, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json={
+            "name": name, "provider": "okta", "api_base": FAKE_OKTA, "api_token": "smoke-okta-token", "every_minutes": 60})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 90
+        while not listed() and time.monotonic() < deadline:
+            time.sleep(2)
+        assert listed() == ("Payments lead",), f"the directory didn't record alice's title: {listed()}"
+        mine = api("GET", "/v1/whoami", "alice").json()["context"]
+        assert mine == {"title": "Payments lead", "department": "Payments", "office": None, "city": "Denver", "state": "CO", "country": None}, mine
+        assert api("GET", "/v1/whoami", "bob").json()["context"]["title"] == desk, "bob wasn't shown his own context"
+        assert api("GET", "/v1/whoami", "carol").json()["context"] is None, "someone the directory doesn't list was given a context"
+
+        colorado = create({"kind": "fact", "title": f"Refund cap {tag}", "text": f"Store refunds {tag} are capped at $300 a day.",
+                           "scope": {"places": ["CO"]}})
+        oregon = create({"kind": "fact", "title": f"Refund cap {tag}", "text": f"Store refunds {tag} are capped at $400 a day.",
+                         "scope": {"places": ["OR"]}})
+        contact = create({"kind": "contact", "title": f"Refunds desk {tag}", "text": f"The refunds desk {tag} handles escalated refunds.",
+                          "structure": {"role": desk, "reach": "#refunds"}, "scope": {"places": ["CO"]}})
+        reset_fake()
+        got = ask("alice", f"What are store refunds {tag} capped at?")
+        assert f"unit:{colorado}" in units_in(got) and f"unit:{oregon}" not in units_in(got), \
+            f"alice, in Colorado, didn't get Colorado's rule alone: {units_in(got)}"
+        prompt = " ".join(fake_prompts())
+        assert "Asked by: Payments lead, Payments at Denver, CO." in prompt, "the model wasn't told who's asking"
+        assert "alice@acme.test" not in prompt, "the asker's email reached the model"
+        reset_fake()
+        assert {f"unit:{colorado}", f"unit:{oregon}"} <= units_in(ask("carol", f"What are store refunds {tag} capped at?")), \
+            "someone whose place isn't known didn't get both places' rules"
+        assert "Asked by:" not in " ".join(fake_prompts()), "the model was told who's asking for someone the directory doesn't list"
+
+        got = ask("alice", f"Who handles escalated refunds at the refunds desk {tag}?")
+        cited = next(c["unit"] for c in got["citations"] if c["id"] == f"unit:{contact}")
+        assert cited.get("holder") == {"name": "Bob Smoke", "title": desk}, f"the contact's holder: {cited.get('holder')}"
+        assert "Former" not in json.dumps(got), "someone who has left was named a contact's holder"
+        print("      who is asking: alice's own context, Colorado's rule only, the model told her role and place, bob holding the desk")
+    finally:
+        api("DELETE", path, "olivia")
+        httpx.post(f"{FAKE_OKTA}/setup", json={"users": []}, timeout=10)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.knowledge_units WHERE topic LIKE %s", (f"{topic}%",))
+            conn.execute("DELETE FROM kl.directory_people WHERE connection_id IN (SELECT id FROM kl.connections WHERE name = %s)", (name,))
+        reset_fake()
+
+
+@check
 def lineage_shows_only_to_its_own_team():
     """Systems and data (slice K3): a team's lineage, pushed in OpenLineage's shape, becomes datasets, jobs, and the links between them on that team's map, and impact follows it downstream, nearest first; nobody outside the team sees any of it, and a non-admin can't push"""
     import uuid

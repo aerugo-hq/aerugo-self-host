@@ -9,10 +9,13 @@ states tells them apart least): at least MIN_SHARED of them, and MIN_SHARE of th
 F1's rule, only when the asker reads every piece of its evidence; and it goes to a model only when the model may
 receive every one of its evidence's classifications (invariant 7).
 
-Among those, the unit that fits the asker's scope most closely comes first, then the closer match (to a tenth), then
-the more trusted, then the one in force most recently. A unit in an open conflict the asker can see both sides of is
-used with the dispute said, so the answer gives both. Scope is the asker's context: today their teams; their role and place come with F8, until
-when a unit scoped to a role or place is used with its scope stated, so the answer can say who it applies to.
+Among those, the closer match (to a tenth) comes first, then the unit that fits the asker's scope most closely, then
+the more trusted, then the one in force most recently. Scope is the asker's context (kl.context, F8): their teams, and
+their role and place from the directory. A unit's scope says whom it applies to, not who may ask, so a unit for
+another role or place still answers (a people partner asking a store associate's pay range), its scope stated, unless
+the asker's own version answers at least as well: then the other is dropped (a Colorado associate asking about their
+sick leave gets Colorado's rule, never Oregon's). One the directory doesn't say is open. A contact names a role; its current holder for this asker
+is read from the directory (F8).
 
 A unit becomes a source as its text, its structure (a procedure's numbered steps, each with its role and condition; a
 contact's role and how to reach it), its scope, and the perspectives on it the asker reads (another team's view, said
@@ -24,7 +27,7 @@ import math
 import uuid
 from datetime import date
 
-from . import claims
+from . import claims, context as asking
 from .units import PERSPECTIVES_SQL, UNIT_COLUMNS, readable, shown
 
 UNIT_SOURCES = 3   # units that may lead an answer's sources, ahead of the documents
@@ -55,7 +58,10 @@ def question_words(question: str) -> set[str]:
 
 
 def unit_words(row: dict) -> set[str]:
-    return claims.words(f"{row['title']} {claims.MARK.sub('', row['body'])}")
+    """A unit's content words: its title, its text, and what its structure names (a contact's role, a term, the steps)."""
+    structure = row.get("structure") or {}
+    named = " ".join([structure.get("role") or "", structure.get("term") or "", *(s.get("text", "") for s in structure.get("steps") or [])])
+    return claims.words(f"{row['title']} {claims.MARK.sub('', row['body'])} {named}")
 
 
 def weights(words: set[str], texts: list[set[str]]) -> dict[str, float]:
@@ -72,23 +78,21 @@ def match(words: set[str], stated: set[str], weight: dict[str, float]) -> float 
     return share if len(shared) >= MIN_SHARED and share >= MIN_SHARE else None
 
 
-def scope_fit(row: dict, context: dict) -> int | None:
+def scope_fit(row: dict, context: dict) -> tuple[int, set[str], set[str]]:
     """How closely a unit fits the asker: +1 for each of its scopes (teams, roles, places) that names the asker's, 0 for
-    one it leaves open, -1 for teams that aren't the asker's (another team's knowledge, still theirs to read). None when
-    the asker's role or place is known and the unit's names another (Oregon's rule is never a Colorado associate's).
-    A context entry of None is not yet known (F8), and fits as open."""
-    fit = 0
+    one it leaves open, -1 for one that names someone else; with which scopes named the asker's, and which another's.
+    A context entry of None isn't known, and fits as open."""
+    fit, on, off = 0, set(), set()
     for key, column in (("teams", "scope_teams"), ("roles", "scope_roles"), ("places", "scope_places")):
         wanted, mine = {s.lower() for s in row[column] or []}, context.get(key)
         if not wanted or mine is None:
             continue
-        if wanted & {m.lower() for m in mine}:
-            fit += 1
-        elif key == "teams":
-            fit -= 1
+        mine = {m.lower() for m in mine}
+        if wanted & mine or (key == "roles" and any(asking.role_matches(w, m) for w in wanted for m in mine)):
+            fit, on = fit + 1, on | {key}
         else:
-            return None
-    return fit
+            fit, off = fit - 1, off | {key}
+    return fit, on, off
 
 
 def ranked(question: str, rows: list[dict], context: dict) -> list[dict]:
@@ -101,10 +105,13 @@ def ranked(question: str, rows: list[dict], context: dict) -> list[dict]:
     weight = weights(words, [ws for _, ws in stated])
     out = []
     for row, ws in stated:
-        share, fit = match(words, ws, weight), scope_fit(row, context)
-        if share is not None and fit is not None:
-            out.append({**row, "match": share, "fit": fit})
-    return sorted(out, key=lambda r: (-r["fit"], -round(r["match"], 1), TRUST.get(r["trust"], 9), r["status"] == "stale",
+        share = match(words, ws, weight)
+        if share is not None:
+            fit, on, off = scope_fit(row, context)
+            out.append({**row, "match": share, "fit": fit, "on": on, "off": off})
+    own = {key: max((r["match"] for r in out if key in r["on"]), default=None) for key in ("roles", "places")}
+    out = [r for r in out if not any(own[k] is not None and own[k] >= r["match"] for k in r["off"] & {"roles", "places"})]
+    return sorted(out, key=lambda r: (-round(r["match"], 1), -r["fit"], TRUST.get(r["trust"], 9), r["status"] == "stale",
                                       -(r["valid_from"] or date.min).toordinal(), -r["updated_at"].timestamp(), r["id"]))
 
 
@@ -119,8 +126,9 @@ def scope_said(row: dict) -> str:
     return f"Applies to: {'; '.join(parts)}." if parts else ""
 
 
-def source_text(row: dict, perspectives: list[dict]) -> str:
-    """What the model reads of a unit: its text, its structure, who it applies to, and the other views on it."""
+def source_text(row: dict, perspectives: list[dict], holder: dict | None = None) -> str:
+    """What the model reads of a unit: its text, its structure, a contact's current holder, who it applies to, and the
+    other views on it."""
     lines = [claims.MARK.sub("", row["body"]).strip()]
     structure = row["structure"] or {}
     for n, step in enumerate(structure.get("steps") or [], 1):
@@ -129,6 +137,8 @@ def source_text(row: dict, perspectives: list[dict]) -> str:
         lines.append(f"{n}. {step['text']}{who}.{when}")
     if row["kind"] == "contact" and structure.get("role"):
         lines.append(f"Contact: {structure['role']}" + (f", {structure['reach']}" if structure.get("reach") else "") + ".")
+        if holder:
+            lines.append(f"Its current holder for the person asking: {holder['name']} ({holder['title']}).")
     if row["kind"] == "definition" and structure.get("term"):
         lines.append(f"Term: {structure['term']}" + (f" = {structure['formula']}" if structure.get("formula") else "") + ".")
     if scope_said(row):
@@ -168,13 +178,15 @@ def find(conn, caller, question: str, context: dict, limit: int = UNIT_SOURCES) 
     for r in rows:
         perspectives = [p for p in views[r["id"]] if shown(p["evidence"], set(seen))]
         held = {levels[d] for d in r["evidence"]} | {levels[d] for p in perspectives for d in p["evidence"]}
+        role = (r["structure"] or {}).get("role") if r["kind"] == "contact" else None
+        holder = asking.holder(conn, context, role, r["scope_places"] or []) if role else None
         out.append({
             "external_key": f"{PREFIX}{r['id']}", "title": f"{r['title']} (knowledge unit: {r['kind']}, {r['trust']})",
-            "heading_path": None, "body": source_text(r, perspectives), "classification": level(held),
+            "heading_path": None, "body": source_text(r, perspectives, holder), "classification": level(held),
             "classifications": held, "source_uri": None, "source_kind": "unit",
             "source_version": r["updated_at"].isoformat(), "tier": "gold" if r["status"] == "confirmed" else "silver",
             "unit": {"id": r["id"], "kind": r["kind"], "title": r["title"], "trust": r["trust"], "status": r["status"],
-                     "owner": r["owner"], "structure": r["structure"] or {},
+                     "owner": r["owner"], "structure": r["structure"] or {}, **({"holder": holder} if holder else {}),
                      "scope": {"teams": r["scope_teams"], "roles": r["scope_roles"], "places": r["scope_places"]},
                      "evidence": [{"document": seen[d]["external_key"], "title": seen[d]["title"], "section": s or None}
                                   for d, s in zip(r["evidence"], r["sections"])],

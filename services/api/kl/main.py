@@ -34,7 +34,7 @@ from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .units import router as units_router
-from . import unit_answers
+from . import context as asking, unit_answers
 from .extraction import router as extraction_router
 from .gateway import month_usage
 from .connections_api import router as connections_router
@@ -631,6 +631,7 @@ def whoami(caller: Caller = Depends(signed_in)):
             identity_match.match(conn, org_id, caller)
         identities = [r["source"] for r in conn.execute(
             "SELECT source FROM principal_aliases WHERE canonical = %s ORDER BY source", (caller.fga_user,))]
+        mine = asking.mine(asking.of(conn, caller))  # F8: what the directory says about them, for them alone
     return {
         "username": caller.username,
         "admitted": True,
@@ -640,6 +641,7 @@ def whoami(caller: Caller = Depends(signed_in)):
         "workspaces": sorted(memberships(caller)),
         "admin_of": sorted(memberships(caller, "admin")),
         "org_admin": fga.check(caller.fga_user, "admin", f"org:{config.ORG_SLUG}"),
+        "context": mine,
     }
 
 
@@ -2081,9 +2083,9 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
     with scoped(org_id, caller.principals) as conn:  # what the model may receive, and whether the budget allows it
         if any(narrow):  # E1: only the chosen sources and containers
             visible = narrowed(conn, visible, *narrow)[0][:max_sources]
-        # F4: the knowledge units that answer it lead, unless the asker chose the documents to answer from
-        units = [] if focus or any(narrow) else unit_answers.find(
-            conn, caller, f"{last_question} {question}".strip(), {"teams": memberships(caller), "roles": None, "places": None})
+        # F4: the knowledge units that answer it lead, unless the asker chose the documents to answer from; F8: for this asker
+        ctx = asking.of(conn, caller)
+        units = [] if focus or any(narrow) else unit_answers.find(conn, caller, f"{last_question} {question}".strip(), ctx)
         history = earlier_turns(conn, earlier or [], model, allowed)
         with telemetry.span("ask.egress") as s:  # a unit goes only when the model may receive every one of its evidence's
             sources = [r for r in units if r["classifications"] <= allowed] + [r for r in visible if r["classification"] in allowed]
@@ -2101,8 +2103,9 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         try:
             with telemetry.span("ask.model", provider=endpoint["provider"], model=endpoint["model"]) as s:
                 reminder = ANSWER_REMINDER + (UNITS_REMINDER if any(r.get("unit") for r in sources) else "")
-                answer, usage = chat(endpoint["provider"], endpoint["model"], endpoint["base_url"], api_key,
-                                     SYSTEM_PROMPT, with_history(history, build_prompt(question, sources) + reminder))
+                who = asking.asked_by(ctx["me"])  # F8: their role and place, so the answer fits them
+                answer, usage = chat(endpoint["provider"], endpoint["model"], endpoint["base_url"], api_key, SYSTEM_PROMPT,
+                                     with_history(history, build_prompt(f"{question}\n({who})" if who else question, sources) + reminder))
                 telemetry.set_attributes(s, prompt_tokens=usage.get("prompt_tokens") or 0,
                                          completion_tokens=usage.get("completion_tokens") or 0)
         except GatewayError as e:

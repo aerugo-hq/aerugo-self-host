@@ -254,7 +254,9 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 - [ ] **F5.** The learning loop: feedback and corrections to owners; gaps from questions; routing to experts; answers kept with consent.
 - [ ] **F6.** Lifecycle: review cadences, staleness, effective dates, retirement; owners told.
 - [ ] **F7.** Question sets per team, a baseline, CI holding to it.
-- [ ] **F8.** Context: the person's team, role, and location from the directory, used by every answer.
+- [x] **F8.** Context: the person's team, role, and location from the directory, used by every answer.
+      (Decided 2026-10-20: a unit's scope says whom it applies to, not who may ask; another place's version is left out
+      only when the asker's own answers as well. On-call rotations wait for an on-call source.)
 - [x] **F9.** The synthetic retailer: the generator, its truth, its fakes for every capture source; `make company`.
 - [x] **F10.** The Atlas (`ORG_INTELLIGENCE_PLAN` O1 and O2): the systems graph and its synthetic enterprise.
 - [ ] **F11.** Storage modes: index, pointer, and live only, per source; pointer mode fetching passages live with the
