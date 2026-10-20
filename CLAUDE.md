@@ -1815,9 +1815,9 @@ reply's fields), and the worker records what it kept; `kl.subject_columns` gains
 minute, `KL_RATE_ROUTE_PER_ORG` 300); `GET /v1/questions/inbox` lists what was asked of you and what you asked, with
 replies; `POST /v1/questions/{id}/reply` (the expert alone, once; anyone else a 404) takes the reply and who may read
 it as knowledge: the asker only (nothing kept), one of the expert's own teams (`admission.own_teams`; which one, when
-they're on several), or the whole company. `kl/experts.py`: a reply that names one person's sensitive matters or
-personal data can't be kept (`keepable`, the same sensitive gate and personal-data detection as F2 and F5a: a business
-number is knowledge); the worker's step (`answers.keep`, `keep`) writes the kept reply as a document (`source_kind`
+they're on several), or the whole company. `kl/experts.py`: a question or reply that names one person's sensitive
+matters or personal data can't be kept, both screened since the question becomes the kept page's title (`keepable`, the
+same sensitive gate and personal-data detection as F2 and F5a: a business number is knowledge); the worker's step (`answers.keep`, `keep`) writes the kept reply as a document (`source_kind`
 `answer`, `answer-<id>`, its question as its title, "Answered by <expert> on <day>") with exactly its audience
 (`readers_for`: the team's own members and groups, never a grant to the whole company, as Notion's are, or
 `org:<org>`), its chunks, the team's workspace, and OpenFGA's viewer tuples, then embeddings and links as for a push,
@@ -1827,13 +1827,17 @@ reach it. Smoke: `an_expert_answers_a_routed_question_and_keeps_it_for_whom_they
 playbook names carol for alice; dave, someone not suggested, a 422; Legal's hidden page a 404; alice to herself a 422;
 only carol and alice see the four questions, bob none; bob and alice can't reply; carol, on two teams, must name one;
 kept for Payments, alice finds the answer and bob doesn't; kept for the company, bob finds it; kept for alice alone,
-nothing is written; a reply naming someone's surgery refused; a second reply a 409; both kept answers proposed in
+nothing is written; a reply naming someone's surgery refused, and so is an answer to a question naming it; a second
+reply a 409; both kept answers proposed in
 Payments' review queue; the database shows bob none of the routed questions; erasure lists both names). Unit:
 `tests/test_experts.py` (2). Red first: with routing to anyone, the check failed (dave was accepted); with a team's
 answer kept for the whole company (`readers_for`, built into the worker), it failed (both documents read `org:acme`);
 with the routed questions' read policy loosened to the org (as owner), it failed (bob read alice's question), the policy
 then restored exactly; each restored (`cmp`) and green. Found while building: the route had no rate limit of its own
-(`RATE_DEFAULTS`, a 500); the first `keepable` test expected a phone number and an email to block a reply, which the
+(`RATE_DEFAULTS`, a 500); an automated security review found that only the reply was screened, while the question
+becomes the kept page's title, so a routed question about someone's health could have been kept for a team or the
+company: both are screened now, in the API and the worker (red first: the new assertion failed on the old API, then
+passed); the first `keepable` test expected a phone number and an email to block a reply, which the
 shared detection rightly doesn't (only a government id, a card, a date of birth, or HR terms do); and F5a's gap list
 read who-to-ask's people by a field it doesn't have (`name`, where it gives `user`), so who to ask about a gap named no
 one: fixed on F5a's branch, with its check now requiring each person named. Also on F5a's branch, its check's question

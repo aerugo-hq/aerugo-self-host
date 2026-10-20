@@ -5,8 +5,8 @@ the asker can read (never anyone at all, so it can't be used to message the whol
 it, in their inboxes in the app; nothing is sent outside it. When replying, the expert chooses who may read the reply
 as knowledge (decided 2026-10-20): the asker only (nothing kept), their own team (the default), or the whole company. A
 kept reply becomes a document with exactly that audience (its team's own members and groups, never a grant to the
-whole company, or the company's members) and a proposed unit for the team's curators to confirm; a reply that names one
-person's sensitive matters or personal data can't be kept. The expert's own words, shared by their own choice: not
+whole company, or the company's members) and a proposed unit for the team's curators to confirm; a question or reply
+that names one person's sensitive matters or personal data can't be kept (the question becomes the page's title). The expert's own words, shared by their own choice: not
 synced content, so invariant 12 (a source's own permissions) doesn't reach it."""
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def keep(conn, routed_id: str) -> dict:
     row = conn.execute(ROUTED_SQL, (routed_id,)).fetchone()
     if not row or row["audience"] not in ("team", "org") or not row["reply"] or row["kept_document"]:
         return {"kept": 0}
-    if not keepable(row["reply"]):
+    if not (keepable(row["reply"]) and keepable(row["question"])):  # the question is the kept page's title: both are screened
         return {"kept": 0, "refused": "sensitive"}
     readers = readers_for(row["audience"], row["keep_team"], row["org"])
     if not readers:

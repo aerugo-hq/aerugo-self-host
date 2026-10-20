@@ -6670,7 +6670,8 @@ def an_expert_answers_a_routed_question_and_keeps_it_for_whom_they_choose():
     tag = uuid.uuid4().hex[:8]
     page = "kb-sev1-playbook"  # Payments' curated page: for someone on Payments, who-to-ask names its members
     qs = {k: f"{w} {tag}?" for k, w in (("team", "Which vault holds the settlement keys"), ("org", "Who signs off a refund freeze"),
-                                        ("asker", "Where is the spare pager"), ("health", "Who covers the payouts queue"))}
+                                        ("asker", "Where is the spare pager"), ("health", "Who covers the payouts queue"),
+                                        ("asked", "Is Jamie Doe back from surgery"))}
 
     def route(user, expert, question, on=page):
         return api("POST", "/v1/questions/route", user, json={"question": question, "page": on, "expert": expert})
@@ -6711,6 +6712,7 @@ def an_expert_answers_a_routed_question_and_keeps_it_for_whom_they_choose():
         assert reply("carol", "asker", {"reply": answers["asker"], "keep": "asker"}).status_code == 200
         assert reply("carol", "health", {"reply": f"Jamie Doe had surgery {tag}, so Lee covers it.", "keep": "team", "team": "payments"}).status_code == 422, \
             "a reply naming someone's surgery was kept"
+        assert reply("carol", "asked", {"reply": f"Next week {tag}.", "keep": "team", "team": "payments"}).status_code == 422,             "an answer to a question naming someone's surgery was kept (the question is the page's title)"
         assert reply("carol", "team", {"reply": "again", "keep": "asker"}).status_code == 409, "a question was answered twice"
         mine = {q["id"]: q for q in api("GET", "/v1/questions/inbox", "alice").json()["asked_by_me"]}
         assert mine[ids["team"]]["reply"] == answers["team"] and mine[ids["asker"]]["kept_for"] == "asker", mine[ids["team"]]

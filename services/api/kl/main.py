@@ -1035,7 +1035,8 @@ def question_inbox(caller: Caller = Depends(authenticate)):
 def reply_question(routed_id: str, body: ReplyIn, caller: Caller = Depends(authenticate)):
     """The expert's reply (F5b), and who may read it as knowledge, their choice: the asker only, their own team (the
     default), or the whole company. A kept reply becomes a document with exactly that audience and a proposed unit for
-    the team's curators (the worker's step); one naming someone's sensitive matters or personal data can't be kept.
+    the team's curators (the worker's step); a question or reply naming someone's sensitive matters or personal data
+    can't be kept, since both are on the page.
     A question routed to someone else is a 404."""
     rid = unit_store._unit_id(routed_id)
     org_id = resolve_org_id(config.ORG_SLUG)
@@ -1045,14 +1046,14 @@ def reply_question(routed_id: str, body: ReplyIn, caller: Caller = Depends(authe
         team = body.team or (next(iter(own)) if len(own) == 1 else None)
         if team not in own:
             raise HTTPException(422, "name which of your own teams keeps the answer")
-        if not experts.keepable(body.reply):
-            raise HTTPException(422, "it names someone's sensitive matters or personal data, so it can't be kept as knowledge")
     with scoped(org_id, caller.principals) as conn:
-        row = conn.execute("SELECT expert, reply FROM routed_questions WHERE id = %s", (rid,)).fetchone()
+        row = conn.execute("SELECT expert, reply, question FROM routed_questions WHERE id = %s", (rid,)).fetchone()
         if not row or row["expert"] != caller.username:
             raise HTTPException(404, "question not found")
         if row["reply"]:
             raise HTTPException(409, "it's already answered")
+        if team and not (experts.keepable(body.reply) and experts.keepable(row["question"])):
+            raise HTTPException(422, "it names someone's sensitive matters or personal data, so it can't be kept as knowledge")
         conn.execute("UPDATE routed_questions SET reply = %s, audience = %s, keep_team = %s, replied_at = now() WHERE id = %s",
                      (body.reply.strip(), body.keep, team, rid))
         if team:
