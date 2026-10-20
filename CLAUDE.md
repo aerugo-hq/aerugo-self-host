@@ -1554,7 +1554,61 @@ regression; the Atlas, the browser tests, and the lint weren't reached. By decis
 loop now runs once every two or three items, unit tests and each item's own checks every time. Not built: merging
 copies into one unit (by decision: a merged unit would be readable only by whoever reads all of its evidence), a
 model judging meaning beyond numbers and negations, conflicts between a perspective and other units, telling owners of
-a new conflict (D1's screen, F6's review), and conflicts in MCP.
+a new conflict (D1's screen, F6's review), and conflicts in MCP. CI on pull request 67: unit 144 passed; smoke 175
+passed, 17 skipped, 0 failed (the jobs check's race didn't recur); the golden set, the scenario, the retailer (the one
+conflict the truth holds, no copies), and the Atlas at their baselines; no leak and no regression.
+F4, answers from knowledge units first (`docs/ENTERPRISE_PLAN.md` section 5; approved 2026-10-19 with F8 and F6, built
+one after another, unit and integration checks every time, the fresh-stack loop after all three). Migration 0061: a
+full-text column over each unit's title and text (generated, with its index), so finding units scales. `kl/unit_answers.py`:
+`find`, in the asker's transaction, takes the units in force (confirmed, stale, or proposed by a curator from its
+evidence; never a model's unconfirmed proposal, never superseded, retired, or outside its dates) that state any of the
+question's content words, then keeps those stating at least two of them and half their weight, each word weighed by how
+rare it is among those units (`weights`: a word every candidate states tells them apart least), computed only over
+what row-level security hands the asker, so nothing derived mixes permissions (invariant 16); then F1's gates
+(`readable`, `shown`) again, and a copy never beside its original (F3). `ranked` orders them by scope fit (`scope_fit`:
++1 per scope naming the asker's, 0 left open, -1 for another team's; a known role or place that differs drops the
+unit, which F8 makes real; today the context is the asker's teams, and a unit for a role or place is used with its scope
+stated), then the closer match to a tenth, then trust, then stale last, then the one in force most recently. Up to 3
+lead Ask's sources, ahead of documents, unless the asker chose the documents (focus, or E1's filters): each as its text,
+a procedure's numbered steps with role and condition, a contact's role and how to reach it, a definition's term, who it
+applies to, "due for review" when stale, and the perspectives the asker reads ("Another view, held by ..."); the
+reminder says to prefer them and give each view as its holder's. A unit goes to a model only when the model may receive
+every one of its evidence's classifications (invariant 7; its shown classification is the most restricted). Its
+citation (`id` `unit:<id>`, `source_kind` `unit`) carries `unit`: its kind, trust, status, owner, scope, structure,
+evidence (only documents the asker opens), and perspectives, so a client shows a procedure as a checklist and a contact as
+a card. A confirmed unit counts as a verified page for confidence, a curator's as a reviewed one; claims are checked
+against its text; the audit names the units used. A stored answer citing a unit is read again at every read
+(`openable`, `unit_answers.visible`) and hidden once the unit can't be read, and a follow-up carries an earlier answer
+only when the model may receive all of its units' classifications (`earlier_turns`, `unit_answers.classifications`).
+MCP's ask answers the same way (it calls the same function). The web app's Ask lists a unit citation by its title,
+without a reader link, and leaves it off the answer's map (its page is D1's). Smoke:
+`ask_answers_from_knowledge_units_first` (alice's answer leads with the unit, its steps and the other view reaching the
+model and its citation, the superseded version never; confirmed, it counts as verified; bob, on Finance's model, gets
+no unit; a model's unconfirmed proposal is never used; a unit citing a confidential document pushed through a pipeline
+never reaches a model allowed public and internal, and is counted as withheld; MCP's answer leads with it; a stored
+answer is shown, then hidden once the unit's evidence names a document that's gone). Unit: `tests/test_unit_answers.py`
+(9: matching and the asking words, a rarer word deciding, scope fit, the order, a stale unit, the source text, the
+classification and the query's safety, and the retailer: every current fact the asker may read as a unit, the first
+unit one of the question's facts for 24 questions, the wrong ones only where F8 decides, where the first unit also
+answers it, or where the right fact is hidden from the asker and another about the same recall leads). The retailer's
+Ask check (`score` in kl.company_eval, in CI) now fails on a unit cited to someone who can't read all its evidence (a
+leak) or a superseded unit, and records which questions Ask leads with a right unit for (`units` in the scorecard,
+held by `evals.compare` once recorded). Red first: with units switched off in the API, the check failed (Ask led with
+the Sev1 playbook); with the egress rule removed, the unit built on the confidential document reached the model; with
+the status filter removed, a model's unconfirmed proposal was used; each restored (`cmp`) and green. Found while
+building: the first matching, by the plain share of the question's words, led with the wrong unit for 15 of 61 retailer
+questions (offline, every fact as a unit); weighing words by rarity cut that to 11, of which 4 F8 decides and 4 are
+permission traps the real path filters; a lower threshold (0.4, 0.45) won back two right leads at the cost of three
+wrong ones, so 0.5 stays (precision over completeness). And migration 0061 first lacked `SET search_path`, which every
+migration carries. Proof, at the commit below, against the running stack (by decision the full fresh-stack loop runs
+after F8 and F6): `make unit` 153 passed; the new smoke check alone passed; `make eval-company`: everyone opening exactly
+the documents and shown exactly the units the truth says, no leak, no superseded unit, Recall@10 100%, MRR 0.85 over 49
+counted questions, Ask citing a right page for 24 of 24 and leading with a right unit for 12 of the 23 store people's
+questions with facts (the others: no unit they can read answers it, as for ana's returns window, whose unit is built
+from the 2026 policy page she can't read), no regression. Not run: the full smoke suite, the golden set, the scenario,
+the Atlas, the browser tests, and the lint (CI's run on the pull request, and the loop after F6). The baseline isn't
+recorded again until the loop. Not built: contacts' current holders and scope by role and place (F8), units in search
+results and the change feed, rendering in the web app (D1), and a model judging which unit answers beyond its words.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1562,8 +1616,9 @@ findings (`docs/PRODUCTION_REVIEW.md`), in its order: C1, P1 to P3, H1 with H5, 
 M4, M1, M3, M5, M7, M8, M9, M6, M10 (its evaluation half), L1, L4, L2, L3, and L1b are done: Phase 0 is complete
 but for M10's real-vendor half (set aside), and its final report is above. Next, as the build order at the top of
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
-F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), and F3 (consolidation) are done, recorded
-above; next, F4 (answers from units first: scope, trust, freshness, procedures as checklists, perspectives shown).
+F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
+units first) are done, recorded above; next, F8 (who is asking: role and location from the directory, contacts'
+current holders), then F6 (lifecycle).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
