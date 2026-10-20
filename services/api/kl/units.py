@@ -206,6 +206,12 @@ WHERE (w.slug = %(ws)s OR wo.slug = %(ws)s) AND (%(status)s::text IS NULL OR c.s
 ORDER BY c.created_at DESC LIMIT 500
 """
 EVENTS_SQL = "SELECT from_status, to_status, reason, created_by, at FROM unit_events WHERE unit_id = %(id)s ORDER BY at, id"
+CORRECTIONS_SQL = """
+SELECT f.id, f.unit_id::text AS unit_id, f.note, f.created_at FROM unit_feedback f
+JOIN knowledge_units u ON u.id = f.unit_id JOIN workspaces w ON w.id = u.owner_team
+WHERE w.slug = %(ws)s AND u.status <> ALL('{superseded,retired}') AND f.created_at > coalesce(u.reviewed_at, '-infinity')
+ORDER BY f.created_at DESC LIMIT 200
+"""
 REVIEW_SQL = f"""
 SELECT {UNIT_COLUMNS}, (SELECT e.reason FROM unit_events e WHERE e.unit_id = u.id ORDER BY e.at DESC, e.id DESC LIMIT 1) AS why
 FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team
@@ -553,19 +559,27 @@ def team_conflicts(ws: str, status: str | None = Query("open", pattern="^(open|r
 
 @router.get("/workspaces/{ws}/review")
 def team_review(ws: str, caller: Caller = Depends(authenticate)):
-    """What a team's curators have to review (F6): proposals to confirm, stale units (each with why), and open conflicts,
-    each only when the caller can read it in full, so the queue reveals nothing they can't read."""
+    """What a team's curators have to review (F6): proposals to confirm, stale units (each with why), open conflicts,
+    and (F5a) corrections people sent since a unit was last confirmed, each only when the caller can read its unit in
+    full, so the queue reveals nothing they can't read; a correction never says who sent it."""
     require_curator(caller, ws)
     org_id = resolve_org_id(config.ORG_SLUG)
-    with scoped(org_id, caller.principals) as conn:
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:
         rows = conn.execute(REVIEW_SQL, {"ws": ws}).fetchall()
-        docs = readable(conn, caller, [d for r in rows for d in r["evidence"]])
+        sent = conn.execute(CORRECTIONS_SQL, {"ws": ws}).fetchall()
+        corrected = {r["id"]: r for r in conn.execute(f"SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team "
+                                                       "WHERE u.id = ANY(%s::uuid[])", (sorted({c["unit_id"] for c in sent}),)).fetchall()}
+        docs = readable(conn, caller, [d for r in [*rows, *corrected.values()] for d in r["evidence"]])
         rows = [r for r in rows if shown(r["evidence"], set(docs))]
         listed = {r["id"] for r in rows}
         proposals = [_summary(r) for r in rows if r["status"] == "proposed" and r["duplicate_of"] not in listed]
         stale = [{**_summary(r), "why": r["why"]} for r in rows if r["status"] == "stale"]
-        audit(conn, org_id, caller.username, "unit.review", [ws], {"proposals": len(proposals), "stale": len(stale)})
-    return {"proposals": proposals, "stale": stale, "conflicts": team_conflicts(ws, "open", caller)["conflicts"]}
+        corrections = [{"unit": _summary(corrected[c["unit_id"]]), "note": c["note"], "at": c["created_at"].isoformat()}
+                       for c in sent if c["unit_id"] in corrected and shown(corrected[c["unit_id"]]["evidence"], set(docs))]
+        audit(conn, org_id, caller.username, "unit.review", [ws], {"proposals": len(proposals), "stale": len(stale),
+                                                                   "corrections": len(corrections)})
+    return {"proposals": proposals, "stale": stale, "corrections": corrections,
+            "conflicts": team_conflicts(ws, "open", caller)["conflicts"]}
 
 
 @router.post("/units/conflicts/{conflict_id}/resolve")

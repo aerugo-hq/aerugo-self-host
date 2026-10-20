@@ -34,7 +34,7 @@ from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .units import router as units_router
-from . import context as asking, unit_answers
+from . import context as asking, gaps, unit_answers, units as unit_store
 from .extraction import router as extraction_router
 from .gateway import month_usage
 from .connections_api import router as connections_router
@@ -856,15 +856,18 @@ def search(
 
 
 # ------------------------------------------------------------------ feedback (slice M2b)
-FEEDBACK_VERDICTS = {"search": {"right", "wrong", "missing"}, "ask": {"helpful", "not_helpful"}}
+FEEDBACK_VERDICTS = {"search": {"right", "wrong", "missing"}, "ask": {"helpful", "not_helpful"}, "unit": {"wrong"}}
 
 
 class FeedbackIn(BaseModel):
-    kind: Literal["search", "ask"]
+    kind: Literal["search", "ask", "unit"]
     query: str = Field(min_length=2, max_length=2000)
     verdict: Literal["right", "wrong", "missing", "helpful", "not_helpful"]
     result: str | None = Field(default=None, max_length=128)  # the search result marked right or wrong
     cited: list[str] = Field(default_factory=list, max_length=12)  # the sources an answer cited
+    question: int | None = Field(default=None, ge=1)  # F5a: the asker's own recorded question this answer was for
+    unit: str | None = Field(default=None, max_length=64)  # F5a: the unit a correction is about...
+    note: str | None = Field(default=None, max_length=1000)  # ...and what's wrong with it
 
 
 @app.post("/v1/feedback", status_code=201)
@@ -874,6 +877,8 @@ def feedback(body: FeedbackIn, caller: Caller = Depends(authenticate)):
     is 404, like a read, so feedback can't be used to probe for hidden documents."""
     if body.verdict not in FEEDBACK_VERDICTS[body.kind]:
         raise HTTPException(422, f"a {body.kind} verdict is one of: {', '.join(sorted(FEEDBACK_VERDICTS[body.kind]))}")
+    if body.kind == "unit":
+        return correct_unit(body, caller)
     if body.kind == "search" and (body.result is None) != (body.verdict == "missing"):
         raise HTTPException(422, "right and wrong name the result they're about; missing names none")
     if body.kind == "ask" and body.result is not None:
@@ -899,9 +904,79 @@ def feedback(body: FeedbackIn, caller: Caller = Depends(authenticate)):
                    or not audience_allows(caller, found[k]["audience"], member_of) for k in keys):
                 raise HTTPException(404, "result not found")
         scope = sorted({slug for k in keys for slug in found[k]["slugs"]})
+        if body.kind == "ask" and body.question:  # F5a: on their own question only (row-level security), else not found
+            if not conn.execute("UPDATE questions SET helpful = %s WHERE id = %s", (body.verdict == "helpful", body.question)).rowcount:
+                raise HTTPException(404, "question not found")
         audit(conn, org_id, caller.username, "feedback", scope, {
             "kind": body.kind, "query": body.query, "verdict": body.verdict, "result": body.result, "cited": body.cited})
     return {"recorded": True}
+
+
+def correct_unit(body: FeedbackIn, caller: Caller) -> dict:
+    """F5a: "this unit is wrong", from someone who reads the unit in full, for its owner team's review queue. Who sent it
+    isn't shown to them. A unit the caller can't read is a 404, like a read."""
+    note = (body.note or "").strip()
+    if not body.unit or not note:
+        raise HTTPException(422, "a correction names its unit and says what's wrong")
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        row, _ = unit_store._visible_unit(conn, caller, unit_store._unit_id(body.unit))
+        if not row:
+            raise HTTPException(404, "unit not found")
+        conn.execute("INSERT INTO unit_feedback (org_id, unit_id, note, created_by) VALUES (kl.current_org(), %s, %s, %s)",
+                     (row["id"], note, caller.username))
+        audit(conn, org_id, caller.username, "unit.correction", [row["owner"]], {"unit": row["id"]})
+    return {"recorded": True}
+
+
+# ------------------------------------------------------------------ gaps (F5a)
+GAPS_SQL = """SELECT id::text AS id, question, asked, askers, state, first_asked, last_asked FROM knowledge_gaps
+WHERE %(ws)s = ANY(teams) AND state = %(state)s AND askers >= %(min)s ORDER BY askers DESC, last_asked DESC LIMIT 50"""
+GAP_PAGES = 3   # the closest pages shown for a gap, searched as its reader
+GAP_LOOKUPS = 10  # gaps that get them, at most, per listing
+
+
+@app.get("/v1/workspaces/{ws}/gaps")
+def team_gaps(ws: str, state: str = Query("open", pattern="^(open|answered|dismissed)$"), caller: Caller = Depends(authenticate)):
+    """What the team's people asked and didn't get answered well (F5a), for its curators: each gap's wording, how often,
+    and by how many different people (at least KL_GAP_MIN_ASKERS), never by whom; and for the first few, the closest
+    pages the reader can open and who to ask about the first, found as the reader, so nothing comes from what they
+    can't read."""
+    unit_store.require_curator(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:
+        rows = conn.execute(GAPS_SQL, {"ws": ws, "state": state, "min": config.GAP_MIN_ASKERS}).fetchall()
+        targets = resolve_targets(conn, caller, "org")
+        audit(conn, org_id, caller.username, "gaps.read", [ws], {"state": state, "shown": len(rows)})
+    out = []
+    for n, r in enumerate(rows):
+        gap = {"id": r["id"], "question": r["question"], "asked": r["asked"], "askers": r["askers"], "state": r["state"],
+               "first_asked": r["first_asked"].isoformat(), "last_asked": r["last_asked"].isoformat()}
+        if n < GAP_LOOKUPS:
+            _, visible, _ = retrieve(org_id, caller, r["question"], targets, GAP_PAGES)  # its own transactions (H5)
+            gap["closest"] = [{"id": v["external_key"], "title": v["title"]} for v in visible]
+            if visible:
+                try:
+                    gap["ask"] = [{"user": p.get("user"), "reasons": p.get("reasons", [])}
+                                  for p in concept_people(visible[0]["external_key"], caller).get("people", [])][:3]
+                except HTTPException:
+                    gap["ask"] = []
+        out.append(gap)
+    return {"gaps": out}
+
+
+@app.post("/v1/workspaces/{ws}/gaps/{gap_id}/dismiss")
+def dismiss_gap(ws: str, gap_id: str, caller: Caller = Depends(authenticate)):
+    """A curator sets a gap aside (not a real need, or answered elsewhere); it stays dismissed while it's still asked."""
+    unit_store.require_curator(caller, ws)
+    gid = unit_store._unit_id(gap_id)  # a uuid, or 404
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals, teams=[ws]) as conn:
+        if not conn.execute("UPDATE knowledge_gaps SET state = 'dismissed', updated_at = now() WHERE id = %s AND %s = ANY(teams)",
+                            (gid, ws)).rowcount:
+            raise HTTPException(404, "gap not found")
+        audit(conn, org_id, caller.username, "gaps.dismiss", [ws], {"gap": gid})
+    return {"id": gid, "state": "dismissed"}
 
 
 # ------------------------------------------------------------------ model registry
@@ -2127,6 +2202,9 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         pairs = [(row["newer"], row["older"]) for row in conn.execute(SUPERSEDES_SQL, {"keys": keys}).fetchall()] if len(keys) > 1 else []
         sure = confidence(answer != NOT_FOUND, [{"id": r["external_key"], "tier": r.get("tier")}
                                                 for n, r in enumerate(sources, 1) if n in cited], pairs, claims, bool(fitted))
+        # F5a: what was asked and how well it was answered, kept for the person's own feedback and for gaps
+        asked = gaps.record(conn, caller, question, answer != NOT_FOUND, sure["level"], any(r.get("unit") for r in sources),
+                            admission.own_teams(caller))
         audit(conn, org_id, caller.username, "ask", targets, {
             "question": question, "model": model,
             "sources": [r["external_key"] for r in sources], "withheld_by_egress": withheld,
@@ -2147,6 +2225,7 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
         "confidence": sure,
         "claims": claims,
         "manifest": [{"id": r["external_key"], "source_version": r["source_version"]} for r in sources],
+        "question": asked,
         **({"budget": budget} if budget else {}),
         "note": ACCESS_NOTE,
     }

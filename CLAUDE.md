@@ -1718,6 +1718,60 @@ regression; `make atlas-eval` exact, no leak, no regression; `make e2e` 37 passe
 The retailer's baseline was recorded again on that stack, in CI's order after the other sets (`kl.company_eval
 --record`): Recall@10 100%, MRR 0.83 over 52 counted questions, with which questions lead with a right unit (15 of 26)
 now held; the golden set's, the scenario's, and the Atlas's records are unchanged.
+CI on pull request 70 (F6, at b2f5969): unit 165 passed; smoke 178 passed, 17 skipped, 0 failed; the golden set, the
+scenario, the retailer (the truth's 3 of 48 units stale), and the Atlas at their baselines; no leak and no regression. F4,
+F8, and F6 merged in order (pull requests 68, 69, 70).
+F5a, the learning loop's first half (`docs/ENTERPRISE_PLAN.md` section 5, principle 7; approved 2026-10-20 with F7 and
+F5b, F5 split in two so its second half, which lets an expert share their own answer, stands on its own). Migration
+0064: `questions` (one row per question Ask answered for a person, never a service account: whether anything was found,
+its confidence, whether a unit led, the asker's own teams, its text and content words, and the asker's feedback), with
+row-level security that lets the API insert, read, and rate only the caller's own rows (a column grant on
+`helpful` alone), the worker reading all; `knowledge_gaps` (what several different people weren't answered well: its
+wording, how often, by how many, the teams they're on, open, answered, or dismissed), which the API reads only for the
+teams its transaction names; and `unit_feedback` (a correction's note), which anyone who reads the unit may send and
+only its owner team reads. The asker's username is there only to count different askers and for a data-subject
+request (`username` and `created_by` are among the names erasure finds); nothing shows who asked or who corrected.
+`kl/gaps.py`: Ask records each question (`record`), its text kept only when neither the sensitive gate (one person's
+health, performance, discipline, or pay) nor personal-data detection flags it, else only the rest; questions are pruned
+after `KL_QUESTION_DAYS` (30) by retention, and every gap built from them with them. A question wasn't answered well
+when nothing was found, its asker said it didn't help, or, with no word from them, its confidence was low
+(`unanswered`). The worker's pass (`gaps.refresh`, once a minute while questions came in) groups the window's questions
+by their content words, lightly stemmed ("stored" and "store", "keys" and "key"; `group`), and a group is a gap once at
+least `KL_GAP_MIN_ASKERS` (3) different people went unanswered (`gap_of`), worded as most of them asked it, marked
+answered when its latest ask was answered well; a curator's dismissal sticks while it's still asked. A gap's teams are
+the ones its askers hold a role on themselves or through their groups (`admission.own_teams`, which G4's pilot gate now
+uses too), never a team granted to the whole company, which would show every gap to its curators. `GET
+/v1/workspaces/{ws}/gaps` (the team's curators; open, answered, or dismissed): each gap's wording, how often, and by how
+many, never by whom, applying the minimum again, and for the first ten the closest pages the reader can open and who to
+ask about the first, found as the reader; `POST .../gaps/{id}/dismiss`. Ask's answer carries `question`, its id, and
+`POST /v1/feedback` takes it to rate the asker's own answer (another's is a 404). Corrections: feedback kind `unit`
+("wrong", with a note) from someone who reads the unit in full (else 404) reaches F6's review queue as `corrections`,
+without the sender, until the unit is confirmed again; votes never change a unit's trust (only its owner's confirmation
+does). The retailer: its truth's `GAP_QUESTIONS` (the store people asking what no page answers: one asked by three, a
+gap; one by two, not; one that helped them, not; one about Sam Rivera's surgery, never kept), and `gaps_check` in
+kl.company_eval (in CI): exactly the truth's gaps reach Stores' curator, never naming who asked, another team is
+refused, and no question about someone's health was kept (every store persona is a curator, so smoke proves a member's
+refusal). Smoke: `questions_become_gaps_and_corrections_reach_owners` (alice, carol, and bob ask something unanswered,
+alice and carol another, all three about someone's surgery; bob's own teams kept, never Commons; the surgery question
+never kept; carol can't rate alice's answer; the gap reaches alice with 3 askers and no names and its closest pages,
+not the two people's question nor the surgery one; carol, a member, and dave, outside, are refused; the database shows
+carol none of alice's questions; a dismissed gap leaves the open list; bob can't correct a unit he can't read, an empty
+note is refused, carol's correction reaches alice's queue without carol's name and leaves once the unit is confirmed
+again). Unit: `tests/test_gaps.py` (5). Red first: with the sensitive gate off, the smoke check failed (the surgery
+question was kept); with the questions' read policy loosened to the org (as owner), it failed (carol read alice's
+question), the policy then restored exactly; with the three-asker minimum dropped in the worker alone, the check still
+passed, since the API applies the minimum again (each layer stands alone), and with both dropped it failed (two
+people's question became a gap); with both dropped, the retailer's check failed too (its weekend parking question,
+asked by two, became a gap); each restored (`cmp`) and green. Found while building: the first grouping missed "Where do
+we store the spare ladder keys?" beside "Where is the spare ladder key stored?" (whole words), so grouping stems them;
+and the first gap teams included Commons, which every person is on. Proof, against the running stack: `make unit` 170
+passed; the new smoke check alone passed, with G4's pilot check (on `own_teams` now), the feedback and golden-mining
+checks, and F4's; `make eval-company`: everyone opening exactly what the truth says, no leak, Recall@10 100%, MRR 0.83,
+leading with a right unit for 15 of 26, the truth's 3 units stale, exactly its 1 gap ("Where are the spare ladder keys
+kept?", 3 askers), no regression. Two Ask checks failed on this long-lived stack for its loaded scenario and retailer
+(they expect the plain seed, and passed in the loop); the full suite is CI's and the loop's. Not built: routing a gap's
+question to an expert and keeping their answer (F5b), a gaps screen (D1), grouping by meaning (embeddings) beyond
+stemmed words, the asker's own history of questions, and votes moving a unit's confidence.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -1727,7 +1781,8 @@ but for M10's real-vendor half (set aside), and its final report is above. Next,
 this file says: G4 (the pilot path), F9 (the synthetic retailer), the ranking fix F9 found, F10a (the Atlas), and
 F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (consolidation), and F4 (answers from
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
-three; next, F5 (the learning loop) and F7 (question sets per team).
+three, and F5a (questions, gaps, and corrections); next, F7 (question sets per team), then F5b (routing to experts
+and kept answers).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
