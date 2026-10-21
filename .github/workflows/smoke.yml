@@ -74,7 +74,7 @@ jobs:
         run: make eval-company-live
 
       - name: No pointer's text in the services' logs (F11a's smoke check plants it in every source it reads)
-        run: test "$(docker compose --profile smoke logs --no-color api worker mcp 2>&1 | grep -c ptr-marker)" = 0
+        run: test "$(docker compose --profile smoke logs --no-color api worker mcp answers 2>&1 | grep -c ptr-marker)" = 0
 
       - name: Service logs
         if: failure()

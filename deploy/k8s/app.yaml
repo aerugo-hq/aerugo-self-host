@@ -248,6 +248,52 @@ spec:
           configMap:
             name: aerugo-wait
 ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: answers   # C2d: Slack asks, apart from the worker, as the API's own database role (it refuses any other)
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: answers
+  template:
+    metadata:
+      labels:
+        app: answers
+    spec:
+      serviceAccountName: aerugo-api   # the API's identity: its database role, and OpenBao's sign-in (M6)
+      initContainers:
+        - name: wait-for-provision
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "/wait/wait.py"]
+          volumeMounts:
+            - name: wait
+              mountPath: /wait
+              readOnly: true
+      containers:
+        - name: answers
+          image: aerugo/api:dev
+          imagePullPolicy: IfNotPresent
+          args: ["python", "-m", "kl.answers_lane"]
+          envFrom:
+            - configMapRef:
+                name: aerugo-app-env
+          env:
+            - name: KL_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: aerugo-dev, key: database-url}
+            - name: OTEL_SERVICE_NAME
+              value: kl-answers
+          resources:   # it holds the embedding model, as the API does
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {memory: 2Gi}
+      volumes:
+        - name: wait
+          configMap:
+            name: aerugo-wait
+---
 apiVersion: v1
 kind: Service
 metadata:

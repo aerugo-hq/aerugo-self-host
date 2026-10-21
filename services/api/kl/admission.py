@@ -55,8 +55,22 @@ def group_changes(user: str, held: set[str], token_groups: set[str]) -> tuple[se
     return {member(g) for g in token_groups - held}, {member(g) for g in held - token_groups}
 
 
+SIGN_IN_SQL = """INSERT INTO person_sign_ins (org_id, username, groups) VALUES (%s, %s, %s)
+ON CONFLICT (org_id, username) DO UPDATE SET groups = EXCLUDED.groups, signed_in_at = now()"""
+
+
+def record_sign_in(caller: Caller) -> None:
+    """A person's verified sign-in and the groups it named (C2d): a Slack ask runs as them with these, only while recent."""
+    from .db import connect, resolve_org_id
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with connect() as conn:
+        conn.execute("SELECT set_config('kl.org_id', %s, true)", (org_id,))
+        conn.execute(SIGN_IN_SQL, (org_id, caller.username, sorted(caller.groups)))
+
+
 def sync_memberships(caller: Caller) -> None:
-    """Make OpenFGA hold the caller's groups as their token says, and their membership of the org."""
+    """Make OpenFGA hold the caller's groups as their token says, and their membership of the org, and record the
+    sign-in (C2d)."""
     if caller.service:  # an automation account's grants are its own, never a group's or the org's
         return
     groups = frozenset(caller.groups)
@@ -72,6 +86,7 @@ def sync_memberships(caller: Caller) -> None:
         fga.write(writes=writes, deletes=deletes)
         _admitted.pop(caller.fga_user, None)  # their teams may have changed with their groups
         log.info("a person's memberships now match their token: %d added, %d left", len(writes), len(deletes))
+    record_sign_in(caller)
     _remember(_synced, caller.fga_user, (groups, time.monotonic() + SYNC_SECONDS))
 
 

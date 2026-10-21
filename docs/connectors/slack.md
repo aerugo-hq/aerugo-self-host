@@ -2,7 +2,7 @@
 
 What the identity team creates for Aerugo to read a Slack workspace, and exactly the access it needs. Aerugo reads:
 the bot sets what's indexed, and each message keeps its channel's own readers. Its writes are optional and few: capture's
-notice in a channel that opted in, and a private reply to someone who saves a message (below).
+notice in a channel that opted in, and a private reply to someone who saves a message or asks a question (below).
 
 ## The app
 
@@ -44,7 +44,7 @@ notice in a channel that opted in, and a private reply to someone who saves a me
   of the window all carry over on that sync. Older messages aren't indexed.
 - **Rate limits:** a 429 is waited out for as long as Slack's `Retry-After` says, then the sync carries on.
 - **It writes only capture's notice and private replies:** one message in a channel when its capture starts, and one
-  when it stops; and a reply only the person who saved a message sees, saying what became of it. Nothing else.
+  when it stops; and a reply only the person who saved a message or asked a question sees. Nothing else.
 - **Sensitive messages are never kept:** a message speaking of one person's health, discipline, performance, or pay,
   or holding personal data (a government id, a card number, a date of birth), is left out of what Aerugo keeps from
   its channel, though the channel's members can still read it in Slack: it's never searched, shown in the reader, or
@@ -110,7 +110,37 @@ readable only by the channel's members (it cites the channel's own document, so 
   | Interactivity Request URL | `https://<your Aerugo>/v1/hooks/slack/<connection id>/interactions` |
   | A message shortcut | Name "Save to Aerugo", callback id `aerugo_save` |
   | Scopes | `chat:write` (already added for capture) covers the private reply |
-- **Not built yet:** the bot answering privately (C2d).
+
+## Ask (optional)
+
+Anyone in a channel the bot reads can ask Aerugo there, and only they see the answer: it's what Aerugo's Ask gives them
+in the app, from what they can read, never what someone else can.
+
+- **Two ways to ask:** `/aerugo ask <question>` (only the asker sees it), or a message that mentions the bot (the
+  channel sees the question; Aerugo reads it back from Slack). The answer comes back as a reply only the asker sees, in
+  the channel or thread they asked in: the answer, the sources it cites as links to Aerugo's reader (titles only), and
+  its confidence. Nothing is posted in the channel.
+- **Who can ask:** someone whose Slack account Aerugo has linked to them, which happens when they sign in to Aerugo
+  once with their work account (their verified email matches their Slack account's). The answer is theirs: their
+  permissions, as their last sign-in left them, so they must have signed in within the last week; after that, the bot
+  asks them to sign in again. A pilot's admission applies. Someone Aerugo can't link is told how to.
+- **The team's model, the team's members:** the connection's team admin chooses which of the team's models answers
+  (Admin, Sources, the connection's Answers panel); until then, asking is off. A question is answered through that
+  model and counts against its budget and each person's Ask limit, so only the team's members can ask here.
+- **What may reach Slack:** public and internal sources, unless the team's admin allows more in the same panel. A
+  source above that is left out of the answer, which says so and links to Aerugo for the full answer.
+- **Never kept or logged:** the question and the answer aren't logged. The question is recorded as any Ask is, for the
+  asker's own feedback and for gaps, behind the sensitive filter.
+- **Set up in the Slack app:**
+
+  | Setting | Value |
+  |---|---|
+  | Scope | `app_mentions:read`, beside those above |
+  | Event subscription | `app_mention`, on the Events URL the connection's webhook uses |
+  | Slash command | `/aerugo` (already set up for capture) |
+
+- **The deployment** runs an answers lane beside the worker (compose's `answers`, a Kubernetes deployment of its own),
+  which answers as the API's database role so each answer is narrowed to its asker; a long sync never holds it up.
 
 ## Connecting it
 
