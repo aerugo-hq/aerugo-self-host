@@ -2198,6 +2198,76 @@ the unconfirmed saves and model proposals made from it). Red first: the save che
 failed ("an answer used a save no curator confirmed"); with the fixes but the removed document's cleanup left out, it
 failed (the deleted message's text still in `kl.knowledge_units`); restored (`cmp`) and green, and the extraction,
 capture, Slack, sensitive-chat, lifecycle, and unit-answer checks passed on the fixed build; `make unit` 215 passed.
+Jira comment visibility (found by F11a's review, its own item, approved 2026-10-20). `jira.issue_sections` put every
+comment in its issue's text, so a comment Jira restricts to a group or a project role (`visibility`) reached everyone
+who reads the issue: in its chunks, search, Ask, decisions, extraction, and, since F11a, a pointer's live read. That
+broke invariant 12 and failed open. Now a comment narrower than its issue (`jira.narrower`: any `visibility`, or a
+Service Management internal note, `jsdPublic` false, which a customer who can browse the request doesn't see) is left
+out, so it reaches no one through Aerugo, not even the people Jira shows it to. Every reader of a Jira issue's text goes
+through `issue_sections`, so one guard covers all of them. Decided: fail closed rather than computing a restricted
+comment's own readers (the issue's readers in that group or role, as a document of its own), which would need Jira's
+group-member and role-actor lookups and the account's "Browse users and groups"; it can be built on top later. An
+issue's version is now `jira.version_of`: Jira's `updated` and a hash of which comments are left out. So a comment
+restricted later is read again at the next full read whether or not Jira marks its issue updated, which no fake can
+show, and every issue indexed before the rule is read again once (within `KL_FULL_SYNC_HOURS`, or at once on
+Re-sync), a pointer's embeddings, which were made from that text, included. The plan's first version was a fixed suffix, which re-reads old issues but misses a comment restricted later
+when Jira doesn't move `updated`; it was changed while writing the docs. The fake Jira passes a comment's
+`visibility` and `jsdPublic` through. `docs/connectors/jira.md` (new) says who reads each issue and which comments are
+left out. Smoke: `a_restricted_jira_comment_reaches_no_one`: an issue alice and carol read, with an open comment and
+one restricted to a group, one to a role, and an internal note, each with a planted word. Indexed, then as a pointer:
+no restricted word is in any table but the audit (which holds the check's own searches); none brings up the issue for
+alice, bob, or carol through its words; Ask, asked in each comment's own words, never puts one in the model's prompt
+while the open comment reaches it; and the reader never shows one. Between the two stages, an issue planted as indexed
+before the rule (the old version, the comment in its chunk) loses the comment at a full read; the open comment
+restricted later, `updated` unchanged, leaves at a full read; and opened again, it comes back. Unit:
+`tests/test_parsers.py` (2: the comments left out and kept, and the version changing when a comment is restricted later
+and never being the bare `updated`). Red first: against main's `jira.py` both unit tests failed (195 passed); the smoke
+check failed on the old code (all three restricted comments in `kl.chunks`), with the guard but the old version (the
+issue indexed before the rule kept its comment past a full read), and with a fixed suffix instead of the hash (the
+comment restricted later stayed past a full read); each mutation was made from a scratch copy and put back (`cmp`).
+Found while proving it: the check first counted the audit table,
+where its own searches record the words they look for, so two of its early red runs failed for that reason and were run
+again. Proof, on a fresh stack of its own (`kljira`, CI's settings: the example `.env`, no `.secrets/`), from main at dc26b0d:
+`make unit` 197 passed; the new check passed, and so did the other eleven that use the fake Jira (Jira's permissions,
+H6's incremental sync, Q5's decisions, Q7's attachments, connection ownership, S8's webhook and readers refresh, F11a's
+pointers, H2's throttling, pipelines, GCP secret references, and C1 and M7's worker check), each run alone. Main then
+took F11b (pull request 75); merged with it, `make unit` 206 passed, and the new check, Jira's permissions, F11a's
+pointers, and F11b's live-only check passed again; and once more after C2a and C2b (pull requests 77 and 79), `make
+unit` 213 passed and the same four checks passed. Not run:
+the full smoke suite and the evaluation sets (CI's run on the pull request; by decision the fresh-stack loop runs every
+two or three items), and the browser tests and the provider's tests (nothing they use changed). Not built: a restricted comment's own
+readers (above); worklogs (not read); and Jira's own search for live-only connections (F11b, merged as pull request 75), which runs
+as the connection's account and so matches words in restricted comments: a reader of an issue could see it rank for a
+word only a restricted comment holds, without its text.
+Jira's live search, summary and description only (found by the Jira comment visibility item, its own item, approved
+2026-10-20). F11b's live-only search asked Jira `text ~` for each word, as the connection's account, which sees
+comments restricted to a group or a project role and Service Management's internal notes. The comment visibility item
+leaves those out of every issue's text, but a word only such a comment held still brought its issue up in search and
+Ask for anyone who reads the issue: a side channel on content they may not see (invariants 11 and 12). No JQL asks for
+only the comments every reader of an issue sees, so `JiraClient.search_text` now asks `summary ~` and `description ~`
+for each word, never `text ~` or `comment ~`. Decided: no comment's words find a live-only issue, open ones included,
+rather than keeping `text ~` and documenting the leak (precision over completeness). Considered and not built: asking
+`text ~` with each hit's comments and keeping a hit only when an open comment, the summary, or the description holds
+the word, which needs a stand-in for Jira's stemming and fails closed only when Jira doesn't cut a hit's comments
+short. Confluence's search is unchanged: no part of a page is shown to fewer people than the page. The fake Jira's
+search matches each term against its own field (`summary`, `description`, or `text`: both and every comment, restricted
+ones included, as the account sees them), so the old query still finds a restricted comment's word.
+`docs/connectors/jira.md` and `storage-modes.md` say what live-only search matches, and why. Smoke:
+`live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search` gains a comment restricted to a group and
+an internal note on its live-only issue, each holding a word nothing else does, and neither word finds the issue for
+alice, who reads it. Unit: `test_jiras_search_matches_only_the_summary_and_description_never_a_comment` (the JQL
+built). Red first, against the old query: the unit test failed (206 passed), and the smoke check failed ("a word only a
+restricted comment holds (group) brought its live-only issue up for a reader of the issue") after its earlier
+assertions passed. Green: `make unit` 207 passed; the check passed, and so did `a_restricted_jira_comment_reaches_no_one`.
+Proof on a fresh stack of its own (`kllive`, CI's settings: the example `.env`, no `.secrets/`), built on the comment
+visibility item's branch (pull request 76): `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, no leak,
+no regression; `make eval-company-live` Recall@10 99%, MRR 0.63 over 52 counted questions, Ask citing a right page for
+25 of 27 and leading with a right unit for 15 of 26, no leak, no regression, and one case better (`recall-decision`, #5
+to #3, not recorded). The old query on the same stack (a mutation from a scratch copy, put back and compared) gave the
+baseline exactly, `recall-decision` at #5: QUAL-7's comment "Recommending a recall" no longer outranks the recall's
+decision page, and two permission-trap questions cite other pages their askers may read; nothing else moved. Not run:
+the full smoke suite and the other evaluation sets (CI's run on the pull request), and the browser tests and the
+provider's tests (nothing they use changed). Not built: comment recall for live-only Jira (above).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2210,7 +2280,8 @@ units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, w
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
 answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
 loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
-fresh-stack loop over the three; next, C2d (the bot answers privately), then Teams (C1a, C1b), C3, and C4.
+fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up; next, C2d (the bot
+answers privately), then Teams (C1a, C1b), C3, and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

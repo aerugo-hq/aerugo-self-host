@@ -7,8 +7,11 @@ Permissions mirror Jira and fail closed:
   - Every other project's readers, and every issue under a security level, come from Jira's own permission search:
     the accounts Jira says may see it, as external identities (ext:atlassian.<account id>) that reach a person only
     once identity matching or the person links them to their Aerugo account.
-  - An issue nobody may read isn't indexed at all."""
+  - An issue nobody may read isn't indexed at all.
+  - A comment Jira shows to fewer people than its issue (restricted to a group or a project role, or a Service
+    Management internal note) is left out: its own readers aren't computed, so it reaches no one through Aerugo."""
 import base64
+import hashlib
 import re
 from datetime import datetime, timezone
 
@@ -79,8 +82,27 @@ def adf_text(node) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def comments(issue: dict) -> list[dict]:
+    return ((issue.get("fields") or {}).get("comment") or {}).get("comments") or []
+
+
+def narrower(comment: dict) -> bool:
+    """A comment Jira shows to fewer people than its issue: restricted to a group or a project role (`visibility`), or a
+    Service Management internal note (`jsdPublic` false). Its own readers aren't computed, so it's left out (fails closed)."""
+    return bool(comment.get("visibility")) or comment.get("jsdPublic") is False
+
+
+def version_of(issue: dict) -> str:
+    """When Jira last updated the issue, and which of its comments are left out: a comment restricted later changes the
+    version whether or not Jira marks the issue updated, so the next full read indexes the issue again without it."""
+    left_out = ",".join(str(c.get("id")) for c in comments(issue) if narrower(c))
+    updated = (issue.get("fields") or {}).get("updated") or issue.get("id") or ""
+    return f"{updated}#{hashlib.sha256(left_out.encode()).hexdigest()[:12]}"
+
+
 def issue_sections(issue: dict) -> tuple[str, list[tuple[str | None, str]]]:
-    """The issue's key and summary as its title; a section for its details and description, and one per comment."""
+    """The issue's key and summary as its title; a section for its details and description, and one per comment its
+    readers may all read."""
     f = issue.get("fields") or {}
     name = lambda person: (person or {}).get("displayName") or "someone"
     facts = [f"{issue['key']}: {f.get('summary') or ''}".strip(),
@@ -91,7 +113,7 @@ def issue_sections(issue: dict) -> tuple[str, list[tuple[str | None, str]]]:
                  f"labels: {', '.join(f['labels'])}" if f.get("labels") else None) if x)]
     description = adf_text(f.get("description")) if f.get("description") else ""
     sections = [(None, "\n".join(facts + ([description] if description else [])))]
-    for c in ((f.get("comment") or {}).get("comments") or [])[:200]:
+    for c in [c for c in comments(issue) if not narrower(c)][:200]:
         text = adf_text(c.get("body"))
         if text:  # a comment that records a decision is one (Q5): who decided, and when
             by, at = name(c.get("author")), str(c.get("created") or "")[:10]
@@ -173,12 +195,14 @@ class JiraClient:
         return self._get(f"issue/{key}", fields=FIELDS)
 
     def search_text(self, words: list[str], projects: list[str] | None, limit: int = 50) -> list[str]:
-        """The issues Jira's own search finds for any of these words, in its order (F11b's runner). Words are letters and
-        digits alone and projects are keys, so nothing a person typed is ever JQL."""
+        """The issues Jira's own search finds for any of these words in their summary or description, in its order (F11b's
+        runner). Never `text ~` or `comment ~`: they match comments, which can be narrower than their issue (`narrower`)
+        while the account sees them, so a word only such a comment holds would bring its issue up for the issue's readers.
+        Words are letters and digits alone and projects are keys, so nothing a person typed is ever JQL."""
         if not words or not all(WORD.fullmatch(w) for w in words) or not all(PROJECT.fullmatch(p) for p in projects or []):
             raise ValueError("search words are letters and digits, projects their keys")
         scope = f"project in ({', '.join(projects)}) AND " if projects else ""
-        terms = " OR ".join(f'text ~ "{w}"' for w in words)
+        terms = " OR ".join(f'{field} ~ "{w}"' for w in words for field in ("summary", "description"))
         page = self._get("search/jql", jql=f"{scope}({terms})", fields="summary", maxResults=limit)
         return [i["key"] for i in page.get("issues") or [] if ISSUE.fullmatch(i.get("key") or "")]
 
@@ -268,8 +292,7 @@ def sync_project(conn, connection: dict, client: JiraClient, project: str, since
     items = []
     for issue in client.issues(project, since=since):
         acl = readers_of(client.browsers(issue=issue["key"]), seen) if restricted(issue) else everyone_else
-        items.append(Item(key=f"jira-{issue['key']}", uri=f"{client.base}/browse/{issue['key']}",
-                          version=str((issue.get("fields") or {}).get("updated") or issue.get("id") or ""),
+        items.append(Item(key=f"jira-{issue['key']}", uri=f"{client.base}/browse/{issue['key']}", version=version_of(issue),
                           title=f"{issue['key']}: {(issue.get('fields') or {}).get('summary') or ''}",
                           path=issue["key"], acl=acl, sections=lambda issue=issue: issue_sections(issue)))
         for a in [] if pointer else ((issue.get("fields") or {}).get("attachment") or [])[:MAX_PER_PAGE]:  # Q7: the issue's readers
