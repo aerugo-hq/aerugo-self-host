@@ -7478,6 +7478,115 @@ def knowledge_units_age_and_their_owners_are_told():
 
 
 @check
+def a_unit_goes_back_for_review_only_when_its_evidences_text_changes():
+    """F6, evidence by its text: a confirmed unit goes back for review when the text Aerugo keeps from a piece of its evidence changes, or the piece is gone, never when only the source's version moves (Jira marking an issue updated with the same text, or a new version format reading every issue again); switching the connection to pointers, the version unchanged, sends nothing back; and a pointer keeps no text, so there its version is all there is to compare, and a version that moves sends its unit back"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    project, name, topic = f"FTX{tag}", f"ftx-{tag.lower()}", f"smoke-f6-text-{tag.lower()}"
+    keys = [f"jira-{project}-1", f"jira-{project}-2"]
+    atl = {"accountId": f"557058:ftxalice{tag.lower()}", "emailAddress": "alice@acme.test", "displayName": "Alice"}
+    principal = f"ext:atlassian.{atl['accountId'].replace(':', '.')}"
+    link = {("user:alice", "owner", f"identity:{principal[4:]}")}
+
+    def jira(day: int, cutover: str = "Saturday", both: bool = True) -> None:  # the fake's site; `updated` moves with the day
+        issue = lambda n, text: {"key": f"{project}-{n}", "summary": f"Cutover {n} {tag}", "description": text,  # noqa: E731
+                                 "updated": f"2026-10-{day:02d}T10:00:00.000+0000", "comments": []}
+        issues = [issue(1, f"The cutover {tag} runs on {cutover}.")] + ([issue(2, f"The rollback {tag} takes an hour.")] if both else [])
+        setup = {"projects": {project: {"name": f"Fingerprints {tag}", "company_wide": False, "browsers": [atl], "issues": issues}}}
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=setup, timeout=10).status_code == 200
+
+    def owner(sql, *args):
+        with psycopg.connect(OWNER_DB, autocommit=True, row_factory=dict_row) as conn:
+            cur = conn.execute(sql, args)
+            return cur.fetchall() if cur.description else []
+
+    def versions() -> dict:
+        return {r["external_key"]: (r["content_hash"], r["storage"]) for r in owner(
+            "SELECT external_key, content_hash, storage FROM kl.documents WHERE external_key = ANY(%s)", keys)}
+
+    def status(uid) -> str:
+        return owner("SELECT status FROM kl.knowledge_units WHERE id = %s", uid)[0]["status"]
+
+    def why(uid) -> str:
+        return owner("SELECT reason FROM kl.unit_events WHERE unit_id = %s ORDER BY id DESC LIMIT 1", uid)[0]["reason"]
+
+    def until(ok, seconds=180):
+        deadline = time.monotonic() + seconds
+        while not ok():
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(3)
+        return True
+
+    def full_read() -> None:
+        assert api("POST", f"/v1/workspaces/payments/connections/{name}/refresh", "alice").status_code == 202
+
+    def lifecycle_ran() -> None:  # a lifecycle pass that began after now has finished
+        since = owner("SELECT now() AS at")[0]["at"]
+        assert until(lambda: owner("SELECT 1 FROM kl.jobs WHERE kind = 'units.lifecycle' AND status = 'done' AND created_at > %s", since)), \
+            "no lifecycle pass ran"
+
+    def unit(n: int, text: str) -> str:
+        r = api("POST", "/v1/workspaces/payments/units", "alice", json={
+            "kind": "fact", "topic": f"{topic}-{n}", "title": f"Cutover {n} {tag}", "text": text, "evidence": [{"document": keys[n - 1]}]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert api("POST", f"/v1/units/{r.json()['id']}/confirm", "alice").status_code == 200
+        return r.json()["id"]
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # alice has linked her Atlassian account: she reads both issues
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, 'user:alice', 'smoke') "
+                     "ON CONFLICT DO NOTHING", (org, principal))
+    fga.write(writes=link)
+    try:
+        jira(1)
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
+            "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token",
+            "projects": [project], "every_minutes": 60})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: len(versions()) == 2), "the issues never arrived"
+        cutover, rollback = unit(1, f"The cutover {tag} runs on Saturday."), unit(2, f"The rollback {tag} takes an hour.")
+
+        before = versions()
+        jira(2)  # Jira marks both issues updated; the text Aerugo keeps is the same
+        full_read()
+        assert until(lambda: all(v[0] != before[k][0] for k, v in versions().items())), "the full read never read the issues again"
+        lifecycle_ran()
+        assert (status(cutover), status(rollback)) == ("confirmed", "confirmed"), \
+            f"a version that moved with the same text sent a unit back for review: {status(cutover)}, {status(rollback)}"
+
+        before = versions()
+        jira(3, cutover="Sunday")  # one issue's text changes; the other's version moves again, its text the same
+        full_read()
+        assert until(lambda: status(cutover) == "stale"), "a changed issue left its unit confirmed"
+        assert why(cutover) == "its evidence changed since it was confirmed", why(cutover)
+        assert until(lambda: versions()[keys[1]][0] != before[keys[1]][0]), "the full read never read the other issue again"
+        lifecycle_ran()
+        assert status(rollback) == "confirmed", "a version that moved again with the same text sent a unit back for review"
+
+        assert api("POST", f"/v1/units/{cutover}/confirm", "alice").status_code == 200  # confirmed on its new text
+        r = api("PATCH", f"/v1/workspaces/payments/connections/{name}", "alice", json={"storage": "pointer"})
+        assert r.status_code == 200 and "storage" in r.json()["changed"], f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: all(storage == "pointer" for _, storage in versions().values())), "the switch to pointers never landed"
+        lifecycle_ran()  # rollback was confirmed two versions ago: only a snapshot moved forward with its text matches now
+        assert (status(cutover), status(rollback)) == ("confirmed", "confirmed"), \
+            f"switching to pointers, the versions unchanged, sent a unit back for review: {status(cutover)}, {status(rollback)}"
+
+        jira(4, cutover="Sunday", both=False)  # as pointers: one issue's version moves with the same text; the other is gone
+        full_read()
+        assert until(lambda: (status(cutover), status(rollback)) == ("stale", "stale")), \
+            f"a pointer's moved version or a deleted issue left its unit confirmed: {status(cutover)}, {status(rollback)}"
+        assert why(cutover) == why(rollback) == "its evidence changed since it was confirmed", (why(cutover), why(rollback))
+        print("      evidence by its text: versions alone and a switch to pointers moved nothing; a changed text, a pointer's moved version, and a deleted issue went back for review")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        owner("DELETE FROM kl.knowledge_units WHERE topic LIKE %s RETURNING id", f"{topic}%")
+        fga.write(deletes=link)
+        owner("DELETE FROM kl.principal_aliases WHERE source = %s RETURNING source", principal)
+        owner("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s RETURNING external_id", f"%ftxalice{tag.lower()}")
+
+
+@check
 def questions_become_gaps_and_corrections_reach_owners():
     """F5a, the learning loop: Ask keeps what each person asked and how well it was answered, and the asker alone rates their own answer; something three different people asked and weren't answered well becomes a gap the askers' teams' curators see, with how often and by how many, never by whom, while two people's question doesn't, and a question about someone's surgery is never kept; a curator may dismiss a gap; and "this unit is wrong" from someone who reads it reaches its owner team's review queue without saying who sent it, until the unit is confirmed again"""
     import uuid

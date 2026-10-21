@@ -29,7 +29,7 @@ from .auth import Caller, authenticate
 from .authz import fga
 from .db import resolve_org_id, scoped
 from .okf import CONCEPT_KEY
-from .lifecycle import EVENT_SQL, SNAPSHOT
+from .lifecycle import EVENT_SQL, SNAPSHOT, TEXT_SNAPSHOT
 from .policy import SLUG, audience_allows, audit, memberships, resolve_targets
 
 log = logging.getLogger("kl.units")
@@ -459,8 +459,9 @@ def _set_status(unit_id: str, caller: Caller, status: str, action: str) -> dict:
         # F6: confirming restarts its review and snapshots its evidence, so a change underneath it can be told
         conn.execute("UPDATE knowledge_units SET status = %s, trust = %s, updated_at = now(), "
                      "reviewed_at = CASE WHEN %s = 'confirmed' THEN now() ELSE reviewed_at END, "
-                     f"evidence_hashes = CASE WHEN %s = 'confirmed' THEN {SNAPSHOT} ELSE evidence_hashes END WHERE id = %s",
-                     (status, trust, status, status, uid))
+                     f"evidence_hashes = CASE WHEN %s = 'confirmed' THEN {SNAPSHOT} ELSE evidence_hashes END, "
+                     f"evidence_texts = CASE WHEN %s = 'confirmed' THEN {TEXT_SNAPSHOT} ELSE evidence_texts END WHERE id = %s",
+                     (status, trust, status, status, status, uid))
         conn.execute(EVENT_SQL, (uid, row["status"], status, "confirmed by its owner" if status == "confirmed" else "retired by its owner",
                                  caller.username))
         audit(conn, org_id, caller.username, action, [row["owner"]], {"unit": uid})
