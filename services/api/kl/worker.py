@@ -721,6 +721,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "proposal.refresh": lambda conn, job: curator.refresh(conn, job["payload"]["proposal_id"]), "connection.discover": handle_connection_discover,
             "connection.sync": handle_connection_sync, "connection.refresh_readers": handle_connection_refresh_readers,
             "slack.capture": capture.request, "slack.notice": capture.notice, "slack.exclude": capture.exclude,  # C2b
+            "slack.save": capture.save,  # C2c
             "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,

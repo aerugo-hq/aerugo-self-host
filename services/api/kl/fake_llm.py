@@ -1138,16 +1138,20 @@ class Handler(BaseHTTPRequestHandler):
             state.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle")),
                           "history_calls": state.get("history_calls", []), "posted": state.get("posted", [])})
             return self._json(200, {})
-        if path.endswith("/api/chat.postMessage") and path.split("/")[1] in SLACK_SITES:  # the bot's one write (C2b's notice)
-            state = SLACK_SITES[path.split("/")[1]]
+        if path.split("/")[-1] in ("chat.postMessage", "chat.postEphemeral") and path.split("/")[1] in SLACK_SITES:
+            state = SLACK_SITES[path.split("/")[1]]  # the bot's writes: C2b's notice, and C2c's private reply
             if self.headers.get("Authorization") != f"Bearer {SLACK_TOKEN}":
                 return self._json(200, {"ok": False, "error": "invalid_auth"})
             form = {k: v[0] for k, v in parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()).items()}
             if form.get("channel") not in state["channels"]:
                 return self._json(200, {"ok": False, "error": "channel_not_found"})
+            private = path.endswith("chat.postEphemeral")
+            if private and form.get("user") not in state["channels"][form["channel"]].get("members", []):
+                return self._json(200, {"ok": False, "error": "user_not_in_channel"})
             ts = f"{time.time():.6f}"
-            state.setdefault("posted", []).append({"channel": form["channel"], "text": form.get("text", ""), "ts": ts})
-            return self._json(200, {"ok": True, "channel": form["channel"], "ts": ts})
+            state.setdefault("posted", []).append({"channel": form["channel"], "text": form.get("text", ""), "ts": ts,
+                                                   **({"user": form["user"], "ephemeral": True} if private else {})})
+            return self._json(200, {"ok": True, "channel": form["channel"], **({"message_ts": ts} if private else {"ts": ts})})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))
         if path == "/microsoft/sites":  # smoke sets SharePoint's sites, which apps each is granted to, and their files

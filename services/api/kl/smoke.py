@@ -4996,6 +4996,155 @@ def a_slack_channel_is_captured_only_with_both_keys_and_its_marks_honored():
             conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"UCAP%{tag}",))
 
 
+@check
+def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
+    """C2c, Save to Aerugo: a message someone saves becomes a proposed unit for the team's curators, readable by the channel's members and no one else; your own message saves anywhere the bot reads, someone else's only once the channel's capture is on; a saver outside the channel, a marked or sensitive message, a forged delivery, and a pointer connection save nothing, and a replay saves once; a message newer than the last sync is saved once it's read; the person who saved is told privately, and the bot writes nothing else; /aerugo save only says how; a mark later removes that message's save alone, and switching to pointers removes every unconfirmed save"""
+    import hashlib
+    import hmac
+    from urllib.parse import urlencode
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    uid = {u: f"USV{u.upper()}{tag}" for u in ("alice", "carol", "bob")}
+    channel, ts = f"CSAV{tag}", lambda n: f"17600{n:05d}.000{n:03d}"
+    fresh = f"{time.time():.6f}"  # a message after the first sync
+    person = lambda u: {"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}}
+    words = {1: f"Carol's tip {tag}: prop the dock door before the truck backs in.", 2: f"Alice's rule {tag}: count the float twice at close.",
+             3: f"Sam is having surgery on Tuesday {tag}, so I'm covering.", 4: f"Marked note {tag}: the side gate sticks.",
+             5: f"Fresh tip {tag}: the new label printer needs a warm-up."}
+
+    def state(marked: tuple = (4,), late: bool = False):
+        said = lambda n, who, at: {"ts": at, "user": uid[who], "text": words[n],
+                                   **({"reactions": [{"name": "no_entry_sign", "users": [uid["alice"]], "count": 1}]} if n in marked else {})}
+        messages = [said(1, "carol", ts(1)), said(2, "alice", ts(2)), said(3, "carol", ts(3)), said(4, "carol", ts(4))]
+        return {"users": [person(u) for u in uid], "channels": {channel: {
+            "name": f"sav-{tag.lower()}", "private": True, "creator": uid["alice"], "members": [uid["alice"], uid["carol"]],
+            "messages": messages + ([said(5, "carol", fresh)] if late else [])}}}
+
+    name, signing = f"sav-slack-{tag.lower()}", secrets.token_hex(16)
+    path = f"/v1/workspaces/payments/connections/{name}"
+    principals = [(u, f"ext:slack.{uid[u]}") for u in ("alice", "carol")]
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in principals}
+
+    def signed(hook, raw: bytes, secret=signing, stamp=None):
+        stamp = str(int(stamp or time.time()))
+        signature = "v0=" + hmac.new(secret.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256).hexdigest()
+        return httpx.post(f"{API}{hook}", content=raw, timeout=10, headers={
+            "Content-Type": "application/x-www-form-urlencoded", "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+
+    def save(user, mts, **kw):
+        payload = {"type": "message_action", "callback_id": "aerugo_save", "channel": {"id": channel}, "user": {"id": uid[user]},
+                   "team": {"id": "T0SMOKE"}, "message_ts": mts, "message": {"ts": mts, "text": "never read from the delivery"}}
+        return signed(f"/v1/hooks/slack/{cid}/interactions", urlencode({"payload": json.dumps(payload)}).encode(), **kw)
+
+    def command(user, text, **kw):
+        raw = urlencode({"command": "/aerugo", "text": text, "channel_id": channel, "user_id": uid[user], "team_id": "T0SMOKE"}).encode()
+        return signed(f"/v1/hooks/slack/{cid}/commands", raw, **kw)
+
+    def jobs(kind):
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FILTER (WHERE status NOT IN ('done', 'failed')), count(*) FROM kl.jobs "
+                                "WHERE kind = %s AND payload->>'connection_id' = %s", (kind, cid)).fetchone()
+
+    def saved():
+        with psycopg.connect(OWNER_DB) as conn:
+            return {r[0]: (str(r[1]), r[2]) for r in conn.execute(
+                "SELECT u.topic, u.id, u.body FROM kl.knowledge_units u JOIN kl.documents d ON d.id = ANY(u.evidence) "
+                "WHERE u.created_by = 'slack-save' AND u.status = 'proposed' AND d.connection_id = %s", (cid,))}
+
+    def told(user):
+        return [p["text"] for p in httpx.get(f"{FAKE_SLACK}/posted", timeout=10).json()
+                if p["channel"] == channel and p.get("ephemeral") and p.get("user") == uid[user]]
+
+    def until(ok, seconds=180):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(3)
+        return ok()
+
+    def settled():
+        return jobs("slack.save")[0] == 0
+
+    from .capture import saved_topic
+    topic = lambda mts: saved_topic(channel, mts)
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in principals:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    cid = None
+    try:
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(), timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel],
+            "history_days": 3650, "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        assert api("POST", path + "/webhook", "alice", json={"signing_secret": signing}).status_code == 201
+        assert until(lambda: any(d["id"].startswith(f"slack-{channel}-") for d in api(
+            "GET", "/v1/search", "carol", params={"q": tag, "limit": 50}).json()["results"])), "the channel never arrived"
+
+        assert save("carol", ts(1), secret="not-the-signing-secret").status_code == 401, "a forged save was taken"
+        stamp = time.time()
+        assert save("carol", ts(1), stamp=stamp).status_code == 200 and save("carol", ts(1), stamp=stamp).status_code == 200
+        assert until(lambda: topic(ts(1)) in saved() and settled()), "carol couldn't save her own message"
+        assert jobs("slack.save")[1] == 1, "a replayed save was taken twice"
+        unit, body = saved()[topic(ts(1))]
+        assert body == words[1], f"the saved text isn't the message as written in Slack: {body!r}"
+        assert api("GET", f"/v1/units/{unit}", "alice").status_code == 200, "a member of the channel can't read the save"
+        assert api("GET", f"/v1/units/{unit}", "bob").status_code == 404, "someone outside the channel read the save"
+        assert until(lambda: any(t.startswith("Saved for Payments") for t in told("carol"))), told("carol")
+
+        for mts, why in ((ts(2), "your own messages"), (ts(3), "personal matters"), (ts(4), "don't capture")):
+            assert save("carol", mts).status_code == 200
+            assert until(settled)
+            assert topic(mts) not in saved(), f"carol saved {mts}, which the rules refuse"
+            assert until(lambda: any(why in t for t in told("carol"))), (mts, told("carol"))
+        assert len(saved()) == 1, saved()
+
+        before = jobs("slack.save")[1]
+        assert command("carol", "save remember the gate code").json()["text"].startswith("To save something"), "/aerugo save didn't say how"
+        assert jobs("slack.save")[1] == before and jobs("slack.capture")[1] == 0, "/aerugo save queued something"
+
+        assert command("alice", "capture on").status_code == 200
+        assert until(lambda: {c["channel"]: c["capture"] for c in api("GET", path + "/capture", "alice").json()["channels"]}.get(channel) == "requested")
+        assert api("POST", f"{path}/capture/{channel}", "alice", json={"action": "confirm"}).json()["capture"] == "on"
+        assert save("bob", ts(2)).status_code == 200 and until(settled)
+        assert topic(ts(2)) not in saved(), "someone in the workspace but not in the channel saved one of its messages"
+        assert save("carol", ts(2)).status_code == 200
+        assert until(lambda: topic(ts(2)) in saved()), "someone else's message wasn't saved once capture was on"
+
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(late=True), timeout=10).status_code == 200
+        assert save("carol", fresh).status_code == 200
+        assert until(lambda: topic(fresh) in saved(), 300), "a message newer than the last sync was never saved"
+        assert save("carol", ts(1)).status_code == 200
+        assert until(lambda: any("already saved" in t for t in told("carol")))
+
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(marked=(1, 4), late=True), timeout=10).status_code == 200
+        event = json.dumps({"type": "event_callback", "event_id": f"Ev{tag}1", "event": {
+            "type": "reaction_added", "user": uid["alice"], "reaction": "no_entry_sign", "item": {"type": "message", "channel": channel, "ts": ts(1)}}}).encode()
+        raw_stamp = str(int(time.time()))
+        signature = "v0=" + hmac.new(signing.encode(), b"v0:" + raw_stamp.encode() + b":" + event, hashlib.sha256).hexdigest()
+        assert httpx.post(f"{API}/v1/hooks/slack/{cid}", content=event, timeout=10, headers={
+            "Content-Type": "application/json", "X-Slack-Request-Timestamp": raw_stamp, "X-Slack-Signature": signature}).status_code == 202
+        assert until(lambda: topic(ts(1)) not in saved()), "a message marked don't capture kept its save"
+        assert topic(ts(2)) in saved() and topic(fresh) in saved(), "a mark on one message removed another's save"
+
+        assert api("PATCH", path, "alice", json={"storage": "pointer"}).status_code == 200
+        assert until(lambda: not saved(), 240), f"switched to pointers, unconfirmed saves still hold text: {saved()}"
+        assert save("carol", ts(2)).status_code == 200
+        assert until(lambda: any("keeps no text" in t for t in told("carol"))), "a pointer connection took a save"
+        assert not saved()
+        assert all(p.get("ephemeral") or p["text"].startswith("Aerugo now proposes") for p in httpx.get(
+            f"{FAKE_SLACK}/posted", timeout=10).json() if p["channel"] == channel), "the bot posted something else in the channel"
+    finally:
+        api("DELETE", path, "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
+            conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"USV%{tag}",))
+
+
 POINTER_MARK = "ptr-marker"  # F11a: in every source text the pointer check plants, so CI can grep the API's and worker's logs
 
 

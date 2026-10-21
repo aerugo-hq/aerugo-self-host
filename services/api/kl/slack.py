@@ -157,6 +157,16 @@ class SlackClient:
             raise SlackError(str(body.get("error") or "not ok")[:100])
         return str(body.get("ts") or "")
 
+    def whisper(self, channel: str, user: str, text: str) -> None:
+        """A reply only `user` sees, in a channel (C2c: what became of their save). The bot's other write."""
+        if not CHANNEL.fullmatch(channel) or not USER.fullmatch(user):
+            raise ValueError("unexpected channel or user")
+        r = source_http.post(f"{self.base}/chat.postEphemeral", data={"channel": channel, "user": user, "text": text},
+                             headers=self.headers, timeout=30)
+        r.raise_for_status()
+        if not r.json().get("ok"):
+            raise SlackError(str(r.json().get("error") or "not ok")[:100])
+
     def replies(self, channel: str, ts: str) -> list[dict]:
         return self._pages("conversations.replies", "messages", channel=channel, ts=ts, limit=200)
 
@@ -167,6 +177,19 @@ NOTICE_ON = ("Aerugo now proposes knowledge from this channel's threads, for {te
              "channel's members can read it. React :no_entry_sign: to any message to keep it out. "
              "Run /aerugo capture off to stop.")
 NOTICE_OFF = "Aerugo no longer proposes knowledge from this channel."
+SAVE_SHORTCUT = "aerugo_save"  # the message shortcut's callback id (C2c)
+SAVE_COMMAND = re.compile(r"^\s*save\b", re.I)
+SAVED = "Saved for {team}'s curators to review. Only this channel's members can read it."
+NOT_SAVED = {  # what the person who saved is told, privately
+    "saver": "Only someone in this workspace and in this channel can save its messages.",
+    "gone": "That message isn't there any more.",
+    "someone else's": "You can save your own messages here. Someone else's can be saved only in a channel whose capture is on.",
+    "marked": "That message is marked don't capture, so it can't be saved.",
+    "sensitive": "That message speaks of someone's personal matters, so Aerugo doesn't keep it.",
+    "no text": "This connection keeps no text, so nothing can be saved from it.",
+    "not found": "Aerugo doesn't hold that message (it may be older than the channel's history window).",
+    "already": "That message is already saved.",
+}
 
 
 def holding(channel: str, message: dict) -> list[str]:
@@ -191,6 +214,24 @@ def may_turn(user: dict, channel: dict, team: str) -> bool:
     if not user or user.get("deleted") or user.get("is_bot") or user.get("team_id") != team:
         return False
     return user.get("id") == channel.get("creator") or bool(user.get("is_admin") or user.get("is_owner") or user.get("is_primary_owner"))
+
+
+def may_save(saver: dict, members: list[str], message: dict, team: str, captured: bool,
+             names: dict[str, str], excluded: frozenset[str]) -> str | None:
+    """Why a message can't be saved (a key of NOT_SAVED), or None (C2c, decided 2026-10-20): by someone in this
+    workspace and in the channel, never a guest, a leaver, or a bot; their own message anywhere the bot reads, someone
+    else's only where capture is on; never one marked "don't capture" or speaking of someone's personal matters."""
+    if not saver or saver.get("deleted") or saver.get("is_bot") or saver.get("team_id") != team or saver.get("id") not in members:
+        return "saver"
+    if not TS.fullmatch(str(message.get("ts") or "")):
+        return "gone"
+    if message.get("user") != saver["id"] and not captured:
+        return "someone else's"
+    if message["ts"] in excluded or any(r.get("name") == DONT_CAPTURE and r.get("count", 0) > 0 for r in message.get("reactions") or []):
+        return "marked"
+    if privacy.sensitive(said(message, names)):
+        return "sensitive"
+    return None
 
 
 def client_for(connection: dict) -> SlackClient:

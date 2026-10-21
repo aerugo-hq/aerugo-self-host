@@ -46,7 +46,7 @@ FORGET_SQL = (
     "DELETE FROM entity_scans WHERE document_id = %(doc)s",
     "DELETE FROM reference_links WHERE source_id = %(doc)s",
     "DELETE FROM reference_scans WHERE document_id = %(doc)s",
-    "DELETE FROM knowledge_units WHERE created_by = 'extraction' AND status = 'proposed' AND evidence = ARRAY[%(doc)s]::uuid[]",
+    "DELETE FROM knowledge_units WHERE created_by IN ('extraction', 'slack-save') AND status = 'proposed' AND evidence = ARRAY[%(doc)s]::uuid[]",
     "DELETE FROM extraction_state WHERE document_id = %(doc)s",
 )
 

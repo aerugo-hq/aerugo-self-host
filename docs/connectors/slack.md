@@ -1,8 +1,8 @@
 # Slack
 
 What the identity team creates for Aerugo to read a Slack workspace, and exactly the access it needs. Aerugo reads:
-the bot sets what's indexed, and each message keeps its channel's own readers. Its one write is optional: capture's
-notice in a channel that opted in (below).
+the bot sets what's indexed, and each message keeps its channel's own readers. Its writes are optional and few: capture's
+notice in a channel that opted in, and a private reply to someone who saves a message (below).
 
 ## The app
 
@@ -43,8 +43,8 @@ notice in a channel that opted in (below).
   edit, a deleted message, a member who left a channel, a message Slack's retention removed, and a day that fell out
   of the window all carry over on that sync. Older messages aren't indexed.
 - **Rate limits:** a 429 is waited out for as long as Slack's `Retry-After` says, then the sync carries on.
-- **It writes only capture's notice:** one message in a channel when its capture starts, and one when it stops; nothing
-  else, and nowhere else.
+- **It writes only capture's notice and private replies:** one message in a channel when its capture starts, and one
+  when it stops; and a reply only the person who saved a message sees, saying what became of it. Nothing else.
 - **Sensitive messages are never kept:** a message speaking of one person's health, discipline, performance, or pay,
   or holding personal data (a government id, a card number, a date of birth), is left out of what Aerugo keeps from
   its channel, though the channel's members can still read it in Slack: it's never searched, shown in the reader, or
@@ -86,7 +86,31 @@ came from.
 
   The command and the events are signed with the app's signing secret, the one the connection's webhook holds; an
   unsigned, stale, or repeated delivery is refused or ignored.
-- **Not built yet:** "Save to Aerugo" on one message (C2c), and the bot answering privately (C2d).
+
+## Save to Aerugo (optional)
+
+Anyone in a channel the bot reads can save one message for the connection's team: choose **Save to Aerugo** from the
+message's menu. It becomes a proposed unit with the message's text as written, for the team's curators to confirm,
+readable only by the channel's members (it cites the channel's own document, so it follows its membership).
+
+- **Whose message:** your own, in any channel the bot reads; someone else's, only in a channel whose capture is on,
+  where everyone was told.
+- **Never saved:** a message marked "don't capture", or one speaking of someone's personal matters; anything from a
+  connection that keeps pointers only or is live only, since those keep no text. Marking a message "don't capture"
+  later removes its save, if no curator has confirmed it yet.
+- **Who can save:** someone in this workspace and in the channel; never a guest from a shared channel's other side,
+  someone who has left, or a bot. Aerugo reads the person, the message, and the channel again from Slack; it takes
+  nothing else from the shortcut.
+- **The person who saved is told privately** what became of it (saved, already saved, or why not).
+- **A note:** `/aerugo save` doesn't take text. Post the note in the channel, then save it.
+- **Set up in the Slack app:**
+
+  | Setting | Value |
+  |---|---|
+  | Interactivity Request URL | `https://<your Aerugo>/v1/hooks/slack/<connection id>/interactions` |
+  | A message shortcut | Name "Save to Aerugo", callback id `aerugo_save` |
+  | Scopes | `chat:write` (already added for capture) covers the private reply |
+- **Not built yet:** the bot answering privately (C2d).
 
 ## Connecting it
 
