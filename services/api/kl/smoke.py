@@ -4858,6 +4858,141 @@ def slack_hooks_are_signed_fresh_and_taken_once():
             conn.execute("DELETE FROM kl.principal_aliases WHERE source LIKE %s", (f"ext:slack.U%{tag}",))
 
 
+@check
+def a_slack_channel_is_captured_only_with_both_keys_and_its_marks_honored():
+    """C2b, Slack channel capture: a channel's threads are proposed as knowledge only once its creator (or a workspace admin) ran /aerugo capture on in it and the team's admin confirmed in Aerugo; a member's command, a forged or replayed one, and a confirm no one asked for in the channel change nothing; the bot posts one notice when capture starts and one when it stops, and nothing else; proposals come from that channel alone, readable by its members; a message someone marks "don't capture" is never kept again, and a mark Slack doesn't show is ignored"""
+    import hashlib
+    import hmac
+    from urllib.parse import urlencode
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    uid = {u: f"UCAP{u.upper()}{tag}" for u in ("alice", "carol")}
+    channel, quiet, ts = f"CCAP{tag}", f"CQUI{tag}", lambda n: f"17600{n:05d}.000{n:03d}"
+    gate = f"side gate code for {tag.lower()} is 4412"
+    person = lambda u: {"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}}
+
+    def state(marked: bool = False):
+        reminder = {"ts": ts(3), "user": uid["carol"], "text": f"Reminder: the {gate}."}
+        if marked:
+            reminder["reactions"] = [{"name": "no_entry_sign", "users": [uid["carol"]], "count": 1}]
+        return {"users": [person(u) for u in uid], "channels": {
+            channel: {"name": f"cap-{tag.lower()}", "private": True, "creator": uid["alice"], "members": list(uid.values()), "messages": [
+                {"ts": ts(1), "user": uid["carol"], "text": f"How do we reset the till float {tag}?", "thread_ts": ts(1), "reply_count": 1,
+                 "replies": [{"ts": ts(2), "user": uid["alice"], "text": f"Count the float at close and log it in the drawer book {tag}.", "thread_ts": ts(1)}]},
+                reminder]},
+            quiet: {"name": f"qui-{tag.lower()}", "private": True, "creator": uid["alice"], "members": list(uid.values()), "messages": [
+                {"ts": ts(5), "user": uid["alice"], "text": f"Quiet channel {tag}: the bins go out on Tuesdays.", "thread_ts": ts(5), "reply_count": 1,
+                 "replies": [{"ts": ts(6), "user": uid["carol"], "text": f"Recycling goes out on Thursdays {tag}.", "thread_ts": ts(5)}]}]}}}
+
+    name, signing = f"cap-slack-{tag.lower()}", secrets.token_hex(16)
+    path = f"/v1/workspaces/payments/connections/{name}"
+    thread, day, other = f"slack-{channel}-{ts(1)}", f"slack-{channel}-2025-10-09", f"slack-{quiet}-{ts(5)}"
+    principals = [(u, f"ext:slack.{uid[u]}") for u in uid]
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in principals}
+
+    def signed(hook, raw: bytes, content_type: str, secret=signing, stamp=None):
+        stamp = str(int(stamp or time.time()))
+        signature = "v0=" + hmac.new(secret.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256).hexdigest()
+        return httpx.post(f"{API}{hook}", content=raw, timeout=10, headers={
+            "Content-Type": content_type, "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+
+    def command(user, text, **kw):
+        raw = urlencode({"command": "/aerugo", "text": text, "channel_id": channel, "user_id": uid[user], "team_id": "T0SMOKE"}).encode()
+        return signed(f"/v1/hooks/slack/{cid}/commands", raw, "application/x-www-form-urlencoded", **kw)
+
+    def capture():
+        return {c["channel"]: c["capture"] for c in api("GET", path + "/capture", "alice").json()["channels"]}.get(channel)
+
+    def jobs_done(kind):
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FILTER (WHERE status NOT IN ('done', 'failed')), count(*) FROM kl.jobs "
+                                "WHERE kind = %s AND payload->>'connection_id' = %s", (kind, cid)).fetchone()
+
+    def proposals(key):
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.knowledge_units u JOIN kl.documents d ON d.id = ANY(u.evidence) "
+                                "WHERE u.created_by = 'extraction' AND d.external_key = %s", (key,)).fetchone()[0]
+
+    def posted():
+        return [p for p in httpx.get(f"{FAKE_SLACK}/posted", timeout=10).json() if p["channel"] == channel]
+
+    def until(ok, seconds=180):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(3)
+        return ok()
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in principals:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    ensure_fake_models()
+    cid = None
+    try:
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(), timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel, quiet],
+            "history_days": 3650, "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        assert api("POST", path + "/webhook", "alice", json={"signing_secret": signing}).status_code == 201
+        assert until(lambda: capture() == "off"), "the channels never arrived"
+        assert api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": "smoke-fake"}).status_code == 200
+
+        assert api("POST", f"{path}/capture/{channel}", "alice", json={"action": "confirm"}).status_code == 409, \
+            "capture was confirmed though no one asked for it in the channel"
+        assert command("carol", "capture on").json()["response_type"] == "ephemeral"  # a member: answered privately, refused by the worker
+        assert until(lambda: jobs_done("slack.capture")[0] == 0 and jobs_done("slack.capture")[1] == 1)
+        assert capture() == "off", "a member who neither created the channel nor administers the workspace turned capture on"
+        assert command("alice", "capture on", secret="not-the-signing-secret").status_code == 401, "a forged command was taken"
+        assert command("alice", "capture on", stamp=time.time() - 600).status_code == 401, "a command ten minutes old was taken"
+        stamp = time.time()
+        assert command("alice", "capture on", stamp=stamp).status_code == 200
+        assert command("alice", "capture on", stamp=stamp).status_code == 200  # the same delivery again
+        assert until(lambda: capture() == "requested"), "the channel's creator couldn't ask for capture"
+        assert jobs_done("slack.capture")[1] == 2, "a replayed command was taken twice"
+        assert not posted(), "the bot posted before the team's admin confirmed"
+        assert api("POST", f"{path}/capture/{channel}", "carol", json={"action": "confirm"}).status_code in (403, 404), \
+            "someone who isn't the team's admin confirmed capture"
+        assert api("POST", f"{path}/capture/{channel}", "alice", json={"action": "confirm"}).json()["capture"] == "on"
+        assert until(lambda: len(posted()) == 1), "the channel wasn't told capture started"
+        assert "Payments" in posted()[0]["text"] and ":no_entry_sign:" in posted()[0]["text"], posted()
+
+        assert until(lambda: proposals(thread) > 0 and proposals(day) > 0, 240), "nothing was proposed from the captured channel"
+        assert proposals(other) == 0, "a channel no one captured was extracted from"
+        with psycopg.connect(OWNER_DB) as conn:
+            unit = conn.execute("SELECT u.id FROM kl.knowledge_units u JOIN kl.documents d ON d.id = ANY(u.evidence) "
+                                "WHERE u.created_by = 'extraction' AND d.external_key = %s LIMIT 1", (thread,)).fetchone()[0]
+        assert api("GET", f"/v1/units/{unit}", "carol").status_code == 200, "a member of the channel can't read its proposal"
+        assert api("GET", f"/v1/units/{unit}", "bob").status_code == 404, "someone outside the channel read its proposal"
+
+        hook = f"/v1/hooks/slack/{cid}"
+        event = lambda n, mts: json.dumps({"type": "event_callback", "event_id": f"Ev{tag}{n}", "event": {
+            "type": "reaction_added", "user": uid["carol"], "reaction": "no_entry_sign", "item": {"type": "message", "channel": channel, "ts": mts}}}).encode()
+        assert signed(hook, event(1, ts(2)), "application/json").status_code == 202  # Slack shows no such mark on it
+        assert until(lambda: jobs_done("slack.exclude")[0] == 0 and jobs_done("slack.exclude")[1] == 1)
+        with psycopg.connect(OWNER_DB) as conn:
+            assert conn.execute("SELECT count(*) FROM kl.capture_exclusions WHERE connection_id = %s", (cid,)).fetchone()[0] == 0, \
+                "a mark Slack doesn't show was taken from the event"
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(marked=True), timeout=10).status_code == 200
+        assert signed(hook, event(2, ts(3)), "application/json").status_code == 202
+        assert until(lambda: not stored_anywhere(gate), 240), f"a message marked don't capture is still kept: {stored_anywhere(gate)}"
+        assert proposals(day) == 0 and proposals(thread) > 0, "the mark took the wrong proposals"
+
+        assert command("alice", "capture off").status_code == 200
+        assert until(lambda: capture() == "off" and len(posted()) == 2), "turning capture off wasn't told to the channel"
+        assert posted()[1]["text"].startswith("Aerugo no longer proposes"), posted()
+    finally:
+        api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": None})
+        api("DELETE", path, "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
+            conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"UCAP%{tag}",))
+
+
 POINTER_MARK = "ptr-marker"  # F11a: in every source text the pointer check plants, so CI can grep the API's and worker's logs
 
 
@@ -5115,6 +5250,91 @@ def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search(
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
             conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"%live%{tag.lower()}",))
+
+
+@check
+def sensitive_chat_is_never_kept_found_or_answered_from():
+    """C2a, sensitive chat: a Slack message speaking of one person's health or discipline is kept in no table, found by no search, and sent to no model, indexed or as a pointer read live, though the channel's members can read it in Slack; the channel's other messages are kept, found, and answered from; a thread opening with one is titled by its day"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    uid = {u: f"USEN{u.upper()}{tag}" for u in ("alice", "carol")}
+    channel, ts = f"CSEN{tag}", lambda n: f"17600{n:05d}.000{n:03d}"
+    surgery = f"Pat Lane {tag.lower()} is having surgery on Monday, so I'm covering Pat's shifts."
+    warning = f"Lee Moss {tag.lower()} got a final written warning for lateness today."
+    state = {"users": [{"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}} for u in uid],
+             "channels": {channel: {"name": f"sen-{tag.lower()}", "private": True, "members": list(uid.values()), "messages": [
+                 {"ts": ts(1), "user": uid["carol"], "text": surgery, "thread_ts": ts(1), "reply_count": 1,
+                  "replies": [{"ts": ts(2), "user": uid["alice"], "text": f"Thanks, I'll move the till rota {tag}.", "thread_ts": ts(1)}]},
+                 {"ts": ts(3), "user": uid["carol"], "text": warning},
+                 {"ts": ts(4), "user": uid["alice"], "text": f"The truck for {tag} comes at noon."}]}}}
+    name = f"sen-slack-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    thread, day = f"slack-{channel}-{ts(1)}", f"slack-{channel}-2025-10-09"
+    principals = [(u, f"ext:slack.{uid[u]}") for u in uid]
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in principals}
+    conversations = []
+
+    def docs() -> dict:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return {r["external_key"]: r for r in conn.execute(
+                "SELECT external_key, title, storage FROM kl.documents WHERE external_key LIKE %s", (f"slack-{channel}-%",)).fetchall()}
+
+    def asked(user, question):
+        reset_fake()
+        r = api("POST", "/v1/conversations", user, json={"question": question, "model": "payments/smoke-fake", "focus": [thread, day]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:300]}"
+        conversations.append((user, r.json()["conversation"]["id"]))
+        return "\n".join(fake_prompts())
+
+    def until(ok, seconds=150):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(3)
+        return ok()
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in principals:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    ensure_fake_models()
+    try:
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel],
+            "history_days": 3650, "every_minutes": 60})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: {thread, day} <= set(docs())), f"the channel never arrived: {docs()}"
+        held = docs()
+        assert held[thread]["title"] == f"#sen-{tag.lower()}: thread on 2025-10-09", f"a thread opening with one kept its text as its title: {held[thread]}"
+        for text in (surgery, warning):
+            assert not stored_anywhere(text[:50]), f"a sensitive message was kept: {stored_anywhere(text[:50])}"
+        found = {h["id"]: h for h in api("GET", "/v1/search", "carol", params={"q": tag, "scope": "org", "limit": 20}).json()["results"]}
+        assert {thread, day} <= set(found), f"the channel's other messages weren't found: {sorted(found)}"
+        hits = api("GET", "/v1/search", "carol", params={"q": f"surgery {tag.lower()}", "scope": "org"}).json()["results"]
+        assert all("surgery" not in f"{h['title']} {h.get('snippet') or ''}" for h in hits), "a search found the sensitive message"
+        prompt = asked("alice", f"Who is covering shifts and why, {tag}?")
+        assert f"till rota {tag}" in prompt and f"truck for {tag}" in prompt, "the channel's other messages never reached the model"
+        assert "surgery" not in prompt and "written warning" not in prompt, "a sensitive message reached the model"
+        read = api("GET", f"/v1/documents/{day}/content", "carol")
+        assert read.status_code == 200 and "written warning" not in read.text and f"truck for {tag}" in read.text, read.text[:300]
+
+        assert api("PATCH", path, "alice", json={"storage": "pointer"}).status_code == 200  # read live now
+        assert until(lambda: all(d["storage"] == "pointer" for d in docs().values()) and {thread, day} <= set(docs()))
+        prompt = asked("alice", f"Who is covering shifts and why, {tag}?")
+        assert f"till rota {tag}" in prompt, "a pointer's other messages, read live, never reached the model"
+        assert "surgery" not in prompt and "written warning" not in prompt, "a sensitive message read live reached the model"
+        for text in (surgery, warning):
+            assert not stored_anywhere(text[:50]), f"a sensitive message was kept: {stored_anywhere(text[:50])}"
+    finally:
+        api("DELETE", path, "alice")
+        for user, cid in conversations:
+            api("DELETE", f"/v1/conversations/{cid}", user)
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
+            conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"USEN%{tag}",))
 
 
 @check

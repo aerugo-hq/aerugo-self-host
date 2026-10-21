@@ -424,6 +424,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [nt, setNt] = useState(blankNotion); // the Notion form (S6)
   const [ct, setCt] = useState(blankCatalog); // the data catalog form (S7)
   const [hook, setHook] = useState(null); // the webhook panel open under a row (S8): { name, signing, made }
+  const [capture, setCapture] = useState(null); // the capture panel open under a Slack row (C2b): { name, channels, error }
   const [declared, setDeclared] = useState([]); // each connection as the API reads it back, for Terraform (G2)
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => {
     setItems(r.connections);
@@ -454,6 +455,40 @@ function Connections({ ws, teams, orgAdmin }) {
       say(c.name, "bad", e.message);
     }
   }
+  async function openCapture(name, keep = false) {
+    if (capture?.name === name && !keep) {
+      setCapture(null);
+      return;
+    }
+    setCapture({ name, channels: null, error: null });
+    try {
+      setCapture({ name, channels: (await kl(`workspaces/${enc(ws)}/connections/${enc(name)}/capture`)).channels, error: null });
+    } catch (e) {
+      setCapture({ name, channels: null, error: e.message });
+    }
+  }
+  async function setChannel(name, channel, action) {
+    say(name, "idle", action === "confirm" ? "Starting capture…" : "Stopping capture…");
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/${enc(name)}/capture/${enc(channel)}`, { method: "POST", body: { action } });
+      say(name, "ok", action === "confirm" ? "Capture on: the channel is told" : "Capture off: the channel is told");
+      openCapture(name, true);
+    } catch (e) {
+      say(name, "bad", e.message);
+    }
+  }
+  const CAPTURE_STATE = { off: "Off", requested: "Asked for in the channel", on: "On" };
+  const capturePanel = (c) => h("div", { className: "connector-form", role: "group", "aria-label": `Capture for ${c.name}` },
+    h("p", { className: "connector-lede connector-wide" }, "Capture proposes knowledge from a channel's threads for this team's curators to confirm, readable only by the channel's members. It needs two keys: the channel's creator or a workspace admin runs /aerugo capture on in the channel, then you confirm here. The bot tells the channel when it starts and stops, and anyone can react :no_entry_sign: to keep a message out."),
+    capture.error ? h("div", { className: "connector-wide" }, h(Alert, { onRetry: () => openCapture(c.name, true) }, capture.error))
+      : capture.channels === null ? h("div", { className: "connector-wide" }, h(SkeletonRows, { rows: 2, widths: [30, 14] }))
+      : capture.channels.length ? h("ul", { className: "linklist connector-wide", "aria-label": "Channels" }, capture.channels.map((ch) => h("li", { key: ch.channel },
+          h("span", null, ch.name || ch.channel), h("small", null, CAPTURE_STATE[ch.capture] || ch.capture),
+          h("div", { className: "actions" },
+            ch.capture === "requested" ? h("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => setChannel(c.name, ch.channel, "confirm") }, "Confirm") : null,
+            ch.capture !== "off" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setChannel(c.name, ch.channel, "off") }, "Turn off") : null))))
+      : h("p", { className: "muted connector-wide" }, "No channels yet: they appear once the bot is in one and the connection has synced."),
+    h("div", { className: "actions connector-wide" }, h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setCapture(null) }, "Close")));
   async function removeHook(name) {
     say(name, "idle", "Removing the webhook…");
     try {
@@ -1031,6 +1066,8 @@ function Connections({ ws, teams, orgAdmin }) {
               c.kind === "github" ? h("button", { type: "button", className: "btn btn-sm", onClick: () => showRepos(c.name) }, repos[c.name] ? "Hide repos" : "Repos") : null,
               HOOKS[c.kind] ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": hook?.name === c.name,
                 onClick: () => setHook(hook?.name === c.name ? null : { name: c.name, signing: "", made: null }) }, c.webhook ? "Webhook on" : "Webhook") : null,
+              c.kind === "slack" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": capture?.name === c.name,
+                onClick: () => openCapture(c.name) }, "Capture") : null,
               h("button", { type: "button", className: "btn btn-sm", onClick: () => resync(c.name), disabled: c.status === "disabled" },
                 h(Icon, { name: "refresh", size: 14 }), "Re-sync"),
               c.managed_by ? null : [ // what Terraform manages changes there, not here
@@ -1039,7 +1076,8 @@ function Connections({ ws, teams, orgAdmin }) {
                 h("button", { key: "remove", type: "button", className: "btn btn-sm btn-ghost", onClick: () => setConfirming(c.name), "aria-label": `Remove ${c.name}` }, "Remove")]))),
             repos[c.name] ? h("tr", { key: `${c.name}-repos` }, h("td", { colSpan: 5 }, repoList(c.name))) : null,
             editing === c.name ? h("tr", { key: `${c.name}-edit` }, h("td", { colSpan: 5 }, editForm(c))) : null,
-            hook?.name === c.name ? h("tr", { key: `${c.name}-hook` }, h("td", { colSpan: 5 }, hookPanel(c))) : null])))
+            hook?.name === c.name ? h("tr", { key: `${c.name}-hook` }, h("td", { colSpan: 5 }, hookPanel(c))) : null,
+            capture?.name === c.name ? h("tr", { key: `${c.name}-capture` }, h("td", { colSpan: 5 }, capturePanel(c))) : null])))
         : items ? h(Empty, null, "No sources connected to this team yet. Connect one above.") : null,
     declared.length ? h("div", { className: "panel-body" }, h(TerraformDetails, { items: declared.map((c) => connectionItem(ws, c)) })) : null,
     confirming ? h(Confirm, { title: `Remove the connection “${confirming}”?`, action: "Remove connection", onCancel: () => setConfirming(null),

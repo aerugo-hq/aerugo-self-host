@@ -733,6 +733,52 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
             "webhook": bool((c["config"] or {}).get("webhook_ref")), "containers": containers}
 
 
+class CaptureIn(BaseModel):
+    action: Literal["confirm", "off"]  # the second key, or stopping capture
+
+
+@router.get("/connections/{name}/capture")
+def list_capture(ws: str, name: str, caller: Caller = Depends(authenticate)):
+    """A Slack connection's channels and each one's capture (C2b): off, requested in the channel (the first key), or on."""
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+        if c["kind"] != "slack":
+            raise HTTPException(422, "only a Slack connection's channels are captured")
+        rows = conn.execute("SELECT external_id, display_name, capture, capture_changed_at FROM connection_containers "
+                            "WHERE connection_id = %s AND selected ORDER BY external_id", (c["id"],)).fetchall()
+    return {"channels": [{"channel": r["external_id"], "name": r["display_name"], "capture": r["capture"],
+                          "changed_at": r["capture_changed_at"].isoformat() if r["capture_changed_at"] else None} for r in rows]}
+
+
+@router.post("/connections/{name}/capture/{channel}")
+def set_capture(ws: str, name: str, channel: str, body: CaptureIn, caller: Caller = Depends(authenticate)):
+    """The team admin's key (C2b): confirm a channel whose creator or a workspace admin asked for capture in it (never one
+    no one asked for there), or stop capture; the channel is told either way, by the bot's one notice."""
+    require_workspace_admin(caller, ws)
+    if not slack.CHANNEL.fullmatch(channel):
+        raise HTTPException(404, "channel not found")
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+        row = conn.execute("SELECT capture FROM connection_containers WHERE connection_id = %s AND external_id = %s AND selected",
+                           (c["id"], channel)).fetchone() if c["kind"] == "slack" else None
+        if not row:
+            raise HTTPException(404, "channel not found")
+        if body.action == "confirm" and row["capture"] != "requested":
+            raise HTTPException(409, "capture starts only once the channel's creator or a workspace admin runs /aerugo capture on in it")
+        state = "on" if body.action == "confirm" else "off"
+        if row["capture"] != state:
+            conn.execute("UPDATE connection_containers SET capture = %s, capture_changed_at = now() WHERE connection_id = %s AND external_id = %s",
+                         (state, c["id"], channel))
+            if state == "on" or row["capture"] == "on":
+                conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'slack.notice', %s)",
+                             (org_id, Jsonb({"connection_id": str(c["id"]), "channel": channel, "state": state})))
+        audit(conn, org_id, caller.username, f"capture.{body.action}", [ws], {"name": name, "channel": channel, "was": row["capture"]})
+    return {"channel": channel, "capture": state}
+
+
 class WebhookIn(BaseModel):
     signing_secret: str | None = Field(default=None, min_length=16, max_length=200, repr=False)  # Slack: its app's
 

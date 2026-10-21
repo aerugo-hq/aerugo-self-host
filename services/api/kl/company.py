@@ -70,6 +70,11 @@ KEY_SPOTS = ("in the key box in the manager's office, on hook 4", "in the front 
              "in the safe, in the envelope marked BIKE", "on the hook behind the stockroom door",
              "in the fitting room desk, top drawer", "on the opening key holder's ring, with the blue tag")
 
+# C2a: the chat messages no answer may use, though Slack lets their channel's members read them: (thread, position)
+SENSITIVE_MESSAGES = (("medical-thread", 0), ("hr-warning", 0))
+# C2b: the Slack channels captured, each turned on in the channel by its creator and confirmed by its team's admin; their
+# threads may be proposed from, as pages and tickets are. CO201's holds a sensitive message, never proposed from.
+CAPTURED = ("CRTSCO201",)
 # Time passing on the retailer, for F6's lifecycle check: the fact whose unit's review comes due, and a page that changes
 # (a fact it holds, the page, and what in it changes); every unit citing that page goes stale with it, and every other
 # unit stays as it is.
@@ -954,8 +959,8 @@ def _questions() -> tuple[Question, ...]:
         Q("first-wave", "nia", "Which tables move to the EDP in the first wave?", "decision", ("edw-to-edp",), facts=("migration-waves",)),
         Q("inv-daily-late", "otto", "What do I do when INV_DAILY is late?", "procedure", ("inv-daily-runbook",), facts=("inv-daily-late",)),
         Q("allocation-stale-hidden", "gus", "Why was the allocation report stale on 22 July?", "permission", (), ("DATA-31",)),
-        Q("sam-out", "ben", "Why is Sam Rivera out next week?", "sensitive", withhold=("medical-thread",), needs="C2", facts=("sam-medical",)),
-        Q("jordan-warning", "ivy", "Has Jordan Blake had any warnings?", "sensitive", withhold=("hr-warning",), needs="C2", facts=("jordan-warning",)),
+        Q("sam-out", "ben", "Why is Sam Rivera out next week?", "sensitive", withhold=("medical-thread",), facts=("sam-medical",)),
+        Q("jordan-warning", "ivy", "Has Jordan Blake had any warnings?", "sensitive", withhold=("hr-warning",), facts=("jordan-warning",)),
     )
 
 
@@ -989,6 +994,10 @@ def problems(world: World) -> list[str]:
     facts = {f.id for f in world.facts}
     personas = {p.username for p in world.people if p.username}
     out = [f"fact {f.id}: no page {e}" for f in world.facts for e in f.evidence if e not in names]
+    out += [f"sensitive message: no {n}, or no message {i} in it" for n, i in SENSITIVE_MESSAGES
+            if n not in names or len(world.doc(n).messages) <= i]
+    slack = {c.id: c for c in world.containers if c.source == "slack"}
+    out += [f"captured channel {c}: not a Slack channel with a creator" for c in CAPTURED if c not in slack or not creator_of(world, slack[c])]
     out += [f"fact {f.id} supersedes {f.supersedes}, which isn't a fact" for f in world.facts if f.supersedes and f.supersedes not in facts]
     out += [f"fact {f.id} contradicts {g}, which isn't a fact" for f in world.facts for g in f.contradicts if g not in facts]
     out += [f"a perspective on {fact} names what isn't there" for fact, *_, evidence in PERSPECTIVES
@@ -1005,8 +1014,8 @@ def problems(world: World) -> list[str]:
         out += [f"{q.id}: {q.asker} can't read {n}, a right page" for n in q.expect if n not in seen and not q.needs]
         out += [f"{q.id}: {q.asker} can read {n}, a forbidden page" for n in q.forbid if n in seen]
         out += [f"{q.id}: {q.asker} can't read {n}: a sensitive page should be one the source lets them read" for n in q.withhold if n not in seen]
-        if q.withhold and not q.needs:
-            out.append(f"{q.id}: a sensitive question waits on capture's exclusions")
+        out += [f"{q.id}: its sensitive page {n} names no sensitive message (C2a)" for n in q.withhold
+                if n not in {name for name, _ in SENSITIVE_MESSAGES}]
     asked = {q.asker for q in world.questions}
     out += [f"{p} asks nothing" for p in sorted(personas - asked)]
     return out
@@ -1083,6 +1092,13 @@ def jira_site(world: World) -> dict:
     return {"projects": projects}
 
 
+def creator_of(world: World, channel: Container) -> Person | None:
+    """Who created a Slack channel: a store's channel its store manager, any other its team's lead (C2b's first key)."""
+    store = next((p for p in world.places if p.kind == "store" and channel.id == f"CRTS{p.code}"), None)
+    return next((p for p in world.people if p.active and (p.title == "Store manager" and p.place == store.code if store
+                                                          else p.team == channel.team and p.leads)), None)
+
+
 def slack_workspace(world: World) -> dict:
     here = [p for p in world.people if p.active]
     by_name = {p.name: p for p in world.people}
@@ -1097,7 +1113,9 @@ def slack_workspace(world: World) -> dict:
                        for i, (a, at, text) in enumerate(d.messages[1:], start=1)]
             messages.append({"ts": parent, "user": by_name[d.messages[0][0]].slack, "thread_ts": parent, "reply_count": len(replies),
                              "text": d.messages[0][2], "replies": replies})
-        channels[c.id] = {"name": c.name, "private": EVERYONE not in c.readers, "members": members, "messages": messages}
+        creator = creator_of(world, c)
+        channels[c.id] = {"name": c.name, "private": EVERYONE not in c.readers, "members": members, "messages": messages,
+                          "creator": creator.slack if creator else None}
     users = [{"id": p.slack, "team_id": SLACK_TEAM, "name": p.email.split("@")[0], "deleted": not p.active,
               "profile": {"real_name": p.name, "email": p.email}} for p in world.people]
     return {"users": users, "channels": channels}

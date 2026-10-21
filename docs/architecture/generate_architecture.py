@@ -140,7 +140,7 @@ layers = [
                                      ("Usage", S_DB_NEW),
                                      ("Permissions (OpenFGA)", S_DB_BUILT), ("Credentials (OpenBao, Secret Manager)", S_DB_BUILT)]),
     ("Connectors and capture: how it reads", 770, [("Docs: Confluence, Drive, SharePoint, Notion", S_BUILT),
-                                                    ("Tickets and chat: Jira, Slack", S_BUILT),
+                                                    ("Tickets and chat: Jira, Slack, Slack capture", S_BUILT),
                                                     ("Teams capture, meetings, handovers", S_NEW),
                                                     ("Code: GitHub (thousands of repos)", S_BUILT),
                                                     ("Warehouses, catalogs, usage logs", S_NEW),
@@ -157,7 +157,7 @@ p.box("<b>Across every layer</b>", 1280, 130, 330, 780, S_GROUP)
 cross = [("Identity: sign-on, and the asker's role and place", S_BUILT), ("Permissions: row-level security and OpenFGA", S_BUILT),
          ("Model gateway: approved models, budgets", S_BUILT), ("Audit and privacy", S_BUILT),
          ("Job queue with leases", S_BUILT), ("Observability: telemetry, alerts", S_BUILT),
-         ("Sensitive-topic filters", S_NEW), ("Question sets: tests for answers", S_BUILT)]
+         ("Sensitive-topic filters", S_BUILT), ("Question sets: tests for answers", S_BUILT)]
 for i, (lbl, st) in enumerate(cross):
     p.box(lbl, 1300, 175 + i * 88, 290, 64, st)
 p.legend()
@@ -261,9 +261,9 @@ cc = [p.box(t, 60, 150 + i * 100, 320, 70, S_PEOPLE) for i, t in enumerate(caps)
 filt = p.box("<b>Privacy filters</b><br>only opted-in places<br>\"don't capture\" marks honored<br>direct messages never, by default<br>"
              "HR, medical, and legal matters excluded<br>personal data excluded", 520, 300, 320, 220, S_SEC)
 prop = p.box("<b>Proposed knowledge</b><br>a procedure, an answer, a decision, a contact, with the messages it came from",
-             940, 330, 300, 140, S_NEW)
+             940, 330, 300, 140, S_BUILT)
 own = p.box("<b>The owner confirms or corrects</b>", 1300, 300, 270, 90, S_PEOPLE)
-core = p.box("<b>Knowledge core</b>", 1300, 450, 270, 90, S_NEW)
+core = p.box("<b>Knowledge core</b>", 1300, 450, 270, 90, S_BUILT)
 for c in cc:
     p.edge(c, filt)
 p.edge(filt, prop)

@@ -50,9 +50,7 @@ MAX_PROMPT_CHARS = 12000  # ponytail: a long document is cut at this; send it in
 MAX_UNITS = 10           # proposals kept per document
 MAX_DOCUMENTS = 25       # documents per pass; the worker queues another pass while there's more
 MAX_TOKENS = 1500
-SENSITIVE = re.compile(r"\b(surgery|diagnos\w*|illness|medical (?:condition|leave|history)|pregnan\w*|therapy|"
-                       r"disciplinary|written warning|final warning|performance (?:review|plan|improvement)|"
-                       r"terminated|fired|dismissed|salary of|lawsuit against|arrested)\b", re.I)
+SENSITIVE = privacy.SENSITIVE  # one person's health, discipline, performance, or pay (C2a moved it to kl.privacy)
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 _ROLE = re.compile(r"^.{1,120}$")
 
@@ -76,9 +74,10 @@ class Outcome:
     dropped: Counter = field(default_factory=Counter)  # invalid, unsupported, sensitive
 
 
-def extractable(source_kind: str) -> bool:
-    """Whether a document's source may be sent at all: pages and tickets yes, chat threads not until opted in."""
-    return source_kind not in CHAT_SOURCES
+def extractable(source_kind: str, captured: bool = False) -> bool:
+    """Whether a document's source may be sent at all: pages and tickets yes, chat threads only from a channel captured
+    with both keys (C2b; DUE_SQL asks the same)."""
+    return source_kind not in CHAT_SOURCES or captured
 
 
 def sections_of(title: str, chunks: list[tuple[str | None, str]]) -> dict[int, tuple[str, str]]:
@@ -196,7 +195,9 @@ JOIN workspace_documents wd  ON wd.workspace_id = t.workspace_id
 JOIN documents d             ON d.id = wd.document_id
 LEFT JOIN privacy_flags f    ON f.document_id = d.id
 LEFT JOIN extraction_state s ON s.workspace_id = t.workspace_id AND s.document_id = d.id
-WHERE d.source_kind <> ALL(%(chat)s)
+WHERE (d.source_kind <> ALL(%(chat)s) OR EXISTS (  -- chat only from a channel captured with both keys (C2b)
+         SELECT 1 FROM connection_containers cc
+         WHERE cc.connection_id = d.connection_id AND cc.external_id = d.container_ref AND cc.capture = 'on'))
   AND d.storage = 'index'  -- a pointer keeps no text to extract from (F11a)
   AND (s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash OR s.model_id IS DISTINCT FROM t.model_id
        OR (s.outcome = 'skipped_classification' AND d.classification = ANY(m.allowed_classifications)))

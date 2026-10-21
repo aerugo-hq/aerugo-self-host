@@ -2013,6 +2013,115 @@ to 0.40, Ask right for 25 of 27 to 23). The live-only baseline was recorded agai
 against itself with the same numbers: Recall@10 99%, MRR 0.63 over 52 counted questions, Ask right for 25 of 27, no
 leak (the earlier 0.70 and CI's 0.71 were two random orders of the sources); `make unit` 204 passed; the live-only check
 passed.
+CI on pull request 75, after the fix: unit 204 passed; smoke 182 passed, 17 skipped, 0 failed; the golden set, the
+scenario, the retailer, the Atlas, and the teams at their baselines; the retailer as pointers Recall@10 99%, MRR 0.84;
+live only Recall@10 99%, MRR 0.63, exactly the baseline recorded on this machine, so its ranking now repeats across
+machines; no leak, no regression. F11a and F11b merged (pull requests 74 and 75).
+**Capture's plan, approved 2026-10-20** (`docs/ENTERPRISE_PLAN.md` section 6): Slack first (C2a to C2d), since its connector,
+fakes, signed events, and identity matching are built, then Teams (C1a, C1b), meetings (C3), and handovers (C4); C5
+(announcement mailboxes) deferred until a pack needs it. Consent: a channel is captured only with two keys, `/aerugo
+capture on` run in the channel by its creator or a workspace admin and the connection's team admin in Aerugo (in Teams,
+the team owner's consent to the app counts as the first); a notice in the channel says so; anyone can exclude a message
+with a "don't capture" mark; direct messages and group DMs never, Teams' private channels not in the first version;
+capture only proposes, through F2's extraction, for curators to confirm, readable by the channel's members. "Save to
+Aerugo" (a message shortcut and `/aerugo save <note>`) is the explicit form of the user's `/kt note` idea; the bot answers
+`/aerugo ask` and mentions privately, as the asker. The bot writes to Slack or Teams only the capture notice and private
+replies. No monitoring of people.
+C2a, sensitive chat never kept, found, or answered from (principle 4; the retailer's `sam-out` and `jordan-warning`
+questions waited on it). The sensitive gate moved to `kl.privacy` (`SENSITIVE`, and `sensitive(text)`: one person's
+health, discipline, performance, or pay, or personal data detection flags), shared with extraction, gaps, and kept
+answers. A Slack message it flags is left out of every section a document keeps and every live read gives
+(`slack.sections_of`), so nothing searches, shows, embeds, extracts, or sends it to a model, though the channel's members
+read it in Slack; a thread opening with one is titled by its channel and day; and a document that held one gets a marked
+version (`kept_version`) once, so a copy kept before C2a is read again without it (no other document's version moves,
+so no other unit goes stale). It's a word check, so it errs on the side of leaving a message out (a policy mentioning
+"medical leave" would be). The retailer: its truth names the two sensitive messages (`SENSITIVE_MESSAGES`; `problems`
+now requires each sensitive question's page to hold one), the two questions count, and `sensitive_check` in
+kl.company_eval (in CI, in every storage mode) holds that each message is in no chunk or title, in nothing its asker's
+search shows, and never in a prompt Ask sends, as leaks; the question sets regenerated to match. Smoke:
+`sensitive_chat_is_never_kept_found_or_answered_from` (a Slack channel with a thread opening on a colleague's surgery and
+a day holding a written warning, beside ordinary messages: neither sensitive message in any table, the thread titled
+by its day, a search for the surgery finding nothing of it, Ask's prompt holding the ordinary messages and neither
+sensitive one, the reader showing the day without the warning; then as pointers read live, the same). Unit:
+`tests/test_sensitive_chat.py` (3). Red first: with the filter, the neutral title, and the marked version removed, the
+two Slack unit tests failed; in the stack, with the filter removed, the smoke check failed (the surgery message kept in
+`kl.chunks`); restored (`cmp`) and green. Proof, against the running stack: `make unit` 207 passed; the new smoke check
+passed, and so did the Slack connector's three checks; `kl.company_eval` everyone opening exactly what the truth says,
+no leak, Recall@10 100%, MRR 0.83 over 52 counted questions (two waiting on slices, from four), Ask right for 27 of 27,
+both sensitive messages kept nowhere, found by no one, sent to no model, no regression (one case better,
+`registers-down-leader` #3 to #2, not recorded). Found while proving it: Docker Desktop stopped and wouldn't start
+(its WSL engine failed to boot); restarted with the user's approval (`wsl --shutdown`, then Docker Desktop), after which
+the stack's network was stale (containers couldn't resolve `postgres`) and was recreated, volumes kept; the Jira
+session's own stack held the default ports, so this one moved to its own (`KL_POSTGRES_PORT` and the rest); and the
+machine was overloaded (an OpenFGA write timed out) until Docker Desktop's leftover Kubernetes nodes and an orphaned
+`kl-worker-1` were stopped, with the user's approval, set not to restart. Not built: the same filter for Teams and
+meetings (C1, C3, through `privacy.sensitive`), a governed space where such matters may be kept, and a model judging
+sensitivity beyond words. CI on pull request 77: unit 207 passed; smoke 183 passed, 17 skipped, 0 failed; the golden
+set, the scenario (Recall@10 94%, MRR 0.81), the retailer (Recall@10 100%, MRR 0.83), its pointer (MRR 0.84) and
+live-only (MRR 0.63) runs, the Atlas, and every team's set at their baselines; no leak and no regression.
+C2b, Slack channel capture (`docs/ENTERPRISE_PLAN.md` section 6, principle 3; the plan above). Migration 0068:
+`connection_containers.capture` (off, requested, or on, with when it changed; `kl_app` may change only those two) and
+`capture_exclusions` (a message marked "don't capture": its connection, channel, and ts; the worker writes them, the API
+reads them, in its org). The first key: `/aerugo capture on|off`, the Slack app's slash command, at
+`/v1/hooks/slack/<connection id>/commands`, signed with the app's signing secret as its events are (the connection's
+webhook secret, S8) and checked first (every failure the same 401), taken once (`webhook_deliveries`, keyed by its
+signature), and answered privately (ephemeral) in the same words whoever ran it, so the reply reveals nothing; it only
+queues `slack.capture` (invariant 13). The worker (`kl/capture.py`) asks Slack, as the connection's bot, whether the bot
+is in the channel and whether the person created it or administers the workspace (`slack.may_turn`, from `users.info`
+and `conversations.info`'s creator; never a guest from a shared channel's other side, someone who has left, or a bot),
+then marks the channel requested, or off; each step audited, a refusal too. The second key: `GET` and `POST
+.../connections/{name}/capture[/{channel}]` (the team's admins; a Slack connection's selected channels): confirm only a
+channel someone asked for in it (otherwise 409), or turn it off from any state. Turning it on or off queues
+`slack.notice`, the bot's one write (`chat.postMessage`), posted only if the state still holds: that Aerugo now proposes
+knowledge from the channel's threads for the team's curators to confirm, readable only by its members, and how to keep
+a message out or stop; and, when it stops, that it no longer does. Extraction (F2) reads a chat thread only from a
+channel whose capture is on (`DUE_SQL`, `extractable(captured=)`), so each proposal cites that thread and has exactly its
+readers (F1). "Don't capture": a signed `reaction_added` with :no_entry_sign: queues `slack.exclude`, and the worker acts
+only if Slack shows the mark when it reads the message back (`reactions.get`): it records the mark, removes the
+unconfirmed proposals from every document that can hold the message (`slack.holding`: its thread, the thread it replies
+to, its day), whatever capture and the team's model are by then, and reads the channel again in full, dropping the
+message as C2a drops a sensitive one (`sections_of`, `kept_version`, live reads too), so search, the reader, Ask, and
+extraction never see it again. A unit a curator already confirmed stays and goes back to them (F6, its evidence
+changed); removing the reaction doesn't bring the message back. The app: each Slack row's Capture panel (each channel's
+state, Confirm for one asked for, Turn off; loading, error, and empty states). Docs: `docs/connectors/slack.md`'s
+Capture section (the scopes `commands`, `chat:write`, and `reactions:read`, the command's URL, the event), the
+architecture, and the diagram (Slack capture built; proposed knowledge and the knowledge core, F2 and F1, now green). The
+retailer: `company.CAPTURED`, CO201's store channel (which holds the medical thread), and who created each channel
+(`creator_of`: a store's channel its store manager, any other its team's lead), which the fake Slack serves;
+`capture_on` in kl.company_eval opts it in as a company would (the creator's signed command, then the team's admin
+confirming), and `extraction_check` now allows proposals from that channel's threads, from the truth, requires some, and
+holds that the bot posted nothing but that notice. Smoke: `a_slack_channel_is_captured_only_with_both_keys_and_its_marks_honored`
+(a confirm before anyone asked is a 409; a member's command is answered privately and changes nothing; a forged and a
+ten-minute-old command are refused, a replay taken once; the creator's command makes it requested, with nothing posted;
+a member of the team can't confirm, its admin can, and the channel gets the notice naming the team; proposals come from
+the captured channel's thread and day and none from the uncaptured channel beside it; carol, in the channel, reads one
+and bob doesn't; a reaction event Slack doesn't show changes nothing; a marked message is then kept nowhere, its day's
+proposal gone and the thread's kept; turning it off from the channel posts the closing notice). Unit:
+`tests/test_capture.py` (4), and one more test each in `test_extraction.py` and `test_sensitive_chat.py`. Browser:
+`test_a_team_admin_confirms_capture_only_once_the_channel_asked_for_it`. Red first, each mutation built into its
+service, the check run against it, then restored (`cmp`) and the service rebuilt: anyone may turn it on (failed: "a
+member who neither created the channel nor administers the workspace turned capture on"); a confirm with no first key
+(failed: "capture was confirmed though no one asked for it"); extraction from any chat (failed: "a channel no one
+captured was extracted from"); a mark taken from the event alone (failed: "a mark Slack doesn't show was taken from the
+event"); the proposals left in place (failed: the marked message still in `kl.knowledge_units`); and, in the web
+app, Confirm offered for a channel nobody asked about (the browser test failed at "no Confirm before anyone asked"). Found while building:
+the mark first left a model's proposal built from the marked message stored, since an emptied document's proposals
+aren't replaced (F2 replaces them only when it proposes again) and a channel whose capture was turned off isn't
+extracted again, so the mark now removes them itself; and the first mutation run restored the API's file without
+rebuilding the API, so its third result was against the second mutation and was run again. Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 211 passed; the capture
+check passed, before the mutations and again on the clean rebuild after; `kl.company_eval` no leak, everyone opening
+exactly what the truth says, CO201 turned on with both keys and the bot posting only its notice, 25 proposals from 17
+documents, 2 of them from CO201's captured thread and none from any other chat, each person shown exactly the proposals
+whose document they open, both sensitive messages kept nowhere, Recall@10 100%, MRR 0.83 over 52 counted questions, Ask
+citing a right page for 27 of 27 and leading with a right unit for 15 of 26, the truth's 3 stale units and its 1 gap,
+no regression; `make e2e` 39 passed (the new one among them); the lint at 0 errors and 43 warnings. Found by that
+proof: the "extract any chat" mutation, built into the worker twice on this long-lived stack (where Stores and Product
+quality are opted in to extraction), had made 18 proposals from the retailer's and the scenario's Slack threads, which
+outlived it and failed the retailer's check as 14 leaks; all were made exactly while it ran, and were removed with their
+extraction records before the run that passed. Not run: the full smoke suite and the other sets (CI's run on the pull
+request, and the fresh-stack loop after C2c). Not built: "Save to
+Aerugo" (C2c) and the bot answering (C2d); the same in Teams (C1); turning capture off removing what it proposed (kept
+for the curators); an emptied page's proposals replaced (F2's, found here); and a mark removed bringing a message back.
 Jira comment visibility (found by F11a's review, its own item, approved 2026-10-20). `jira.issue_sections` put every
 comment in its issue's text, so a comment Jira restricts to a group or a project role (`visibility`) reached everyone
 who reads the issue: in its chunks, search, Ask, decisions, extraction, and, since F11a, a pointer's live read. That
@@ -2047,7 +2156,8 @@ again. Proof, on a fresh stack of its own (`kljira`, CI's settings: the example 
 H6's incremental sync, Q5's decisions, Q7's attachments, connection ownership, S8's webhook and readers refresh, F11a's
 pointers, H2's throttling, pipelines, GCP secret references, and C1 and M7's worker check), each run alone. Main then
 took F11b (pull request 75); merged with it, `make unit` 206 passed, and the new check, Jira's permissions, F11a's
-pointers, and F11b's live-only check passed again. Not run:
+pointers, and F11b's live-only check passed again; and once more after C2a and C2b (pull requests 77 and 79), `make
+unit` 213 passed and the same four checks passed. Not run:
 the full smoke suite and the evaluation sets (CI's run on the pull request; by decision the fresh-stack loop runs every
 two or three items), and the browser tests and the provider's tests (nothing they use changed). Not built: a restricted comment's own
 readers (above); worklogs (not read); and Jira's own search for live-only connections (F11b, merged as pull request 75), which runs
@@ -2064,7 +2174,8 @@ F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (cons
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
 answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
-loop over the two; next, capture (C1 to C5).
+loop over the two, and C2a (sensitive chat) and C2b (Slack channel capture); next, capture's C2c (Save to Aerugo), the
+fresh-stack loop over C2a to C2c, and C2d, then Teams (C1a, C1b), C3, and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

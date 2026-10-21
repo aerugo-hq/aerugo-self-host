@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
+from . import alerting, capture, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -715,6 +715,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "proposal.open_pr": lambda conn, job: curator.open_pr(conn, job["payload"]["proposal_id"]),
             "proposal.refresh": lambda conn, job: curator.refresh(conn, job["payload"]["proposal_id"]), "connection.discover": handle_connection_discover,
             "connection.sync": handle_connection_sync, "connection.refresh_readers": handle_connection_refresh_readers,
+            "slack.capture": capture.request, "slack.notice": capture.notice, "slack.exclude": capture.exclude,  # C2b
             "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,

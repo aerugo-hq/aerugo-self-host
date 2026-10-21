@@ -18,4 +18,3 @@ cases:
   expect: []
   units: []
   forbid: []
-  needs: C2

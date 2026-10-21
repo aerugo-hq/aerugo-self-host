@@ -138,6 +138,64 @@ def test_a_team_admin_opens_the_slack_form(page):
     expect(keep.locator("option[value=live]")).to_have_count(0)  # F11b: Slack's search reads as a person
 
 
+def test_a_team_admin_confirms_capture_only_once_the_channel_asked_for_it(page):
+    """C2b: a Slack connection's Capture panel lists its channels; Confirm is offered only once the channel's creator
+    ran /aerugo capture on in it (a command signed with the app's signing secret), and confirming turns it on."""
+    import hashlib
+    import hmac
+    import time
+    from urllib.parse import urlencode
+    sign_in(page, "alice")
+    tag = uuid.uuid4().hex[:6].upper()
+    channel, name, signing = f"CE2E{tag}", f"e2e-slack-{tag.lower()}", uuid.uuid4().hex
+    creator = {"id": f"UE2E{tag}", "team_id": "T0SMOKE", "name": "alice", "profile": {"real_name": "Alice", "email": "alice@acme.test"}}
+    state = {"users": [creator], "channels": {channel: {"name": f"e2e-{tag.lower()}", "private": True, "creator": creator["id"],
+             "members": [creator["id"]], "messages": [{"ts": "1760000001.000001", "user": creator["id"], "text": f"Capture rehearsal {tag}"}]}}}
+    assert page.request.post("http://fake-llm:8080/slack/setup", data=json.dumps(state),
+                             headers={"Content-Type": "application/json"}).ok, "the fake Slack (fake-llm, from make smoke) isn't up"
+    write, base = {"Origin": WEB, "Content-Type": "application/json"}, f"{WEB}/api/workspaces/payments/connections"
+    made = page.request.post(f"{base}/slack", headers=write, data=json.dumps({
+        "name": name, "api_base": "http://fake-llm:8080/slack/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel],
+        "history_days": 3650, "every_minutes": 10080}))
+    assert made.status == 201, made.text()
+
+    def capture():
+        listed = page.request.get(f"{base}/{name}/capture").json()["channels"]
+        return next((c["capture"] for c in listed if c["channel"] == channel), None)
+
+    def until(want):
+        deadline = time.monotonic() + 90
+        while capture() != want and time.monotonic() < deadline:
+            time.sleep(2)
+        assert capture() == want, f"the channel never reached {want}"
+
+    try:
+        assert page.request.post(f"{base}/{name}/webhook", headers=write, data=json.dumps({"signing_secret": signing})).status == 201
+        until("off")
+        page.goto(f"{WEB}/#/admin/sources")
+        row = panel(page, "Connections").get_by_role("row").filter(has_text=name)
+        row.get_by_role("button", name="Capture").click()
+        group = page.get_by_role("group", name=f"Capture for {name}")
+        expect(group.get_by_text("Off", exact=True)).to_be_visible(timeout=30_000)
+        expect(group.get_by_role("button", name="Confirm")).to_have_count(0)  # nobody asked for it in the channel
+        raw, stamp = urlencode({"command": "/aerugo", "text": "capture on", "channel_id": channel, "user_id": creator["id"],
+                                "team_id": "T0SMOKE"}), str(int(time.time()))
+        signature = "v0=" + hmac.new(signing.encode(), f"v0:{stamp}:{raw}".encode(), hashlib.sha256).hexdigest()
+        asked = page.request.post(f"http://api:8000/v1/hooks/slack/{made.json()['id']}/commands", data=raw, headers={
+            "Content-Type": "application/x-www-form-urlencoded", "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+        assert asked.ok and asked.json()["response_type"] == "ephemeral", asked.text()
+        until("requested")
+        group.get_by_role("button", name="Close").click()
+        row.get_by_role("button", name="Capture").click()
+        expect(group.get_by_text("Asked for in the channel")).to_be_visible(timeout=30_000)
+        group.get_by_role("button", name="Confirm").click()
+        expect(group.get_by_text("On", exact=True)).to_be_visible(timeout=30_000)
+        expect(page.get_by_text("Capture on: the channel is told")).to_be_visible()
+        expect(group.get_by_role("button", name="Turn off")).to_be_visible()
+    finally:
+        page.request.delete(f"{base}/{name}", headers={"Origin": WEB})
+
+
 def test_a_team_admin_opens_the_microsoft_365_form(page):
     sign_in(page, "alice")
     open_connector(page, "Microsoft 365")
