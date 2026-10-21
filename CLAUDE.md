@@ -2294,8 +2294,10 @@ carry, public and internal by default); the Slack user is read again (this works
 mention's message is read back from Slack and answered only for its own author, the bot's mention dropped
 (`slack.question_of`); the asker is the person their Slack account is linked to in `principal_aliases` (a link made at
 sign-in, never Slack's word alone), with the groups of their last sign-in only while it's under `KL_SLACK_ASK_DAYS` (7)
-old, and the email Slack gives only when the link was made by that verified email (F8's context); the org's admission
-is checked as their last sign-in left it (G4: each process trusts the mode it read for 30 seconds, the lane too). Then
+old, and the email Slack gives only when the link was made by that verified email (F8's context); someone a directory
+that isn't paused lists only as having left, by their verified sign-in email or their Slack account's, is refused
+(`LEFT_SQL`, Q6's rule; it can only refuse, so a link made another way, or a sign-in still inside its week, never
+outlives a leaving); the org's admission is checked as their last sign-in left it (G4: each process trusts the mode it read for 30 seconds, the lane too). Then
 the API's own Ask runs as them (`main.answer_question`, unchanged but for `reach`, which narrows the sources a reply may
 carry, as the model's egress does): the same row-level security, OpenFGA post-check, audit, rate limit, units, and
 context. The reply (`reply_of`) goes only to them, by the connection's bot, privately (`chat.postEphemeral`, in their
@@ -2313,19 +2315,22 @@ answer links only her own Ask's sources and none she can't read, each opening fo
 to no one, is told how to link; alice with a sign-in eight days old is told to sign in again; nora, left out by a
 pilot, is told she isn't onboarded; alice's mention is answered, and a mention event naming her for carol's message
 isn't; with only public allowed, her answer links nothing and says some sources weren't shown; nothing is posted in the
-channel; and the lane, started as the worker's role, refuses to run). Unit: `tests/test_slack_ask.py` (8: a sign-in
+channel; and the lane, started as the worker's role, refuses to run). Unit: `tests/test_slack_ask.py` (9: a sign-in
 counts for seven days; the reply's escaping and links; a mention's question; the ask command; asks only in their lane;
-only a linked, recent, admitted person answered as themselves; a mention only for its author, read back from Slack) and
+only a linked, recent, admitted person answered as themselves; a leaver the directory reports never answered, even
+inside their week; a mention only for its author, read back from Slack) and
 one in `test_admission.py` (a person's sign-in recorded, a service account's never). Browser:
 `test_a_team_admin_chooses_how_slack_asks_are_answered`. The retailer: `slack_ask_check` in kl.company_eval, in CI:
 ana asks one of her questions in her own store's channel, as Slack sends it, and is answered privately with only
 sources her own Ask cites and the truth lets her read (the link made by her verified email at sign-in, so the real
-path). Red first: each mutation built into the service that runs it, the check run against it, then restored (`cmp`) and the service rebuilt: with the sign-in's age not checked, it failed ("an ask was answered on a sign-in over a week old"); with someone unlinked answered by their Slack name, it failed ("someone Aerugo can't link was answered"); with admission skipped, it failed ("a pilot's outsider was answered from Slack"); with `reach` ignored, it failed (an internal page reached a public-only Slack); with a mention answered whoever wrote it, it failed ("a mention was answered for someone who didn't write it"); and with the lane's role check made to let any role through, the lane started as the worker's role and ran on (the check timed out waiting for it to refuse). Found while proving it: the check first asked the moment the pilot began, inside the 30 seconds
+path). Red first: each mutation built into the service that runs it, the check run against it, then restored (`cmp`) and the service rebuilt: with the sign-in's age not checked, it failed ("an ask was answered on a sign-in over a week old"); with someone unlinked answered by their Slack name, it failed ("someone Aerugo can't link was answered"); with admission skipped, it failed ("a pilot's outsider was answered from Slack"); with `reach` ignored, it failed (an internal page reached a public-only Slack); with a mention answered whoever wrote it, it failed ("a mention was answered for someone who didn't write it"); and with the lane's role check made to let any role through, the lane started as the worker's role and ran on (the check timed out waiting for it to refuse); and, added after an automated security review of the pushed branch found a link made another way would
+outlive a leaving for up to a week, the leaver's unit test failed with the directory check removed, then passed, and
+the smoke check passed with the query running on every ask. Found while proving it: the check first asked the moment the pilot began, inside the 30 seconds
 each process trusts the admission mode it read (G4's design, the API's too), and nora was answered; it now waits that
 out. And on this long-lived stack, the retailer's run found eight confirmed units citing Jira issues stale: the Jira
 comment visibility item (pull request 76) reads every issue once more under a new version, and F6 sees the evidence
 changed, so an upgraded deployment sends every confirmed unit citing a Jira issue back for review once, even where the
-text didn't change (proposed as its own follow-up). Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 226 passed; the new check passed, and so did G4's pilot, the org's people, C2b's capture, C2c's save, Ask's citations, F4's unit answers, and C1 and M7's worker check; `kl.company_eval`'s Slack ask passed (ana answered privately, every source linked one her own Ask cites and the truth lets her read), as did everything else but F6's staleness above (Recall@10 100%, MRR 0.83 over 52 counted questions, Ask right for 27 of 27, the right unit first for 15 of 26, no leak); the Answers panel's browser test and the Capture panel's passed; the lint at 0 errors and 43 warnings; `make pins` passed. Not run: the full smoke suite and the other sets (CI's run on the pull request; the fresh-stack loop comes after the next two or three items). Not built: follow-up questions in a thread (the job carries
+text didn't change (proposed as its own follow-up). Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 227 passed; the new check passed, and so did G4's pilot, the org's people, C2b's capture, C2c's save, Ask's citations, F4's unit answers, and C1 and M7's worker check; `kl.company_eval`'s Slack ask passed (ana answered privately, every source linked one her own Ask cites and the truth lets her read), as did everything else but F6's staleness above (Recall@10 100%, MRR 0.83 over 52 counted questions, Ask right for 27 of 27, the right unit first for 15 of 26, no leak); the Answers panel's browser test and the Capture panel's passed; the lint at 0 errors and 43 warnings; `make pins` passed. Not run: the full smoke suite and the other sets (CI's run on the pull request; the fresh-stack loop comes after the next two or three items). Not built: follow-up questions in a thread (the job carries
 the thread), "ask an expert" from an unsure answer (F5b, through the interactivity address), the Teams bot (C1b; the
 ask's core, from the person to the private reply, doesn't depend on Slack), answers posted in a channel, direct messages
 to the bot (never read), and Terraform for the answer settings.

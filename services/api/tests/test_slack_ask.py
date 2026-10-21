@@ -55,8 +55,8 @@ def test_asks_run_only_in_their_own_lane():
 class Conn:
     """Stands in for the lane's connection: the link and the sign-in it's asked for."""
 
-    def __init__(self, link=None, seen=None):
-        self.rows = {slack_ask.PERSON_SQL: link, slack_ask.SIGN_IN_SQL: seen}
+    def __init__(self, link=None, seen=None, left=False):
+        self.rows = {slack_ask.PERSON_SQL: link, slack_ask.SIGN_IN_SQL: seen, slack_ask.LEFT_SQL: {"?column?": 1} if left else None}
         self.audits = []
 
     def execute(self, sql, params=()):
@@ -118,6 +118,15 @@ def test_only_a_linked_recently_signed_in_admitted_person_is_answered_as_themsel
     assert (caller.username, caller.groups, caller.email, question) == ("alice", ("payments",), "alice@acme.test", "refund cap?")
     assert reach == frozenset({"public", "internal"}) and len(conn.audits) == 1
     assert told[:3] == [slack_ask.SAY["unlinked"], slack_ask.SAY["stale"], slack_ask.SAY["not onboarded"]] and "the answer" in told[3]
+
+
+def test_someone_the_directory_says_has_left_is_never_answered_even_inside_their_week(lane, monkeypatch):
+    told, asked = lane
+    monkeypatch.setattr(slack, "client_for", lambda c: Client())
+    linked = {"canonical": "user:alice", "verified_by": "admin:olivia"}  # a link no directory revokes
+    recent = {"groups": ["payments"], "signed_in_at": datetime.now(timezone.utc)}
+    assert slack_ask.ask(Conn(linked, recent, left=True), job(question="refund cap?", via="command")) == {"refused": "left"}
+    assert asked == [] and told == [slack_ask.SAY["left"]]
 
 
 def test_a_mention_is_answered_only_for_its_own_author_and_read_back_from_slack(lane, monkeypatch):

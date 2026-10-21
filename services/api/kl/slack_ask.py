@@ -37,6 +37,7 @@ SAY = {  # what the asker is told, privately, when there's no answer to give
     "not set up": "Asking isn't set up for this Slack workspace yet: a team admin chooses a model for it in Aerugo.",
     "outsider": "Only people in this workspace can ask Aerugo here.",
     "unlinked": "Aerugo doesn't know who you are yet. Sign in to Aerugo once with your work account, then ask again.",
+    "left": "Aerugo's directory no longer lists you, so it can't answer you here.",
     "stale": "It's been a while since you signed in to Aerugo. Sign in again, then ask again.",
     "not onboarded": "Your team isn't onboarded to Aerugo yet: ask your Aerugo administrator.",
     "empty": "Ask a question: /aerugo ask <your question>, or mention Aerugo with it.",
@@ -46,6 +47,12 @@ SAY = {  # what the asker is told, privately, when there's no answer to give
 }
 PERSON_SQL = "SELECT canonical, verified_by FROM principal_aliases WHERE source = %s"
 SIGN_IN_SQL = "SELECT groups, signed_in_at FROM person_sign_ins WHERE username = %s"
+# Someone a directory that isn't paused lists only as having left (Q6's rule), by their verified sign-in email or their
+# Slack account's: it can only refuse, so a link made another way, or a sign-in still inside its week, never outlives it.
+LEFT_SQL = """SELECT 1 FROM directory_people d
+JOIN connections c ON c.id = d.connection_id AND c.kind = 'directory' AND c.status <> 'disabled'
+WHERE d.email = ANY(ARRAY(SELECT email FROM people WHERE username = %(user)s AND email IS NOT NULL) || %(emails)s::text[])
+GROUP BY d.email HAVING NOT bool_or(d.active) LIMIT 1"""
 
 
 def fresh(signed_in_at: datetime | None, now: datetime, days: float = ASK_DAYS) -> bool:
@@ -119,6 +126,9 @@ def ask(conn, job) -> dict:
     if not link or not str(link["canonical"]).startswith("user:"):
         return refuse("unlinked")
     username = link["canonical"].split(":", 1)[1]
+    slack_email = str((person.get("profile") or {}).get("email") or "").lower()
+    if conn.execute(LEFT_SQL, {"user": username, "emails": [slack_email] if slack_email else []}).fetchone():
+        return refuse("left")
     seen = conn.execute(SIGN_IN_SQL, (username,)).fetchone()
     if not seen or not fresh(seen["signed_in_at"], datetime.now(timezone.utc)):
         return refuse("stale")
