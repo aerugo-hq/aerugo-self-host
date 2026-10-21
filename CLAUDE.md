@@ -2045,7 +2045,9 @@ where its own searches record the words they look for, so two of its early red r
 again. Proof, on a fresh stack of its own (`kljira`, CI's settings: the example `.env`, no `.secrets/`), from main at dc26b0d:
 `make unit` 197 passed; the new check passed, and so did the other eleven that use the fake Jira (Jira's permissions,
 H6's incremental sync, Q5's decisions, Q7's attachments, connection ownership, S8's webhook and readers refresh, F11a's
-pointers, H2's throttling, pipelines, GCP secret references, and C1 and M7's worker check), each run alone. Not run:
+pointers, H2's throttling, pipelines, GCP secret references, and C1 and M7's worker check), each run alone. Main then
+took F11b (pull request 75); merged with it, `make unit` 206 passed, and the new check, Jira's permissions, F11a's
+pointers, and F11b's live-only check passed again. Not run:
 the full smoke suite and the evaluation sets (CI's run on the pull request; by decision the fresh-stack loop runs every
 two or three items), and the browser tests and the provider's tests (nothing they use changed). Not built: a restricted comment's own
 readers (above); worklogs (not read); and Jira's own search for live-only connections (F11b, merged as pull request 75), which runs
