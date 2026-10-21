@@ -1006,7 +1006,8 @@ class Handler(BaseHTTPRequestHandler):
             "attachment": [{"id": a["id"], "filename": a["filename"], "size": len(a["text"]),
                             "content": f"http://{self.headers.get('Host')}/{url.path.split('/')[1]}/rest/api/3/attachment/content/{a['id']}"} for a in i.get("attachments", [])],
             "comment": {"comments": [{"author": {"displayName": c["author"]}, "created": c.get("created", "2026-10-01T10:00:00.000+0000"),
-                                      "body": doc(c["body"])} for c in i.get("comments", [])]}}}
+                                      "body": doc(c["body"]),  # a group or role restriction, and Service Management's internal notes, as Jira sends them
+                                      **{k: c[k] for k in ("visibility", "jsdPublic") if k in c}} for c in i.get("comments", [])]}}}
         if rest == "search/jql":  # project = KEY, and when a sync asks for changes only (H6), AND updated >= -Nm
             from datetime import datetime, timedelta, timezone
             jql = q.get("jql", "")
