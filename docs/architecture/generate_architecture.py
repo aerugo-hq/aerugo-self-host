@@ -157,7 +157,7 @@ p.box("<b>Across every layer</b>", 1280, 130, 330, 780, S_GROUP)
 cross = [("Identity: sign-on, and the asker's role and place", S_BUILT), ("Permissions: row-level security and OpenFGA", S_BUILT),
          ("Model gateway: approved models, budgets", S_BUILT), ("Audit and privacy", S_BUILT),
          ("Job queue with leases", S_BUILT), ("Observability: telemetry, alerts", S_BUILT),
-         ("Sensitive-topic filters", S_NEW), ("Question sets: tests for answers", S_BUILT)]
+         ("Sensitive-topic filters", S_BUILT), ("Question sets: tests for answers", S_BUILT)]
 for i, (lbl, st) in enumerate(cross):
     p.box(lbl, 1300, 175 + i * 88, 290, 64, st)
 p.legend()

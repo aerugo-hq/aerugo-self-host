@@ -128,6 +128,13 @@ corrects it**. Teams' rules shape this: a channel's owners can consent to a bot 
 delivery to bots is unreliable and live notifications aren't available for private and shared channels, so capture
 rests on opted-in standard channels and the save action, never on watching chats.
 
+Built so far: the sensitive filter for chat (C2a). A Slack message speaking of one person's health, discipline,
+performance, or pay, or holding personal data (`privacy.sensitive`, the gate extraction, gaps, and kept answers already
+share), is left out of every section a document keeps and every live read gives, so nothing searches, shows, embeds, or
+sends it to a model, though the channel's members can read it in Slack; a thread opening with one is titled by its day.
+Decided 2026-10-20: Slack before Teams; a channel is captured only with two keys (its creator or a workspace admin in the
+channel, and the team admin in Aerugo); the bot posts only the capture notice and private replies.
+
 ## 7. The engineering and data pack
 
 Sources: GitHub (repos, Terraform, conventions), the EDW (metadata, query logs), Control-M (jobs, order, scripts),

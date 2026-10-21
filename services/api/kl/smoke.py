@@ -5118,6 +5118,91 @@ def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search(
 
 
 @check
+def sensitive_chat_is_never_kept_found_or_answered_from():
+    """C2a, sensitive chat: a Slack message speaking of one person's health or discipline is kept in no table, found by no search, and sent to no model, indexed or as a pointer read live, though the channel's members can read it in Slack; the channel's other messages are kept, found, and answered from; a thread opening with one is titled by its day"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    uid = {u: f"USEN{u.upper()}{tag}" for u in ("alice", "carol")}
+    channel, ts = f"CSEN{tag}", lambda n: f"17600{n:05d}.000{n:03d}"
+    surgery = f"Pat Lane {tag.lower()} is having surgery on Monday, so I'm covering Pat's shifts."
+    warning = f"Lee Moss {tag.lower()} got a final written warning for lateness today."
+    state = {"users": [{"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}} for u in uid],
+             "channels": {channel: {"name": f"sen-{tag.lower()}", "private": True, "members": list(uid.values()), "messages": [
+                 {"ts": ts(1), "user": uid["carol"], "text": surgery, "thread_ts": ts(1), "reply_count": 1,
+                  "replies": [{"ts": ts(2), "user": uid["alice"], "text": f"Thanks, I'll move the till rota {tag}.", "thread_ts": ts(1)}]},
+                 {"ts": ts(3), "user": uid["carol"], "text": warning},
+                 {"ts": ts(4), "user": uid["alice"], "text": f"The truck for {tag} comes at noon."}]}}}
+    name = f"sen-slack-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    thread, day = f"slack-{channel}-{ts(1)}", f"slack-{channel}-2025-10-09"
+    principals = [(u, f"ext:slack.{uid[u]}") for u in uid]
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in principals}
+    conversations = []
+
+    def docs() -> dict:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return {r["external_key"]: r for r in conn.execute(
+                "SELECT external_key, title, storage FROM kl.documents WHERE external_key LIKE %s", (f"slack-{channel}-%",)).fetchall()}
+
+    def asked(user, question):
+        reset_fake()
+        r = api("POST", "/v1/conversations", user, json={"question": question, "model": "payments/smoke-fake", "focus": [thread, day]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:300]}"
+        conversations.append((user, r.json()["conversation"]["id"]))
+        return "\n".join(fake_prompts())
+
+    def until(ok, seconds=150):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(3)
+        return ok()
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in principals:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    ensure_fake_models()
+    try:
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel],
+            "history_days": 3650, "every_minutes": 60})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: {thread, day} <= set(docs())), f"the channel never arrived: {docs()}"
+        held = docs()
+        assert held[thread]["title"] == f"#sen-{tag.lower()}: thread on 2025-10-09", f"a thread opening with one kept its text as its title: {held[thread]}"
+        for text in (surgery, warning):
+            assert not stored_anywhere(text[:50]), f"a sensitive message was kept: {stored_anywhere(text[:50])}"
+        found = {h["id"]: h for h in api("GET", "/v1/search", "carol", params={"q": tag, "scope": "org", "limit": 20}).json()["results"]}
+        assert {thread, day} <= set(found), f"the channel's other messages weren't found: {sorted(found)}"
+        hits = api("GET", "/v1/search", "carol", params={"q": f"surgery {tag.lower()}", "scope": "org"}).json()["results"]
+        assert all("surgery" not in f"{h['title']} {h.get('snippet') or ''}" for h in hits), "a search found the sensitive message"
+        prompt = asked("alice", f"Who is covering shifts and why, {tag}?")
+        assert f"till rota {tag}" in prompt and f"truck for {tag}" in prompt, "the channel's other messages never reached the model"
+        assert "surgery" not in prompt and "written warning" not in prompt, "a sensitive message reached the model"
+        read = api("GET", f"/v1/documents/{day}/content", "carol")
+        assert read.status_code == 200 and "written warning" not in read.text and f"truck for {tag}" in read.text, read.text[:300]
+
+        assert api("PATCH", path, "alice", json={"storage": "pointer"}).status_code == 200  # read live now
+        assert until(lambda: all(d["storage"] == "pointer" for d in docs().values()) and {thread, day} <= set(docs()))
+        prompt = asked("alice", f"Who is covering shifts and why, {tag}?")
+        assert f"till rota {tag}" in prompt, "a pointer's other messages, read live, never reached the model"
+        assert "surgery" not in prompt and "written warning" not in prompt, "a sensitive message read live reached the model"
+        for text in (surgery, warning):
+            assert not stored_anywhere(text[:50]), f"a sensitive message was kept: {stored_anywhere(text[:50])}"
+    finally:
+        api("DELETE", path, "alice")
+        for user, cid in conversations:
+            api("DELETE", f"/v1/conversations/{cid}", user)
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
+            conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"USEN%{tag}",))
+
+
+@check
 def credentials_can_live_in_vault_aws_or_azure_fenced_per_team():
     """G3, the company's own secret stores: a connection's credential can be a reference to HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault, each read by the worker as the runner itself (Vault's JWT login, an assumed role, workload identity federation), never stored; each store is fenced per team by the secret's name, so another team's secret, a store or place the deployment doesn't allow, and a malformed reference are refused"""
     import json as jsonlib
