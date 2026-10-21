@@ -44,19 +44,23 @@ excluding them is capture's work (C2).
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import httpx
 import psycopg
 from psycopg.rows import dict_row
 
-from . import company, evals, smoke
+from . import company, evals, slack, smoke
 from .smoke import BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, OWNER_DB, TOKEN_URL, api, api_ready, ask_as
 
 ADMIN = "olivia"  # the org admin makes the teams and connections
@@ -531,7 +535,7 @@ TEAM_DOCUMENTS_SQL = """
 SELECT count(*) FILTER (WHERE s.content_hash = d.content_hash) AS read, count(*) AS of
 FROM kl.workspace_documents wd JOIN kl.workspaces w ON w.id = wd.workspace_id JOIN kl.documents d ON d.id = wd.document_id
 LEFT JOIN kl.extraction_state s ON s.workspace_id = w.id AND s.document_id = d.id
-WHERE w.slug = %s AND d.source_kind = ANY(%s)
+WHERE w.slug = %s AND (d.source_kind = ANY(%s) OR (d.source_kind = 'slack' AND d.container_ref = ANY(%s)))
 """
 PROPOSALS_SQL = """
 SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team, u.duplicate_of::text AS duplicate_of FROM kl.knowledge_units u
@@ -540,12 +544,57 @@ WHERE u.created_by = 'extraction' AND u.status = 'proposed' AND w.slug = ANY(%s)
 """
 
 
+def capture_on(world: company.World) -> list[str]:
+    """C2b on the retailer: each channel the truth captures is turned on as a company would: its creator runs `/aerugo
+    capture on` in it (a command signed with the app's signing secret, as Slack sends it), then its team's admin
+    confirms. Returns what went wrong: the bot posting anything but the notice, anywhere but a captured channel."""
+    names, problems = {slug: name for slug, name, _ in company.TEAMS}, []
+    for channel in company.CAPTURED:
+        c = next(c for c in world.containers if c.id == channel)
+        path = f"/v1/workspaces/{c.team}/connections/retail-slack-{c.team}"
+        state = lambda: next((x["capture"] for x in api("GET", path + "/capture", ADMIN).json()["channels"] if x["channel"] == channel), None)
+        if state() == "on":
+            continue
+        signing = secrets.token_hex(16)  # the app's signing secret, set on the connection's webhook each run
+        hook = api("POST", path + "/webhook", ADMIN, json={"signing_secret": signing})
+        if hook.status_code != 201:
+            raise SystemExit(f"{path}: no webhook for the capture command ({hook.status_code})")
+        raw = urlencode({"command": "/aerugo", "text": "capture on", "channel_id": channel, "team_id": company.SLACK_TEAM,
+                         "user_id": company.creator_of(world, c).slack}).encode()
+        stamp = str(int(time.time()))
+        signature = "v0=" + hmac.new(signing.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256).hexdigest()
+        r = httpx.post(hook.json()["url"] + "/commands", content=raw, timeout=10, headers={  # the address the app's admin is given
+            "Content-Type": "application/x-www-form-urlencoded", "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+        if r.status_code != 200:
+            raise SystemExit(f"the capture command for {channel}: {r.status_code} {r.text[:200]}")
+        deadline = time.monotonic() + 120
+        while state() != "requested" and time.monotonic() < deadline:
+            time.sleep(2)
+        r = api("POST", f"{path}/capture/{channel}", ADMIN, json={"action": "confirm"})
+        if r.status_code != 200:
+            raise SystemExit(f"confirming capture of {channel}: {r.status_code} {r.text[:200]}")
+        notice = slack.NOTICE_ON.format(team=names[c.team])
+        while not any(p["channel"] == channel and p["text"] == notice for p in httpx.get(f"{SITES['slack']}/posted", timeout=10).json()) \
+                and time.monotonic() < deadline + 120:
+            time.sleep(2)
+    posted = httpx.get(f"{SITES['slack']}/posted", timeout=10).json()
+    for p in posted:
+        team = next((c.team for c in world.containers if c.id == p["channel"] and c.id in company.CAPTURED), None)
+        if not team or p["text"] != slack.NOTICE_ON.format(team=names[team]):
+            problems.append(f"the bot posted in {p['channel']}: {p['text'][:80]}")
+    print(f"\nCapture (C2b): {', '.join(company.CAPTURED)} on, with both keys; the bot posted {len(posted)} message(s), "
+          f"{len(problems)} of them anything but a captured channel's notice")
+    return problems
+
+
 def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[str], list[str]]:
-    """F2 on the retailer: two teams opt in with the fake model; every proposal cites one of their pages or tickets,
-    never a chat thread, and each person sees exactly the proposals whose document they can open. Which documents are
-    pages and tickets comes from the truth, never from the code under test. With pointers only (F11a), nothing is
-    proposed at all: a pointer keeps no text to extract from. Returns (leaks, missing)."""
+    """F2 on the retailer: two teams opt in with the fake model; every proposal cites one of their pages or tickets, or
+    a thread of a channel captured with both keys (C2b), never other chat, and each person sees exactly the proposals
+    whose document they can open. Which documents are pages, tickets, and captured threads comes from the truth, never
+    from the code under test. With pointers only (F11a), nothing is proposed at all: a pointer keeps no text to extract
+    from. Returns (leaks, missing)."""
     pages = sorted({d.source for d in world.docs if d.source in company.LOADED} - {"slack"})
+    captured = list(company.CAPTURED)
     for team in EXTRACT_TEAMS:
         model_for_stores(team)
         r = api("PUT", f"/v1/workspaces/{team}/extraction", ADMIN, json={"model": "smoke-fake"})
@@ -557,10 +606,11 @@ def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[
             found = conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall()
         print(f"\nExtraction (F2) with no text kept: {len(found)} proposals (none expected)\n")
         return [f"a proposal ({p['id']}) was extracted from {p['external_key']}, a pointer" for p in found], []
+    leaks = capture_on(world)
     deadline, counts = time.monotonic() + 600, {}
     with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
         while time.monotonic() < deadline:
-            counts = {t: conn.execute(TEAM_DOCUMENTS_SQL, (t, pages)).fetchone() for t in EXTRACT_TEAMS}
+            counts = {t: conn.execute(TEAM_DOCUMENTS_SQL, (t, pages, captured)).fetchone() for t in EXTRACT_TEAMS}
             if all(c["read"] == c["of"] for c in counts.values()):
                 break
             time.sleep(5)
@@ -568,12 +618,16 @@ def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[
             raise SystemExit(f"extraction didn't read every page and ticket in ten minutes: {counts}")
         found = conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall()
     by_key = {d.key: d for d in world.docs}
-    outside = [p for p in found if p["external_key"] not in by_key or by_key[p["external_key"]].source not in pages]
-    leaks = [f"a proposal ({p['id']}) cites {p['external_key']}, which isn't a page or ticket" for p in outside]
+    allowed = lambda d: d.source in pages or (d.source == "slack" and d.container in captured)
+    outside = [p for p in found if p["external_key"] not in by_key or not allowed(by_key[p["external_key"]])]
+    leaks += [f"a proposal ({p['id']}) cites {p['external_key']}, which isn't a page, a ticket, or a captured thread" for p in outside]
     missing = []
+    chat = sum(1 for p in found if p["external_key"] in by_key and by_key[p["external_key"]].source == "slack")
+    if not chat:
+        missing.append(f"nothing was proposed from {', '.join(captured)}, captured with both keys")
     print(f"\nExtraction (F2), the fake model for {' and '.join(EXTRACT_TEAMS)}: {len(found)} proposals from "
-          f"{len({p['external_key'] for p in found})} documents, {len(outside)} of them outside pages and tickets; "
-          "who sees them, against the truth\n")
+          f"{len({p['external_key'] for p in found})} documents ({chat} from captured threads), {len(outside)} of them "
+          "outside pages, tickets, and captured threads; who sees them, against the truth\n")
     for person in (p for p in world.people if p.username):
         seen = world.visible(person.username)
         readable_ids = {p["id"] for p in found if p["external_key"] in by_key and by_key[p["external_key"]].name in seen}

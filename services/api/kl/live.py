@@ -34,7 +34,8 @@ JOIN workspaces w           ON w.id = wd.workspace_id
 WHERE d.storage = 'live' AND d.connection_id = ANY(%(connections)s) AND w.slug = ANY(%(targets)s)
 """
 DOCS_SQL = """
-SELECT d.external_key, d.storage, d.container_ref, c.id AS connection_id, c.kind, c.config, c.credential_ref
+SELECT d.external_key, d.storage, d.container_ref, c.id AS connection_id, c.kind, c.config, c.credential_ref,
+       ARRAY(SELECT x.message FROM capture_exclusions x WHERE x.connection_id = c.id AND x.container = d.container_ref) AS excluded
 FROM documents d JOIN connections c ON c.id = d.connection_id
 WHERE d.external_key = ANY(%s) AND d.source_kind = c.kind
 """
