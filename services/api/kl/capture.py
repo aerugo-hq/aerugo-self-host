@@ -86,12 +86,13 @@ def saved_topic(channel: str, ts: str) -> str:
     return f"slack-save-{channel.lower()}-{ts.replace('.', '-')}"  # a unit's topic is lower case, digits, and hyphens
 
 
-def tell(c, channel: str, user: str, text: str) -> None:
-    """A private reply to the person who saved; failing to send it never undoes the save."""
+def tell(c, channel: str, user: str, text: str, thread: str | None = None) -> None:
+    """A private reply to the person who saved or asked (C2d), in their channel or thread; failing to send it never
+    undoes what was done."""
     try:
-        slack.client_for(c).whisper(channel, user, text)
+        slack.client_for(c).whisper(channel, user, text, thread)
     except (slack.SlackError, httpx.HTTPError, ValueError) as e:
-        log.warning("couldn't tell a Slack user about their save: %s", type(e).__name__)
+        log.warning("couldn't send a Slack user their private reply: %s", type(e).__name__)
 
 
 def save(conn, job) -> dict:

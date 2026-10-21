@@ -148,6 +148,15 @@ saver's ids; the worker reads the saver, the message, and the channel's members 
 never on a connection that keeps no text), and proposes a unit citing the channel's own document, so its readers are
 the channel's and follow its membership. The person who saved is told privately.
 
+The bot answers (C2d): `/aerugo ask <question>` and a message mentioning the bot, each signed and only queued by its
+hook, are answered in the **answers lane** (`kl.answers_lane`), a process apart from the worker that connects as the
+API's own database role (and refuses any other), so row-level security narrows each answer to its asker exactly as it
+narrows the API, and a long sync never holds an answer up. The asker is the person their Slack account is linked to,
+with the groups of their last verified sign-in (`person_sign_ins`, recorded as the API admits them), only while that's
+under a week old and the org's admission lets them in; their question goes through the API's own Ask, narrowed to what
+a Slack reply may carry, and the answer goes only to them, privately. A mention is read back from Slack; a command's
+question is the one text taken from a delivery, invariant 13's recorded exception.
+
 ## 7. The engineering and data pack
 
 Sources: GitHub (repos, Terraform, conventions), the EDW (metadata, query logs), Control-M (jobs, order, scripts),

@@ -130,7 +130,7 @@ decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 10. No new infrastructure dependency without an ADR in `docs/adr/`.
 11. Don't return counts of hidden items or distinguish "forbidden" from "not found" for content or private workspaces. Use 404.
 12. Synced content carries only the source's permissions. ACL arrays hold source identities (`ext:github.<login>`), and a caller gets them only through a `principal_aliases` link, expanded inside `db.scoped()`. Never put workspace, group, or org principals on synced content: connecting a source must never widen who can read it.
-13. Webhooks are hints, never truth. A delivery must pass HMAC verification and replay protection, and it may only queue jobs. Never read permissions or content from a webhook payload; the job re-reads the source.
+13. Webhooks are hints, never truth. A delivery must pass HMAC verification and replay protection, and it may only queue jobs. Never read permissions or content from a webhook payload; the job re-reads the source. One recorded exception (C2d, approved 2026-10-21): `/aerugo ask`'s question, taken from the signed command because no Slack message holds it; it's the asker's own query, run as them, never source content and never kept as knowledge.
 14. Every link carries its provenance: the signal that made it, its strength, and the evidence behind it. Never store a bare edge.
 15. Graph expansion is authorized at every hop. A walk never passes through, or reveals, a node the asker can't read.
 16. Nothing derived mixes permissions. A summary, cluster label, or entity description shown to someone is built only from what that person can read; never precompute one across documents with different readers.
@@ -2198,6 +2198,10 @@ the unconfirmed saves and model proposals made from it). Red first: the save che
 failed ("an answer used a save no curator confirmed"); with the fixes but the removed document's cleanup left out, it
 failed (the deleted message's text still in `kl.knowledge_units`); restored (`cmp`) and green, and the extraction,
 capture, Slack, sensitive-chat, lifecycle, and unit-answer checks passed on the fixed build; `make unit` 215 passed.
+CI on pull request 80 (merged with main's Jira items): unit 218 passed; smoke 186 passed, 17 skipped, 0 failed; the
+golden set, the scenario (Recall@10 94%, MRR 0.81), the retailer (CO201 on with both keys, 1 of 1 saves, 26 proposals
+with 3 from the captured channel; Recall@10 100%, MRR 0.83), its pointer (MRR 0.84) and live-only (MRR 0.63) runs, the
+Atlas, and every team's set at their baselines; no leak and no regression. C2c merged (pull request 80).
 Jira comment visibility (found by F11a's review, its own item, approved 2026-10-20). `jira.issue_sections` put every
 comment in its issue's text, so a comment Jira restricts to a group or a project role (`visibility`) reached everyone
 who reads the issue: in its chunks, search, Ask, decisions, extraction, and, since F11a, a pointer's live read. That
@@ -2268,6 +2272,68 @@ baseline exactly, `recall-decision` at #5: QUAL-7's comment "Recommending a reca
 decision page, and two permission-trap questions cite other pages their askers may read; nothing else moved. Not run:
 the full smoke suite and the other evaluation sets (CI's run on the pull request), and the browser tests and the
 provider's tests (nothing they use changed). Not built: comment recall for live-only Jira (above).
+C2d, the bot answers privately, as the asker (the plan approved 2026-10-21 with three decisions: `/aerugo ask`'s
+question is taken from the signed command as a recorded exception to invariant 13, since no Slack message holds it and
+it's the asker's own query, never source content and never kept as knowledge; an asker's last sign-in must be within 7
+days; and only public and internal sources reach Slack unless the team's admin allows more). `/aerugo ask <question>`
+(the existing signed command route; the question at most 1,000 characters) and a message mentioning the bot (a new
+`app_mention` event on the existing signed events route, needing `app_mentions:read`) each only queue a `slack.ask` job,
+taken once and tried once, so a retry never answers twice. Those jobs run in the **answers lane** (`kl/answers_lane.py`,
+compose's `answers`, a Kubernetes deployment of its own under the API's service account, the GCP overlay's service), a
+process apart from the worker that connects as the API's own database role and refuses to start as any other, so
+row-level security narrows each answer to its asker exactly as it narrows the API (the worker's role isn't narrowed to
+a person), and a long sync never holds an answer up; the worker never claims these jobs (`worker.LANE_KINDS`,
+`WORKER_CLAIM_SQL` and `LANE_CLAIM_SQL`), and its reaper puts back one whose lane stopped. `run` and the lease take the
+database and handlers to use. Migration 0069: `person_sign_ins` (each person's last verified sign-in and the groups its
+token named; row-level security in the org; the username among the names an erasure finds), written as the API admits
+someone (`admission.record_sign_in`, at most every five minutes per person, never for a service account, never by an
+ask), and the lane's grant on a job's lease. The ask (`kl/slack_ask.py`): the channel must be one the connection reads
+and its team's admin must have chosen a model (`GET`/`PUT .../connections/{name}/answers`, team admins: a model from
+the team's own registry, so its members' asks are answered with and paid by it, and the classifications a reply may
+carry, public and internal by default); the Slack user is read again (this workspace's, not a bot or a leaver); a
+mention's message is read back from Slack and answered only for its own author, the bot's mention dropped
+(`slack.question_of`); the asker is the person their Slack account is linked to in `principal_aliases` (a link made at
+sign-in, never Slack's word alone), with the groups of their last sign-in only while it's under `KL_SLACK_ASK_DAYS` (7)
+old, and the email Slack gives only when the link was made by that verified email (F8's context); someone a directory
+that isn't paused lists only as having left, by their verified sign-in email or their Slack account's, is refused
+(`LEFT_SQL`, Q6's rule; it can only refuse, so a link made another way, or a sign-in still inside its week, never
+outlives a leaving); the org's admission is checked as their last sign-in left it (G4: each process trusts the mode it read for 30 seconds, the lane too). Then
+the API's own Ask runs as them (`main.answer_question`, unchanged but for `reach`, which narrows the sources a reply may
+carry, as the model's egress does): the same row-level security, OpenFGA post-check, audit, rate limit, units, and
+context. The reply (`reply_of`) goes only to them, by the connection's bot, privately (`chat.postEphemeral`, in their
+thread when they asked in one), never to an address a delivery names: the answer, the sources it cites as links to
+Aerugo's reader by title (a unit by title alone), its confidence, and, when sources were left out, that some weren't
+shown here and a link to ask in Aerugo; Slack's control characters escaped, so nothing in an answer or a title becomes a
+link or a mention. Each refusal says why, privately: not set up, not in the workspace, not linked, a sign-in over a week
+old, not onboarded, not on the model's team, over the rate limit. The question and the answer are never logged. The app:
+each Slack row's Answers panel (the model, Off by default, and what may reach Slack; loading, error, and empty states).
+The fake Slack's `auth.test` gives the bot's user id, and private replies keep their thread. Docs: the Slack doc's Ask
+section, the architecture, the diagram (the Slack bot built; Teams' still to build), the plan (C2 ticked), and
+`.env.example`. Smoke: `slack_asks_are_answered_privately_as_the_asker` (a forged command refused; asking before a
+model is chosen is told it isn't set up; a member can't choose the model and another team's model is refused; alice's
+answer links only her own Ask's sources and none she can't read, each opening for her; bob, in the channel but linked
+to no one, is told how to link; alice with a sign-in eight days old is told to sign in again; nora, left out by a
+pilot, is told she isn't onboarded; alice's mention is answered, and a mention event naming her for carol's message
+isn't; with only public allowed, her answer links nothing and says some sources weren't shown; nothing is posted in the
+channel; and the lane, started as the worker's role, refuses to run). Unit: `tests/test_slack_ask.py` (9: a sign-in
+counts for seven days; the reply's escaping and links; a mention's question; the ask command; asks only in their lane;
+only a linked, recent, admitted person answered as themselves; a leaver the directory reports never answered, even
+inside their week; a mention only for its author, read back from Slack) and
+one in `test_admission.py` (a person's sign-in recorded, a service account's never). Browser:
+`test_a_team_admin_chooses_how_slack_asks_are_answered`. The retailer: `slack_ask_check` in kl.company_eval, in CI:
+ana asks one of her questions in her own store's channel, as Slack sends it, and is answered privately with only
+sources her own Ask cites and the truth lets her read (the link made by her verified email at sign-in, so the real
+path). Red first: each mutation built into the service that runs it, the check run against it, then restored (`cmp`) and the service rebuilt: with the sign-in's age not checked, it failed ("an ask was answered on a sign-in over a week old"); with someone unlinked answered by their Slack name, it failed ("someone Aerugo can't link was answered"); with admission skipped, it failed ("a pilot's outsider was answered from Slack"); with `reach` ignored, it failed (an internal page reached a public-only Slack); with a mention answered whoever wrote it, it failed ("a mention was answered for someone who didn't write it"); and with the lane's role check made to let any role through, the lane started as the worker's role and ran on (the check timed out waiting for it to refuse); and, added after an automated security review of the pushed branch found a link made another way would
+outlive a leaving for up to a week, the leaver's unit test failed with the directory check removed, then passed, and
+the smoke check passed with the query running on every ask. Found while proving it: the check first asked the moment the pilot began, inside the 30 seconds
+each process trusts the admission mode it read (G4's design, the API's too), and nora was answered; it now waits that
+out. And on this long-lived stack, the retailer's run found eight confirmed units citing Jira issues stale: the Jira
+comment visibility item (pull request 76) reads every issue once more under a new version, and F6 sees the evidence
+changed, so an upgraded deployment sends every confirmed unit citing a Jira issue back for review once, even where the
+text didn't change (proposed as its own follow-up). Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 227 passed; the new check passed, and so did G4's pilot, the org's people, C2b's capture, C2c's save, Ask's citations, F4's unit answers, and C1 and M7's worker check; `kl.company_eval`'s Slack ask passed (ana answered privately, every source linked one her own Ask cites and the truth lets her read), as did everything else but F6's staleness above (Recall@10 100%, MRR 0.83 over 52 counted questions, Ask right for 27 of 27, the right unit first for 15 of 26, no leak); the Answers panel's browser test and the Capture panel's passed; the lint at 0 errors and 43 warnings; `make pins` passed. Not run: the full smoke suite and the other sets (CI's run on the pull request; the fresh-stack loop comes after the next two or three items). Not built: follow-up questions in a thread (the job carries
+the thread), "ask an expert" from an unsure answer (F5b, through the interactivity address), the Teams bot (C1b; the
+ask's core, from the person to the private reply, doesn't depend on Slack), answers posted in a channel, direct messages
+to the bot (never read), and Terraform for the answer settings.
 F6's evidence by its text (found by C2d's proof on a long-lived stack, its own item, 2026-10-21). F6 snapshotted each
 evidence document's `content_hash` at confirmation and sent a unit back for review when it moved, but a synced
 document's `content_hash` is its source's version, so a version that moved with the same text counted as a change: the
@@ -2322,8 +2388,9 @@ units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, w
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
 answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
 loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
-fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and F6's evidence
-by its text; next, C2d (the bot answers privately), then Teams (C1a, C1b), C3, and C4.
+fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and C2d (the bot
+answers privately, as the asker), which completes C2, and F6's evidence by its text; next, Teams (C1a, C1b), C3, and
+C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

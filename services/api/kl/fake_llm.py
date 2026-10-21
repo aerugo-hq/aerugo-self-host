@@ -130,6 +130,7 @@ SLACK: dict = {"team": {"id": "T0SMOKE", "name": "Acme", "url": "https://acme-sm
 # The synthetic retailer's own workspace (F9), at /retail-slack, as the retailer's Confluence site is.
 SLACK_SITES = {"slack": SLACK, "retail-slack": {"team": {"id": "T0RETAIL", "name": "Acme Outfitters", "url": "https://acme-outfitters.slack.com"},
                                                 "users": [], "channels": {}, "throttle": False}}
+SLACK_BOT = "UAERUGOBOT"  # the bot's own user id, as auth.test gives it (C2d: a mention names it)
 SLACK_TOKEN = "xoxb-smoke-slack-token"
 SLACK_PAGE = 2
 # A fake Notion (S6): the pages and data sources shared with an integration (and some that aren't), with their blocks,
@@ -841,7 +842,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, body)
         channel = channels.get(q.get("channel", ""))
         if method == "auth.test":
-            return self._json(200, {"ok": True, "team": team["name"], "team_id": team["id"], "user": "aerugo", "url": team["url"] + "/"})
+            return self._json(200, {"ok": True, "team": team["name"], "team_id": team["id"], "user": "aerugo", "user_id": SLACK_BOT,
+                                    "url": team["url"] + "/"})
         if method == "conversations.list":
             return page("channels", [{"id": cid, "name": c["name"], "is_private": c.get("private", False), "is_member": c.get("bot_member", True),
                                       "is_ext_shared": c.get("shared", False), "is_shared": c.get("shared", False)} for cid, c in channels.items()])
@@ -1154,7 +1156,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": False, "error": "user_not_in_channel"})
             ts = f"{time.time():.6f}"
             state.setdefault("posted", []).append({"channel": form["channel"], "text": form.get("text", ""), "ts": ts,
-                                                   **({"user": form["user"], "ephemeral": True} if private else {})})
+                                                   **({"user": form["user"], "ephemeral": True, "thread": form.get("thread_ts")}
+                                                      if private else {})})
             return self._json(200, {"ok": True, "channel": form["channel"], **({"message_ts": ts} if private else {"ts": ts})})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))

@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from . import config, telemetry
 from .db import resolve_org_id, scoped
 from .policy import audit
-from .slack import DONT_CAPTURE, SAVE_COMMAND, SAVE_SHORTCUT, capture_action as slack_capture_action
+from .slack import ASK_COMMAND, DONT_CAPTURE, SAVE_COMMAND, SAVE_SHORTCUT, capture_action as slack_capture_action
 from .vault import vault
 
 router = APIRouter()
@@ -45,8 +45,12 @@ COMMAND_REPLY = {  # private to whoever ran it (Slack shows an ephemeral reply o
           "in Aerugo; the channel is told when it starts.",
     "off": "Asked. If you created this channel or administer this workspace, capture stops, and the channel is told.",
     "save": "To save something for your team, post it in the channel, then choose Save to Aerugo from that message's menu.",
-    None: "Use /aerugo capture on or /aerugo capture off in a channel Aerugo reads. React :no_entry_sign: to keep a message out.",
+    "ask": "Asking Aerugo as you. The answer will appear here, and only you will see it.",
+    "ask-empty": "Ask a question after the command: /aerugo ask <your question>.",
+    None: "Use /aerugo ask <question>, or /aerugo capture on or off, in a channel Aerugo reads. React :no_entry_sign: to "
+          "keep a message out.",
 }
+QUESTION_CHARS = 1000  # an ask's question, at most (C2d)
 
 
 async def capped_body(request: Request, limit: int) -> bytes | None:
@@ -108,14 +112,17 @@ def queue_refresh(org_id: str, kind: str, connection_id: str, delivery: str) -> 
     return {"duplicate": False, "queued": 0 if pending else 1}
 
 
-def queue_job(org_id: str, kind: str, connection_id: str, delivery: str, job: str, payload: dict) -> dict:
-    """Record a Slack delivery once, then queue the one job it asks for (C2b), for the worker to check against Slack."""
+def queue_job(org_id: str, kind: str, connection_id: str, delivery: str, job: str, payload: dict,
+              attempts: int | None = None) -> dict:
+    """Record a Slack delivery once, then queue the one job it asks for (C2b), for the worker to check against Slack.
+    `attempts` caps its tries (C2d: an ask is tried once, so a retry never answers twice)."""
     with scoped(org_id, SERVICE) as conn:
         claimed = conn.execute("INSERT INTO webhook_deliveries (org_id, source, delivery_id, event) VALUES (%s, %s, %s, %s) "
                                "ON CONFLICT DO NOTHING RETURNING delivery_id", (org_id, kind, f"{connection_id}:{delivery}", job)).fetchone()
         if not claimed:
             return {"duplicate": True, "queued": 0}
-        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, %s, %s)", (org_id, job, Jsonb({"connection_id": connection_id, **payload})))
+        conn.execute("INSERT INTO jobs (org_id, kind, payload, max_attempts) VALUES (%s, %s, %s, COALESCE(%s, 5))",
+                     (org_id, job, Jsonb({"connection_id": connection_id, **payload}), attempts))
         conn.execute("UPDATE webhook_deliveries SET queued_jobs = 1 WHERE org_id = %s AND source = %s AND delivery_id = %s",
                      (org_id, kind, f"{connection_id}:{delivery}"))
         audit(conn, org_id, SERVICE[0], f"webhook.{kind}", [], {"connection_id": connection_id, "delivery": delivery, "job": job})
@@ -141,6 +148,15 @@ async def slack_command(connection_id: str, request: Request, x_slack_signature:
     action = slack_capture_action(form.get("text", ""))
     if not action and SAVE_COMMAND.match(form.get("text", "")):  # a note is posted, then saved: its text is never taken from here
         return JSONResponse({"response_type": "ephemeral", "text": COMMAND_REPLY["save"]}, status_code=200)
+    asked = None if action else ASK_COMMAND.match(form.get("text", ""))
+    if asked:  # C2d: the one text taken from a delivery, the asker's own question (invariant 13's recorded exception,
+        # approved 2026-10-21): a query run as them, never source content and never kept as knowledge
+        question = asked[1].strip()[:QUESTION_CHARS]
+        if question and CHANNEL.fullmatch(channel) and SLACK_USER.fullmatch(user):
+            delivery = "ask-" + hashlib.sha256(x_slack_signature.encode()).hexdigest()[:32]  # a replay is the same signature
+            await run_in_threadpool(queue_job, found[0], "slack", connection_id, delivery, "slack.ask",
+                                    {"channel": channel, "user": user, "question": question, "via": "command"}, 1)
+        return JSONResponse({"response_type": "ephemeral", "text": COMMAND_REPLY["ask" if question else "ask-empty"]}, status_code=200)
     if action and CHANNEL.fullmatch(channel) and SLACK_USER.fullmatch(user):
         delivery = "cmd-" + hashlib.sha256(x_slack_signature.encode()).hexdigest()[:32]  # a replay is the same signature
         await run_in_threadpool(queue_job, found[0], "slack", connection_id, delivery, "slack.capture",
@@ -227,6 +243,14 @@ async def hook(kind: str, connection_id: str, request: Request,
             result = await run_in_threadpool(queue_job, org_id, kind, connection_id, delivery, "slack.exclude",
                                              {"channel": item["channel"], "ts": item["ts"]})  # a hint: the worker reads the reaction back
             log.info("slack don't-capture hook for %s: %s", connection_id, result)
+            return result
+        thread = str(event.get("thread_ts") or "")
+        if event.get("type") == "app_mention" and CHANNEL.fullmatch(str(event.get("channel") or "")) \
+                and SLACK_USER.fullmatch(str(event.get("user") or "")) and SLACK_TS.fullmatch(str(event.get("ts") or "")):
+            result = await run_in_threadpool(queue_job, org_id, kind, connection_id, delivery, "slack.ask", {
+                "channel": event["channel"], "user": event["user"], "ts": event["ts"], "via": "mention",
+                **({"thread": thread} if SLACK_TS.fullmatch(thread) else {})}, 1)  # a hint: the worker reads the message back
+            log.info("slack ask hook for %s: %s", connection_id, result)
             return result
     else:
         if not atlassian_signed(secret, body, x_hub_signature):

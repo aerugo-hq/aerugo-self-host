@@ -43,6 +43,7 @@ def fresh(monkeypatch):
     for cache in (admission._synced, admission._admitted):
         cache.clear()
     monkeypatch.setattr(admission, "mode", lambda: "teams")
+    monkeypatch.setattr(admission, "record_sign_in", lambda caller: None)
 
 
 def test_a_persons_groups_come_to_match_their_token():
@@ -70,6 +71,16 @@ def test_a_service_account_never_becomes_a_member_of_the_org_or_a_group(monkeypa
     monkeypatch.setattr(admission, "fga", fga)
     admission.admit(Caller(username="service-account-ci", groups=("payments",), org_slug="acme", service=True))
     assert fga.writes == []
+
+
+def test_a_persons_sign_in_is_recorded_with_their_groups_and_a_service_accounts_never(monkeypatch):
+    signed = []
+    monkeypatch.setattr(admission, "fga", Fga())
+    monkeypatch.setattr(admission, "mode", lambda: "org")
+    monkeypatch.setattr(admission, "record_sign_in", signed.append)
+    admission.admit(person("nora", "pilot"))
+    admission.admit(Caller(username="service-account-ci", groups=("payments",), org_slug="acme", service=True))
+    assert [(c.username, c.groups) for c in signed] == [("nora", ("pilot",))]  # C2d: a Slack ask runs as this
 
 
 def test_someone_on_no_team_is_refused_while_admission_is_teams(monkeypatch):

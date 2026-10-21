@@ -733,6 +733,51 @@ def get_connection(ws: str, name: str, caller: Caller = Depends(authenticate)):
             "webhook": bool((c["config"] or {}).get("webhook_ref")), "containers": containers}
 
 
+class AnswersIn(BaseModel):
+    model: str | None = Field(None, max_length=130)  # '<team>/<name>' from this connection's team's registry; none turns asking off
+    classifications: list[Literal["public", "internal", "confidential", "restricted"]] = Field(
+        default_factory=lambda: ["public", "internal"], min_length=1, max_length=4)  # what a Slack reply may carry
+
+
+def answers_of(c) -> dict:
+    a = (c["config"] or {}).get("answers") or {}
+    return {"model": a.get("model"), "classifications": a.get("classifications") or ["public", "internal"]}
+
+
+@router.get("/connections/{name}/answers")
+def get_answers(ws: str, name: str, caller: Caller = Depends(authenticate)):
+    """How a Slack connection answers `/aerugo ask` and mentions (C2d): the team's model it asks through (none: asking is
+    off), and the classifications an answer may carry into Slack."""
+    require_workspace_admin(caller, ws)
+    with scoped(resolve_org_id(config.ORG_SLUG), caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+    if c["kind"] != "slack":
+        raise HTTPException(422, "only a Slack connection answers questions")
+    return answers_of(c)
+
+
+@router.put("/connections/{name}/answers")
+def set_answers(ws: str, name: str, body: AnswersIn, caller: Caller = Depends(authenticate)):
+    """The team admin's choice for Slack answers (C2d): a model from this team's own registry, which its members' asks
+    are answered with (and paid by), and what an answer may carry into Slack; public and internal unless they allow more."""
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+        if c["kind"] != "slack":
+            raise HTTPException(422, "only a Slack connection answers questions")
+        if body.model is not None:
+            team, _, model = body.model.partition("/")
+            if team != ws or not conn.execute("SELECT 1 FROM model_endpoints m JOIN workspaces w ON w.id = m.workspace_id "
+                                              "WHERE w.slug = %s AND m.name = %s", (ws, model)).fetchone():
+                raise HTTPException(422, "choose a model from this team's own registry ('<team>/<name>')")
+        answers = {"model": body.model, "classifications": sorted(set(body.classifications))} if body.model else None
+        cfg = {k: v for k, v in (c["config"] or {}).items() if k != "answers"} | ({"answers": answers} if answers else {})
+        conn.execute("UPDATE connections SET config = %s, updated_at = now() WHERE id = %s", (Jsonb(cfg), c["id"]))
+        audit(conn, org_id, caller.username, "connection.answers", [ws], {"name": name, "answers": answers})
+    return answers_of({"config": cfg})
+
+
 class CaptureIn(BaseModel):
     action: Literal["confirm", "off"]  # the second key, or stopping capture
 

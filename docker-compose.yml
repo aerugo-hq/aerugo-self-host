@@ -235,6 +235,18 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  answers:   # C2d: the jobs someone is waiting on (Slack asks), apart from the worker, as the API's own database role
+    <<: *api-build
+    command: ["python", "-m", "kl.answers_lane"]
+    environment:
+      <<: *api-env
+      KL_SLACK_ASK_DAYS: ${KL_SLACK_ASK_DAYS:-7}   # how recent an asker's last sign-in must be
+      OTEL_SERVICE_NAME: kl-answers
+    depends_on:
+      provision:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   smoke:
     <<: *api-build
     build:
