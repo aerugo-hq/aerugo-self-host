@@ -385,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
         site = self.path.split("/")[1]
         if site in SLACK_SITES and self.path.startswith(f"/{site}/api/"):
             return self._slack(urlparse(self.path), SLACK_SITES[site])
+        if site in SLACK_SITES and self.path == f"/{site}/posted":  # what the bot posted, for smoke to read (C2b)
+            return self._json(200, SLACK_SITES[site].get("posted", []))
         if self.path.startswith("/notion/v1/"):
             return self._notion("GET", urlparse(self.path), {})
         if self.path.startswith("/google/admin/directory/v1/"):
@@ -845,16 +847,23 @@ class Handler(BaseHTTPRequestHandler):
                                       "is_ext_shared": c.get("shared", False), "is_shared": c.get("shared", False)} for cid, c in channels.items()])
         if method == "users.list":
             return page("members", state["users"])
+        if method == "users.info":  # one person (C2b: is the one asking an admin, an owner, this workspace's?)
+            found = next((u for u in state["users"] if u["id"] == q.get("user")), None)
+            return self._json(200, {"ok": True, "user": found} if found else {"ok": False, "error": "user_not_found"})
         if channel is None:
             return self._json(200, {"ok": False, "error": "channel_not_found"})
         if method == "conversations.info":
             return self._json(200, {"ok": True, "channel": {"id": q["channel"], "name": channel["name"], "is_private": channel.get("private", False),
-                                                            "is_member": channel.get("bot_member", True),
+                                                            "is_member": channel.get("bot_member", True), "creator": channel.get("creator"),
                                                             "is_ext_shared": channel.get("shared", False), "is_shared": channel.get("shared", False)}})
         if not channel.get("bot_member", True):
             return self._json(200, {"ok": False, "error": "not_in_channel"})
         if method == "conversations.members":
             return page("members", channel.get("members", []))
+        if method == "reactions.get":  # a message's reactions, a reply's too (C2b's "don't capture")
+            found = next((m for top in channel.get("messages", []) for m in [top, *top.get("replies", [])] if m["ts"] == q.get("timestamp")), None)
+            return self._json(200, {"ok": True, "type": "message", "message": {k: v for k, v in found.items() if k != "replies"}}
+                              if found else {"ok": False, "error": "message_not_found"})
         if method == "conversations.history":
             if state.get("throttle"):
                 state["throttle"] = False
@@ -1131,8 +1140,18 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith("/setup") and path.split("/")[1] in SLACK_SITES:  # a fake Slack workspace's people and channels
             body, state = self._body(), SLACK_SITES[path.split("/")[1]]
             state.update({"users": body.get("users", []), "channels": body.get("channels", {}), "throttle": bool(body.get("throttle")),
-                          "history_calls": state.get("history_calls", [])})
+                          "history_calls": state.get("history_calls", []), "posted": state.get("posted", [])})
             return self._json(200, {})
+        if path.endswith("/api/chat.postMessage") and path.split("/")[1] in SLACK_SITES:  # the bot's one write (C2b's notice)
+            state = SLACK_SITES[path.split("/")[1]]
+            if self.headers.get("Authorization") != f"Bearer {SLACK_TOKEN}":
+                return self._json(200, {"ok": False, "error": "invalid_auth"})
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()).items()}
+            if form.get("channel") not in state["channels"]:
+                return self._json(200, {"ok": False, "error": "channel_not_found"})
+            ts = f"{time.time():.6f}"
+            state.setdefault("posted", []).append({"channel": form["channel"], "text": form.get("text", ""), "ts": ts})
+            return self._json(200, {"ok": True, "channel": form["channel"], "ts": ts})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
             return self._json(200, new_entra_app(self._body()["tenant_id"]))
         if path == "/microsoft/sites":  # smoke sets SharePoint's sites, which apps each is granted to, and their files

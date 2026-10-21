@@ -1,7 +1,8 @@
 # Slack
 
-What the identity team creates for Aerugo to read a Slack workspace, and exactly the access it needs. Aerugo only
-reads: the bot sets what's indexed, and each message keeps its channel's own readers.
+What the identity team creates for Aerugo to read a Slack workspace, and exactly the access it needs. Aerugo reads:
+the bot sets what's indexed, and each message keeps its channel's own readers. Its one write is optional: capture's
+notice in a channel that opted in (below).
 
 ## The app
 
@@ -17,7 +18,7 @@ reads: the bot sets what's indexed, and each message keeps its channel's own rea
   | `users:read` | To tell this workspace's people from a shared channel's other side, and who has left |
   | `users:read.email` | To link Slack accounts to people in Aerugo by verified company email |
 
-  No `im:` or `mpim:` scope: direct messages are never read. No write scope.
+  No `im:` or `mpim:` scope: direct messages are never read. No write scope, unless you turn capture on (below).
 - **The bot token** (`xoxb-...`), never a person's token. Keep it in your secrets backend as a secret holding
   `{"bot_token": "xoxb-..."}`, under `secret/kl/<org>/<team>/connections/` in OpenBao, or paste it once into the
   connection form and Aerugo keeps it in OpenBao itself.
@@ -42,9 +43,48 @@ reads: the bot sets what's indexed, and each message keeps its channel's own rea
   edit, a deleted message, a member who left a channel, a message Slack's retention removed, and a day that fell out
   of the window all carry over on that sync. Older messages aren't indexed.
 - **Rate limits:** a 429 is waited out for as long as Slack's `Retry-After` says, then the sync carries on.
-- **It never writes** to Slack.
+- **It writes only capture's notice:** one message in a channel when its capture starts, and one when it stops; nothing
+  else, and nowhere else.
+- **Sensitive messages are never kept:** a message speaking of one person's health, discipline, performance, or pay,
+  or holding personal data (a government id, a card number, a date of birth), is left out of what Aerugo keeps from
+  its channel, though the channel's members can still read it in Slack: it's never searched, shown in the reader, or
+  sent to a model, and a thread opening with one is titled by its channel and day. The channel's other messages are
+  kept as usual. It's a word check, so it errs on the side of leaving a message out.
 - **Its text can stay in the source:** with pointers only, Aerugo keeps each item's title, readers, and embeddings, and
   reads its text live, for each person the source still lists; see `storage-modes.md`.
+
+## Capture (optional)
+
+Capture proposes knowledge from a channel's threads, a procedure, an answer, a decision, through the team's own model
+(the team admin opts in under the team's extraction setting), for the team's curators to confirm. Nothing it proposes
+is used until a curator confirms it, and each proposal is readable only by the channel's members, like the messages it
+came from.
+
+- **Two keys, for each channel.** Someone who created the channel, or an admin or owner of the workspace, runs
+  `/aerugo capture on` in it; then the connection's team admin confirms it in Aerugo (Admin, Sources, the connection's
+  Capture panel). Neither key alone captures anything, and a confirm nobody asked for in the channel is refused. Aerugo
+  checks the first key against Slack itself (who created the channel, who administers the workspace), never trusting
+  what the command says, and the bot must be in the channel.
+- **The channel is told.** When capture starts, the bot posts one notice saying which team's curators review what's
+  proposed and how to keep a message out; when it stops, one more. The command's reply is private to whoever ran it.
+- **"Don't capture."** Anyone in the channel can react :no_entry_sign: to a message. Aerugo reads the reaction back from
+  Slack (a reaction event alone changes nothing), records the mark, reads the channel again without that message, and
+  removes any proposal not yet confirmed that came from it. A proposal a curator already confirmed stays, and goes back
+  to them for review once its evidence changes. Removing the reaction later doesn't bring the message back.
+- **Turning it off.** `/aerugo capture off` in the channel (by its creator or a workspace admin), or Turn off in the
+  Capture panel. Nothing more is proposed from it; what was proposed earlier stays for the curators.
+- **Sensitive messages are never proposed from,** captured or not: they're never kept at all (above).
+- **Set up in the Slack app:**
+
+  | Setting | Value |
+  |---|---|
+  | Scopes, added to the bot's | `commands` (the `/aerugo` command), `chat:write` (the notice), `reactions:read` (to read a mark back) |
+  | Slash command `/aerugo` | Request URL `https://<your Aerugo>/v1/hooks/slack/<connection id>/commands` |
+  | Event subscription | `reaction_added`, on the Events URL the connection's webhook already uses (`permission-changes.md`) |
+
+  The command and the events are signed with the app's signing secret, the one the connection's webhook holds; an
+  unsigned, stale, or repeated delivery is refused or ignored.
+- **Not built yet:** "Save to Aerugo" on one message (C2c), and the bot answering privately (C2d).
 
 ## Connecting it
 

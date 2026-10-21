@@ -14,6 +14,8 @@ import logging
 import re
 import time
 
+from urllib.parse import parse_qs
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from psycopg.types.json import Jsonb
@@ -22,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from . import config, telemetry
 from .db import resolve_org_id, scoped
 from .policy import audit
+from .slack import DONT_CAPTURE, capture_action as slack_capture_action
 from .vault import vault
 
 router = APIRouter()
@@ -34,6 +37,15 @@ SLACK_WINDOW = 300  # seconds a Slack delivery's timestamp may be off, as Slack 
 CONNECTION = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ATLASSIAN_DELIVERY = re.compile(r"^[A-Za-z0-9-]{1,100}$")
 SLACK_EVENT = re.compile(r"^Ev[A-Za-z0-9]{1,40}$")
+CHANNEL = re.compile(r"^[CG][A-Z0-9]{2,20}$")
+SLACK_USER = re.compile(r"^[UW][A-Z0-9]{2,20}$")
+SLACK_TS = re.compile(r"^[0-9]{9,11}\.[0-9]{1,6}$")
+COMMAND_REPLY = {  # private to whoever ran it (Slack shows an ephemeral reply only to them); it promises nothing it can't check
+    "on": "Asked. If you created this channel or administer this workspace, its team's admins are asked to confirm capture "
+          "in Aerugo; the channel is told when it starts.",
+    "off": "Asked. If you created this channel or administer this workspace, capture stops, and the channel is told.",
+    None: "Use /aerugo capture on or /aerugo capture off in a channel Aerugo reads. React :no_entry_sign: to keep a message out.",
+}
 
 
 async def capped_body(request: Request, limit: int) -> bytes | None:
@@ -95,6 +107,44 @@ def queue_refresh(org_id: str, kind: str, connection_id: str, delivery: str) -> 
     return {"duplicate": False, "queued": 0 if pending else 1}
 
 
+def queue_job(org_id: str, kind: str, connection_id: str, delivery: str, job: str, payload: dict) -> dict:
+    """Record a Slack delivery once, then queue the one job it asks for (C2b), for the worker to check against Slack."""
+    with scoped(org_id, SERVICE) as conn:
+        claimed = conn.execute("INSERT INTO webhook_deliveries (org_id, source, delivery_id, event) VALUES (%s, %s, %s, %s) "
+                               "ON CONFLICT DO NOTHING RETURNING delivery_id", (org_id, kind, f"{connection_id}:{delivery}", job)).fetchone()
+        if not claimed:
+            return {"duplicate": True, "queued": 0}
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, %s, %s)", (org_id, job, Jsonb({"connection_id": connection_id, **payload})))
+        conn.execute("UPDATE webhook_deliveries SET queued_jobs = 1 WHERE org_id = %s AND source = %s AND delivery_id = %s",
+                     (org_id, kind, f"{connection_id}:{delivery}"))
+        audit(conn, org_id, SERVICE[0], f"webhook.{kind}", [], {"connection_id": connection_id, "delivery": delivery, "job": job})
+    return {"duplicate": False, "queued": 1}
+
+
+@router.post("/v1/hooks/slack/{connection_id}/commands")
+async def slack_command(connection_id: str, request: Request, x_slack_signature: str = Header(default=""),
+                        x_slack_request_timestamp: str = Header(default="")):
+    """`/aerugo capture on|off` (C2b), signed by the Slack app as its events are; it only queues the worker's check, and
+    answers privately (ephemeral, only the person who ran it sees it), the same whoever ran it."""
+    body = await capped_body(request, MAX_BODY)
+    if body is None:
+        telemetry.webhook_rejected("too_large")
+        raise HTTPException(413, "payload too large")
+    if not CONNECTION.fullmatch(connection_id):
+        raise refused("unknown")
+    found = await run_in_threadpool(hook_secret, "slack", connection_id)
+    if not found or not slack_signed(found[1], body, x_slack_request_timestamp, x_slack_signature):
+        raise refused("signature" if found else "unknown")
+    form = {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace")).items()}
+    channel, user = form.get("channel_id", ""), form.get("user_id", "")
+    action = slack_capture_action(form.get("text", ""))
+    if action and CHANNEL.fullmatch(channel) and SLACK_USER.fullmatch(user):
+        delivery = "cmd-" + hashlib.sha256(x_slack_signature.encode()).hexdigest()[:32]  # a replay is the same signature
+        await run_in_threadpool(queue_job, found[0], "slack", connection_id, delivery, "slack.capture",
+                                {"channel": channel, "user": user, "action": action})
+    return JSONResponse({"response_type": "ephemeral", "text": COMMAND_REPLY[action]}, status_code=200)
+
+
 def refused(reason: str):
     telemetry.webhook_rejected(reason)
     return HTTPException(401, "invalid signature")
@@ -129,6 +179,14 @@ async def hook(kind: str, connection_id: str, request: Request,
         delivery = str(payload.get("event_id") or "")
         if not SLACK_EVENT.fullmatch(delivery):
             raise HTTPException(400, "missing or malformed event id")
+        event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        if event.get("type") == "reaction_added" and event.get("reaction") == DONT_CAPTURE and item.get("type") == "message" \
+                and CHANNEL.fullmatch(str(item.get("channel") or "")) and SLACK_TS.fullmatch(str(item.get("ts") or "")):
+            result = await run_in_threadpool(queue_job, org_id, kind, connection_id, delivery, "slack.exclude",
+                                             {"channel": item["channel"], "ts": item["ts"]})  # a hint: the worker reads the reaction back
+            log.info("slack don't-capture hook for %s: %s", connection_id, result)
+            return result
     else:
         if not atlassian_signed(secret, body, x_hub_signature):
             raise refused("signature")
