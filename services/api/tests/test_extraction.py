@@ -21,6 +21,7 @@ def unit(text, kind="fact", **kw):
 def test_chat_threads_are_never_sent_until_their_channels_opt_in():
     assert extractable("confluence") and extractable("jira") and extractable("github") and extractable("import")
     assert not extractable("slack") and not extractable("teams") and not extractable("meeting")
+    assert extractable("slack", captured=True)  # a channel captured with both keys (C2b)
 
 
 def test_a_document_becomes_numbered_sections_joined_under_their_headings_and_cut_to_size():

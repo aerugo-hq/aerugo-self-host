@@ -38,4 +38,4 @@ def test_a_thread_opening_with_one_is_titled_by_its_day_and_read_again_without_i
     thread, day = items["slack-C1ABC-1760000000.000100"], items["slack-C1ABC-2025-10-09"]
     assert thread.title == "#co201: thread on 2025-10-09" and "surgery" not in thread.title
     assert [body for _, body in thread.sections()[1]] == ["Wishing Sam well."]
-    assert thread.version.endswith(":c2a") and not day.version.endswith(":c2a")  # only what held one changes version
+    assert ":d" in thread.version and ":d" not in day.version  # only what held one changes version
