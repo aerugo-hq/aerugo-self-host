@@ -36,7 +36,14 @@ is ordered, so nothing the source found that the person can't open is shown, cou
 answer then reads each live as a pointer, checking the source's readers again. Within those projects and spaces, an
 item the person can't open (under a security level or a page restriction) can still take one of the source's 50 result
 places. Every live-only source is asked at once and given a few seconds; a slow or throttled one is left out of that
-search. Slack can't be live only: its search reads as a person, never as a bot, so a Slack connection keeps pointers
+search.
+
+Jira is asked to match only an issue's summary and description, never its comments. A comment can be narrower than
+its issue (restricted to a group or a project role, or a Service Management internal note), the connection's account
+sees it, and an issue that came up for a word only such a comment holds would tell its readers something about a
+comment they can't read. So with live only, a word that only an issue's comments hold doesn't find it, open comments
+included; its summary, description, and title still do. Confluence is asked as before: no part of a page is shown to
+fewer people than the page. Slack can't be live only: its search reads as a person, never as a bot, so a Slack connection keeps pointers
 instead.
 
 ## Choosing it
@@ -54,7 +61,7 @@ instead.
   each search asks every live-only source in scope. While someone waits, each call is tried once and briefly, never
   waiting out a throttle, so a busy source drops out of that answer and the syncs keep the account's rate.
 - Search is weaker: with pointers, a question has to match an item's title or meaning, not a word buried in its text;
-  live only depends on the source's own search.
+  live only depends on the source's own search, and in Jira only on an issue's summary and description.
 - Embeddings still reveal what a text is about. With pointers they're kept under the same readers as the item, and
   never shown; live only keeps none.
 - Not built yet: pointers and live only for other sources, Terraform's `storage` attribute (the provider's next
