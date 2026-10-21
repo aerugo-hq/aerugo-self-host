@@ -68,7 +68,7 @@ The sources stay the system of record; Aerugo never becomes a second Confluence.
 |---|---|---|---|
 | **A. Index** (today) | Pointers and metadata, permissions, small derived facts, embeddings, text passages | | Best answers, fastest, works when a source is down; a protected copy of text exists |
 | **B. Pointer** (built for Confluence, Jira, and Slack: F11a) | Pointers and metadata, permissions, small derived facts, embeddings | Text, and what's read out of it | No second copy of content; slower; depends on the source being up; embeddings still reveal meaning, so protect them |
-| **C. Live only** | Pointers and metadata, permissions | Facts, embeddings, text | Almost nothing stored; weakest answers, slowest, no map |
+| **C. Live only** (built for Confluence and Jira: F11b) | Pointers and metadata, permissions | Facts, embeddings, text | Almost nothing stored; weakest answers, slowest, no map |
 
 In pointer mode, a question runs: the person asks; candidates are found from pointers, embeddings, and facts; the
 person's permission is checked in the source; only the passages needed are fetched live; the answer is composed with
@@ -82,8 +82,13 @@ heading, and nothing is read out of its text (no bronze page, entities, referenc
 proposals; units people confirmed stay theirs). At answer time `kl/live.py` reads each pointer from its source,
 re-reads its readers there the way a sync works them out, and goes ahead only for an asker the source still lists,
 failing closed; the passage goes to the model and is dropped, and a stored answer keeps only its words and citations.
-Its attachments aren't read live, so a pointer connection leaves them out. `docs/connectors/storage-modes.md` says it
-for admins.
+Its attachments aren't read live, so a pointer connection leaves them out. F11b built C for Confluence and Jira:
+a live-only document keeps its address, title, version, and readers, and no chunks or embeddings. Search asks each
+live-only source in scope through its own search (JQL, CQL) for the question's content words, as the connection's
+account, before any transaction opens (`live.search`); only the keys come back, each matched to that connection's own
+document and then through the caller's row-level security and the post-check like any channel (the `source` channel,
+counting as the two channels it stands in for), and answers read it live as a pointer. Slack can't be live only: its
+search needs a person's token. `docs/connectors/storage-modes.md` says it for admins.
 
 ## 4. How a question gets answered
 
@@ -176,6 +181,6 @@ what people ask kept for a month, what several of them weren't answered well sho
 never who asked, and corrections sent to a unit's owners; and question sets per team (F7), each team's questions in its
 onboarding repository, asked as its people, each team held to its own baseline; and routing to experts (F5b), a
 question sent to someone who-to-ask suggests, their reply kept as knowledge for the audience they choose. Phase 0 is complete (the production review's findings, C1 to L4; its report is in `CLAUDE.md`),
-but for M10's real-vendor half, set aside; storage modes are next (F11a, pointer mode, built; F11b, live only), then capture (C1 to C5). A connector only adds raw material;
+but for M10's real-vendor half, set aside; storage modes are built (F11a, pointer mode; F11b, live only); next, capture (C1 to C5). A connector only adds raw material;
 the core turns it into knowledge, keeps it fresh, and learns from people, so every new connector and pack makes it
 smarter.

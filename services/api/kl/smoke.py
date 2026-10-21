@@ -5020,6 +5020,104 @@ def pointer_mode_keeps_no_text_and_reads_it_live_for_who_the_source_lists():
 
 
 @check
+def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search():
+    """F11b, live only: a Jira and a Confluence connection live only keep each item's title and readers and nothing else (no chunks, no embeddings, nothing in any table), and Slack and any other source refuse it; a search for a word only their text holds finds them through each source's own search, for someone the source lets read them and never anyone else, though the search ran as the connection's account; Ask reads them live, only for who the source still lists"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    word = f"zephyr{tag.lower()}"  # in each item's text only, never a title: only the source's own search can find it
+    mark = {k: f"{POINTER_MARK}-live-{k}-{tag.lower()}" for k in ("jira", "confluence")}
+    atl = {u: {"accountId": f"557058:live{u}{tag.lower()}", "emailAddress": f"{u}@acme.test", "displayName": u.title()} for u in ("alice", "carol")}
+    project, space, page_id = f"LIV{tag}", f"LIVC{tag}", str(int(tag, 16) * 10 + 3)
+
+    def set_sources(listed):
+        jira = {"projects": {project: {"name": f"Live {tag}", "company_wide": False, "browsers": [atl[u] for u in listed], "issues": [
+            {"key": f"{project}-1", "summary": f"Live plan {tag}", "description": f"The {word} cutover lasts {mark['jira']} days.",
+             "attachments": [{"id": f"{int(tag, 16)}7", "filename": f"live-plan-{tag}.txt", "text": f"Attached plan {tag}."}]}]}}}
+        conf = {"users": {a["accountId"]: {"email": a["emailAddress"], "name": a["displayName"]} for a in atl.values()}, "groups": {},
+                "spaces": {space: {"id": str(int(tag, 16) * 10 + 8), "name": f"Live space {tag}", "users": [atl[u]["accountId"] for u in listed],
+                                   "pages": [{"id": page_id, "title": f"Live runbook {tag}", "version": 1,
+                                              "body": f"<p>Roll the {word} back with {mark['confluence']}.</p>"}]}}}
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=jira, timeout=10).status_code == 200
+        assert httpx.post(f"{FAKE_CONFLUENCE}/setup", json=conf, timeout=10).status_code == 200
+
+    keys = {"jira": f"jira-{project}-1", "confluence": f"confluence-{page_id}"}
+    names = {k: f"live-{k}-{tag.lower()}" for k in keys}
+    bodies = {"jira": {"api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token", "projects": [project]},
+              "confluence": {"api_base": FAKE_CONFLUENCE, "email": "confluence-bot@acme.test", "api_token": "smoke-confluence-token", "spaces": [space]}}
+    principals = [(u, f"ext:atlassian.{atl[u]['accountId'].replace(':', '.')}") for u in atl]
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in principals}
+    conversations = []
+
+    def held() -> dict:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return {r["external_key"]: r for r in conn.execute(
+                "SELECT d.external_key, d.storage, (SELECT count(*) FROM kl.chunks c WHERE c.document_id = d.id) AS chunks "
+                "FROM kl.documents d WHERE d.external_key = ANY(%s)", (list(keys.values()),)).fetchall()}
+
+    def finds(user) -> set:
+        hits = api("GET", "/v1/search", user, params={"q": f"what about the {word}", "scope": "org", "limit": 20}).json()["results"]
+        return {h["id"] for h in hits if h["id"] in keys.values()}
+
+    def asked(user):
+        reset_fake()
+        r = api("POST", "/v1/conversations", user, json={"question": f"What does the {word} need?", "model": "payments/smoke-fake"})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:300]}"
+        conversations.append((user, r.json()["conversation"]["id"]))
+        return r.json(), "\n".join(fake_prompts())
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in principals:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    ensure_fake_models()
+    try:
+        set_sources(("alice", "carol"))
+        slack = api("POST", "/v1/workspaces/payments/connections/slack", "alice",
+                    json={"name": f"live-slack-{tag.lower()}", "bot_token": "xoxb-smoke-slack-token", "storage": "live"})
+        assert slack.status_code == 422 and "Slack's search reads as a person" in slack.text, f"{slack.status_code} {slack.text[:200]}"
+        notion = api("POST", "/v1/workspaces/payments/connections/notion", "alice",
+                     json={"name": f"live-notion-{tag.lower()}", "token": "ntn_" + "x" * 30, "storage": "live"})
+        assert notion.status_code == 422, f"{notion.status_code} {notion.text[:200]}"
+        for k, body in bodies.items():
+            r = api("POST", f"/v1/workspaces/payments/connections/{k}", "alice", json={"name": names[k], "every_minutes": 60, "storage": "live", **body})
+            assert r.status_code == 201, f"{k}: {r.status_code} {r.text[:200]}"
+        deadline = time.monotonic() + 150
+        while time.monotonic() < deadline and len(held()) < 2:
+            time.sleep(3)
+        docs = held()
+        assert set(docs) == set(keys.values()) and all(d["storage"] == "live" and d["chunks"] == 0 for d in docs.values()), docs
+        with psycopg.connect(OWNER_DB) as conn:  # attachments aren't read live, so a live connection leaves them out
+            attached = conn.execute("SELECT count(*) FROM kl.documents WHERE external_key = %s", (f"jira-att-{int(tag, 16)}7",)).fetchone()[0]
+        assert attached == 0, "a live-only connection brought in an attachment it can never read"
+        gone = {k: stored_anywhere(m) for k, m in mark.items()} | {"word": stored_anywhere(word)}
+        assert not any(gone.values()), f"a live-only item's text is stored: {gone}"
+        assert finds("alice") == set(keys.values()), f"the sources' own search didn't find what only their text holds: {finds('alice')}"
+        assert finds("bob") == set(), "someone the sources don't let read the items found them through their search"
+        answer, prompt = asked("alice")
+        assert set(keys.values()) <= {c["id"] for c in answer["answer"]["citations"]}, answer["answer"]["citations"]
+        assert all(m in prompt for m in mark.values()), "a live-only item's passage, read live, never reached the model"
+        set_sources(("carol",))  # the sources stop listing alice; the index, not synced since, still names her
+        answer, prompt = asked("alice")
+        assert not any(m in prompt for m in mark.values()) and not set(keys.values()) & {c["id"] for c in answer["answer"]["citations"]}, \
+            "someone the source no longer lists got a live-only item's passage"
+        answer, prompt = asked("carol")
+        assert all(m in prompt for m in mark.values()), "someone the source still lists lost the live-only items"
+        gone = {k: stored_anywhere(m) for k, m in mark.items()}
+        assert not any(gone.values()), f"a passage read live was stored: {gone}"
+    finally:
+        for k in keys:
+            api("DELETE", f"/v1/workspaces/payments/connections/{names[k]}", "alice")
+        for user, cid in conversations:
+            api("DELETE", f"/v1/conversations/{cid}", user)
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
+            conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"%live%{tag.lower()}",))
+
+
+@check
 def a_restricted_jira_comment_reaches_no_one():
     """Jira comments: a comment Jira shows to fewer people than its issue (restricted to a group or a project role, or a Service Management internal note) reaches no one through Aerugo, since its own readers aren't computed: it's kept in no table, no one finds the issue by its words, and it never reaches the model's prompt or the reader, indexed or as a pointer read live, while the issue's open comment reaches its readers; an issue indexed before this rule, and one whose comment is restricted later without Jira marking the issue updated, are read again at the connection's next full read"""
     from .authz import fga

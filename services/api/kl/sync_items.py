@@ -18,6 +18,7 @@ from .vault import vault
 log = logging.getLogger(__name__)
 
 POINTER_KINDS = ("jira", "confluence", "slack")  # F11a: the sources whose text can be read again live, for each asker
+LIVE_KINDS = ("jira", "confluence")  # F11b: and those whose own search can stand in for an index (Slack's needs a person)
 # A team's embedding models, as the backfill picks them: its own, else the org's default.
 TEAM_MODELS_SQL = """
 SELECT m.id, m.provider, m.model, m.dims, m.base_url, m.credential_ref FROM embedding_models m
@@ -51,9 +52,12 @@ FORGET_SQL = (
 
 
 def storage_of(connection: dict) -> str:
-    """How a connection keeps what it reads: `pointer` (F11a) only for a source whose text can be read live again."""
-    pointer = (connection.get("config") or {}).get("storage") == "pointer" and connection.get("kind") in POINTER_KINDS
-    return "pointer" if pointer else "index"
+    """How a connection keeps what it reads: `pointer` (F11a) only for a source whose text can be read live again, `live`
+    (F11b) only for one whose own search can find it."""
+    wanted, kind = (connection.get("config") or {}).get("storage"), connection.get("kind")
+    if (wanted == "pointer" and kind in POINTER_KINDS) or (wanted == "live" and kind in LIVE_KINDS):
+        return wanted
+    return "index"
 
 
 def pointer_vectors(models: list[dict], title: str, sections: list[tuple[str | None, str]]) -> list[tuple[dict, list]]:
@@ -123,7 +127,9 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
         # Its content changed, or the connection now keeps it the other way (F11a): read it again, outside any transaction
         rewrite = not readers_only and (not prev or prev["content_hash"] != item.version or prev["storage"] != storage
                                         or prev["unembedded"])
-        if rewrite:
+        if rewrite and storage == "live":  # F11b: not even read; the source's own search finds it, and answers read it live
+            title, sections, vectors = None, [], []
+        elif rewrite:
             try:
                 title, sections = item.sections()
             except Exception as e:  # one unreadable item never stops the rest
@@ -153,7 +159,7 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
                     continue
                 doc_id = row["id"]
                 conn.execute("DELETE FROM chunks WHERE document_id = %s", (doc_id,))
-                if storage == "pointer":  # no text kept, nor anything made from it; only its embeddings
+                if storage != "index":  # no text kept, nor anything made from it (a pointer keeps its embeddings)
                     for sql in FORGET_SQL:
                         conn.execute(sql, {"doc": doc_id})
                 for ordinal, (heading, body) in enumerate(sections):

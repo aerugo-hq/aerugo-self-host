@@ -174,7 +174,7 @@ modes = [("<b>A. Index</b> (today)", 60, [True, True, True, True, True],
          ("<b>B. Pointer</b> (built for Confluence, Jira, and Slack)", 560, [True, True, True, True, False],
           "<b>No second copy of content.</b> Text is fetched from the source at answer time and thrown away after. "
           "Slower, and depends on the source being up. Embeddings still reveal meaning: protect them."),
-         ("<b>C. Live only</b>", 1060, [True, True, False, False, False],
+         ("<b>C. Live only</b> (built for Confluence and Jira)", 1060, [True, True, False, False, False],
           "<b>Almost nothing stored.</b> Uses each source's own search when someone asks. Weakest answers, slowest, and "
           "no map of how things connect.")]
 kept = ["Pointer and metadata (title, address, owner)", "Who may read it (permissions)",

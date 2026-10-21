@@ -24,7 +24,7 @@ import httpx
 from . import config
 from .authz import fga
 from .connectors import Container, Health
-from .jira import SITE, account
+from .jira import SITE, WORD, account
 from .sync_github import team_for
 from .attachments import MAX_BYTES as MAX_ATTACHMENT, MAX_PER_PAGE, attachment_item
 from .decisions import confluence_items, heading as decision_heading
@@ -313,6 +313,17 @@ class ConfluenceClient:
                 raise
         return {**self._get(f"api/v2/blogposts/{content_id}", **{"body-format": "storage"}), "_kind": "blogposts"}
 
+    def search_text(self, words: list[str], spaces: list[str] | None, limit: int = 50) -> list[str]:
+        """The pages and posts Confluence's own search finds for any of these words, in its order (F11b's runner). Words
+        are letters and digits alone and spaces their keys, quoted, so nothing a person typed is ever CQL."""
+        if not words or not all(WORD.fullmatch(w) for w in words) or not all(SPACE_KEY.fullmatch(k) for k in spaces or []):
+            raise ValueError("search words are letters and digits, spaces their keys")
+        scope = "space in (" + ", ".join(f'"{k}"' for k in spaces) + ") AND " if spaces else ""
+        terms = " OR ".join(f'text ~ "{w}"' for w in words)
+        page = self._get("rest/api/search", cql=f"type in (page, blogpost) AND {scope}({terms})", limit=limit)
+        ids = [str((r.get("content") or {}).get("id") or "") for r in page.get("results") or []]
+        return [i for i in ids if CONTENT_ID.fullmatch(i)]
+
     def page(self, page_id: str) -> dict:
         """One page, without its body: its title and parent, for a changed page whose ancestors didn't change (H6)."""
         return self._get(f"api/v2/pages/{page_id}")
@@ -479,6 +490,11 @@ def live(client, cfg: dict, doc: dict) -> tuple[list[str], list[tuple[str | None
     return acl_of(allowed), page_sections(c, client.attachments(str(c["id"]), c["_kind"]))[1]
 
 
+def search(client, cfg: dict, words: list[str]) -> list[str]:
+    """F11b: the keys of the pages and posts Confluence's search finds, within the connection's spaces."""
+    return [f"confluence-{i}" for i in client.search_text(words, cfg.get("spaces"))]
+
+
 def items_for_space(client, cfg: dict, key: str, seen: dict, since: datetime | None = None, pointer: bool = False) -> list[Item]:
     space = client.space(key)
     if not space:
@@ -592,7 +608,7 @@ def sync_space(conn, connection: dict, client: ConfluenceClient, key: str, since
     except ValueError:
         then = None
     then = then - timedelta(minutes=OVERLAP_MINUTES) if then is not None and then.tzinfo is not None else None
-    items = items_for_space(client, connection["config"] or {}, key, seen, then, pointer=storage_of(connection) == "pointer")
+    items = items_for_space(client, connection["config"] or {}, key, seen, then, pointer=storage_of(connection) != "index")
     missing = [a for a, v in seen.items() if not v.get("email")]
     if missing:
         try:
