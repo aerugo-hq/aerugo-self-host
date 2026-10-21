@@ -1004,12 +1004,15 @@ class Handler(BaseHTTPRequestHandler):
             jql = q.get("jql", "")
             site.setdefault("searches", []).append(jql)
             key = (re.search(r"project = (\S+)", jql) or [None, ""])[1]
-            terms = re.findall(r'text ~ "([a-z0-9]+)"', jql)
-            if terms:  # Jira's own search (F11b), as a live-only connection asks it: any term, most terms first
+            terms = re.findall(r'\b(summary|description|text) ~ "([a-z0-9]+)"', jql)
+            if terms:  # Jira's own search (F11b), as a live-only connection asks it: any term, most words first
                 listed = re.search(r"project in \(([^)]*)\)", jql)
                 keys = [k.strip() for k in listed[1].split(",")] if listed else list(projects)
-                text = lambda i: " ".join([i["summary"], i.get("description", "")] + [c["body"] for c in i.get("comments", [])]).lower()
-                hits = [(sum(t in re.findall(r"[a-z0-9]+", text(i)) for t in terms), n, i) for n, i in
+                # each field as Jira matches it; `text` is every text field, every comment the account sees included
+                fields = lambda i: {"summary": i["summary"], "description": i.get("description", ""), "text": " ".join(
+                    [i["summary"], i.get("description", "")] + [c["body"] for c in i.get("comments", [])])}
+                words = lambda i: {f: set(re.findall(r"[a-z0-9]+", t.lower())) for f, t in fields(i).items()}
+                hits = [(len({w for f, w in terms if w in words(i)[f]}), n, i) for n, i in
                         enumerate(i for k in keys for i in projects.get(k, {}).get("issues", []))]
                 found = [i for score, _, i in sorted(hits, key=lambda h: (-h[0], h[1])) if score]
                 return self._json(200, {"issues": [{"id": i["key"], "key": i["key"], "fields": {"summary": i["summary"]}}

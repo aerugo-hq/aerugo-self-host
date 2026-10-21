@@ -215,7 +215,6 @@ def test_a_sources_search_is_asked_only_for_words_never_for_what_someone_typed()
     client = jira.JiraClient("https://acme.atlassian.net", "bot@acme.test", "token")
     client._get = lambda path, **params: asked.update(params) or {"issues": [{"key": "STORE-1"}, {"key": "bad key"}]}
     assert client.search_text(["checkout", "errors"], ["STORE", "QUAL"]) == ["STORE-1"]
-    assert asked["jql"] == 'project in (STORE, QUAL) AND (text ~ "checkout" OR text ~ "errors")'
     for words, projects in ((['x" OR project = HR'], None), (["ok"], ["HR) OR (x"]), ([], None)):
         with pytest.raises(ValueError):
             client.search_text(words, projects)
@@ -225,6 +224,17 @@ def test_a_sources_search_is_asked_only_for_words_never_for_what_someone_typed()
     assert asked["cql"] == 'type in (page, blogpost) AND space in ("STORES") AND (text ~ "returns")'
     with pytest.raises(ValueError):
         conf.search_text(["returns"], ['STORES") OR space = "HR'])
+
+
+def test_jiras_search_matches_only_the_summary_and_description_never_a_comment():
+    """A comment can be narrower than its issue, and the connection's account sees it, so Jira is never asked to match
+    comments (`text ~` and `comment ~` would): a restricted comment's words would bring its issue up for its readers."""
+    asked = {}
+    client = jira.JiraClient("https://acme.atlassian.net", "bot@acme.test", "token")
+    client._get = lambda path, **params: asked.update(params) or {"issues": []}
+    client.search_text(["checkout", "errors"], ["STORE", "QUAL"])
+    assert asked["jql"] == ('project in (STORE, QUAL) AND (summary ~ "checkout" OR description ~ "checkout" '
+                            'OR summary ~ "errors" OR description ~ "errors")')
 
 
 def test_search_words_are_the_questions_longest_content_words():

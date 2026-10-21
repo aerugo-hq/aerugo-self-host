@@ -5021,10 +5021,11 @@ def pointer_mode_keeps_no_text_and_reads_it_live_for_who_the_source_lists():
 
 @check
 def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search():
-    """F11b, live only: a Jira and a Confluence connection live only keep each item's title and readers and nothing else (no chunks, no embeddings, nothing in any table), and Slack and any other source refuse it; a search for a word only their text holds finds them through each source's own search, for someone the source lets read them and never anyone else, though the search ran as the connection's account; Ask reads them live, only for who the source still lists"""
+    """F11b, live only: a Jira and a Confluence connection live only keep each item's title and readers and nothing else (no chunks, no embeddings, nothing in any table), and Slack and any other source refuse it; a search for a word only their text holds finds them through each source's own search, for someone the source lets read them and never anyone else, though the search ran as the connection's account; a word only a Jira comment narrower than its issue holds (a group's, or a Service Management internal note) never brings the issue up, even for its readers, since that account sees the comment; Ask reads them live, only for who the source still lists"""
     from .authz import fga
     tag = secrets.token_hex(3).upper()
     word = f"zephyr{tag.lower()}"  # in each item's text only, never a title: only the source's own search can find it
+    narrow = {"group": f"quill{tag.lower()}", "internal": f"vesper{tag.lower()}"}  # each only in a comment narrower than its issue
     mark = {k: f"{POINTER_MARK}-live-{k}-{tag.lower()}" for k in ("jira", "confluence")}
     atl = {u: {"accountId": f"557058:live{u}{tag.lower()}", "emailAddress": f"{u}@acme.test", "displayName": u.title()} for u in ("alice", "carol")}
     project, space, page_id = f"LIV{tag}", f"LIVC{tag}", str(int(tag, 16) * 10 + 3)
@@ -5032,7 +5033,9 @@ def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search(
     def set_sources(listed):
         jira = {"projects": {project: {"name": f"Live {tag}", "company_wide": False, "browsers": [atl[u] for u in listed], "issues": [
             {"key": f"{project}-1", "summary": f"Live plan {tag}", "description": f"The {word} cutover lasts {mark['jira']} days.",
-             "attachments": [{"id": f"{int(tag, 16)}7", "filename": f"live-plan-{tag}.txt", "text": f"Attached plan {tag}."}]}]}}}
+             "attachments": [{"id": f"{int(tag, 16)}7", "filename": f"live-plan-{tag}.txt", "text": f"Attached plan {tag}."}],
+             "comments": [{"author": "Olivia", "body": f"The vendor is {narrow['group']}.", "visibility": {"type": "group", "value": "leads"}},
+                          {"author": "Olivia", "body": f"The customer is {narrow['internal']}.", "jsdPublic": False}]}]}}}
         conf = {"users": {a["accountId"]: {"email": a["emailAddress"], "name": a["displayName"]} for a in atl.values()}, "groups": {},
                 "spaces": {space: {"id": str(int(tag, 16) * 10 + 8), "name": f"Live space {tag}", "users": [atl[u]["accountId"] for u in listed],
                                    "pages": [{"id": page_id, "title": f"Live runbook {tag}", "version": 1,
@@ -5054,8 +5057,8 @@ def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search(
                 "SELECT d.external_key, d.storage, (SELECT count(*) FROM kl.chunks c WHERE c.document_id = d.id) AS chunks "
                 "FROM kl.documents d WHERE d.external_key = ANY(%s)", (list(keys.values()),)).fetchall()}
 
-    def finds(user) -> set:
-        hits = api("GET", "/v1/search", user, params={"q": f"what about the {word}", "scope": "org", "limit": 20}).json()["results"]
+    def finds(user, about=word) -> set:
+        hits = api("GET", "/v1/search", user, params={"q": f"what about the {about}", "scope": "org", "limit": 20}).json()["results"]
         return {h["id"] for h in hits if h["id"] in keys.values()}
 
     def asked(user):
@@ -5095,6 +5098,8 @@ def live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search(
         assert not any(gone.values()), f"a live-only item's text is stored: {gone}"
         assert finds("alice") == set(keys.values()), f"the sources' own search didn't find what only their text holds: {finds('alice')}"
         assert finds("bob") == set(), "someone the sources don't let read the items found them through their search"
+        for kind, w in narrow.items():  # the connection's account sees these comments: Jira must never be asked to match comments
+            assert finds("alice", w) == set(), f"a word only a restricted comment holds ({kind}) brought its live-only issue up for a reader of the issue"
         answer, prompt = asked("alice")
         assert set(keys.values()) <= {c["id"] for c in answer["answer"]["citations"]}, answer["answer"]["citations"]
         assert all(m in prompt for m in mark.values()), "a live-only item's passage, read live, never reached the model"

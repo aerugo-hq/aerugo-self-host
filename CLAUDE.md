@@ -2053,6 +2053,35 @@ two or three items), and the browser tests and the provider's tests (nothing the
 readers (above); worklogs (not read); and Jira's own search for live-only connections (F11b, merged as pull request 75), which runs
 as the connection's account and so matches words in restricted comments: a reader of an issue could see it rank for a
 word only a restricted comment holds, without its text.
+Jira's live search, summary and description only (found by the Jira comment visibility item, its own item, approved
+2026-10-20). F11b's live-only search asked Jira `text ~` for each word, as the connection's account, which sees
+comments restricted to a group or a project role and Service Management's internal notes. The comment visibility item
+leaves those out of every issue's text, but a word only such a comment held still brought its issue up in search and
+Ask for anyone who reads the issue: a side channel on content they may not see (invariants 11 and 12). No JQL asks for
+only the comments every reader of an issue sees, so `JiraClient.search_text` now asks `summary ~` and `description ~`
+for each word, never `text ~` or `comment ~`. Decided: no comment's words find a live-only issue, open ones included,
+rather than keeping `text ~` and documenting the leak (precision over completeness). Considered and not built: asking
+`text ~` with each hit's comments and keeping a hit only when an open comment, the summary, or the description holds
+the word, which needs a stand-in for Jira's stemming and fails closed only when Jira doesn't cut a hit's comments
+short. Confluence's search is unchanged: no part of a page is shown to fewer people than the page. The fake Jira's
+search matches each term against its own field (`summary`, `description`, or `text`: both and every comment, restricted
+ones included, as the account sees them), so the old query still finds a restricted comment's word.
+`docs/connectors/jira.md` and `storage-modes.md` say what live-only search matches, and why. Smoke:
+`live_only_keeps_titles_and_readers_and_finds_through_the_sources_own_search` gains a comment restricted to a group and
+an internal note on its live-only issue, each holding a word nothing else does, and neither word finds the issue for
+alice, who reads it. Unit: `test_jiras_search_matches_only_the_summary_and_description_never_a_comment` (the JQL
+built). Red first, against the old query: the unit test failed (206 passed), and the smoke check failed ("a word only a
+restricted comment holds (group) brought its live-only issue up for a reader of the issue") after its earlier
+assertions passed. Green: `make unit` 207 passed; the check passed, and so did `a_restricted_jira_comment_reaches_no_one`.
+Proof on a fresh stack of its own (`kllive`, CI's settings: the example `.env`, no `.secrets/`), built on the comment
+visibility item's branch (pull request 76): `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, no leak,
+no regression; `make eval-company-live` Recall@10 99%, MRR 0.63 over 52 counted questions, Ask citing a right page for
+25 of 27 and leading with a right unit for 15 of 26, no leak, no regression, and one case better (`recall-decision`, #5
+to #3, not recorded). The old query on the same stack (a mutation from a scratch copy, put back and compared) gave the
+baseline exactly, `recall-decision` at #5: QUAL-7's comment "Recommending a recall" no longer outranks the recall's
+decision page, and two permission-trap questions cite other pages their askers may read; nothing else moved. Not run:
+the full smoke suite and the other evaluation sets (CI's run on the pull request), and the browser tests and the
+provider's tests (nothing they use changed). Not built: comment recall for live-only Jira (above).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's

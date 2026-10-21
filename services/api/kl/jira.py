@@ -195,12 +195,14 @@ class JiraClient:
         return self._get(f"issue/{key}", fields=FIELDS)
 
     def search_text(self, words: list[str], projects: list[str] | None, limit: int = 50) -> list[str]:
-        """The issues Jira's own search finds for any of these words, in its order (F11b's runner). Words are letters and
-        digits alone and projects are keys, so nothing a person typed is ever JQL."""
+        """The issues Jira's own search finds for any of these words in their summary or description, in its order (F11b's
+        runner). Never `text ~` or `comment ~`: they match comments, which can be narrower than their issue (`narrower`)
+        while the account sees them, so a word only such a comment holds would bring its issue up for the issue's readers.
+        Words are letters and digits alone and projects are keys, so nothing a person typed is ever JQL."""
         if not words or not all(WORD.fullmatch(w) for w in words) or not all(PROJECT.fullmatch(p) for p in projects or []):
             raise ValueError("search words are letters and digits, projects their keys")
         scope = f"project in ({', '.join(projects)}) AND " if projects else ""
-        terms = " OR ".join(f'text ~ "{w}"' for w in words)
+        terms = " OR ".join(f'{field} ~ "{w}"' for w in words for field in ("summary", "description"))
         page = self._get("search/jql", jql=f"{scope}({terms})", fields="summary", maxResults=limit)
         return [i["key"] for i in page.get("issues") or [] if ISSUE.fullmatch(i.get("key") or "")]
 
