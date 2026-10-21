@@ -26,7 +26,7 @@ cases:
   question: Which forklift do I use at dock 2 this week?
   kind: capture
   expect:
-  - teams-reno-dc-handover-2026-10-13
-  units: []
+  - teams-68bef73540-1791900000000
+  units:
+  - Forklift
   forbid: []
-  needs: C1

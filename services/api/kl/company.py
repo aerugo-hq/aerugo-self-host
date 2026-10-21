@@ -4,9 +4,9 @@ Acme Outfitters sells outdoor apparel and gear: stores in several states, distri
 the head office's teams. `build(seed, stores)` makes it, the same every time for the same seed and size:
 
 - its places, teams, and people, each with a title, a team, and a place (and one person who has left);
-- what they wrote: pages in Confluence, issues in Jira, and threads in Slack, each with who may read it, from that
-  source's own permissions (space grants narrowed by page restrictions, project browsers or a security level, channel
-  members); and, kept for capture (C1 and C3), a Teams channel's message and a meeting's transcript;
+- what they wrote: pages in Confluence, issues in Jira, threads in Slack, and posts in a Teams channel, each with who
+  may read it, from that source's own permissions (space grants narrowed by page restrictions, project browsers or a
+  security level, channel members, a team's members); and, kept for capture (C3), a meeting's transcript;
 - the truth: the facts each piece states (current or superseded, with their scope), and questions asked by twelve
   people who sign in, each with the pages a right answer draws on, the pages the asker must never see, and the
   sensitive pages the source lets them read but no answer should use.
@@ -15,7 +15,8 @@ Text comes from templates, never a model, so the truth is exact. The seed change
 size changes how many stores there are. Everything the questions rely on is fixed.
 
 The render functions turn the company into what each fake serves (`confluence_site`, `jira_site`, `slack_workspace`,
-`entra_tenant`); kl.company_eval loads it into the stack and scores it. Nothing here touches a network or a database.
+`teams_tenant`, `entra_tenant`); kl.company_eval loads it into the stack and scores it. Nothing here touches a network or
+a database.
 
     python -m kl.company [--stores N] [--seed S]    # the truth, as JSON
 """
@@ -35,9 +36,11 @@ COMPANY = "Acme Outfitters"
 DOMAIN = "acme.test"
 MIN_STORES = 3
 EVERYONE = "everyone"
-LOADED = ("confluence", "jira", "slack")  # what kl.company_eval loads; Teams and meetings wait for C1 and C3
+LOADED = ("confluence", "jira", "slack", "teams")  # what kl.company_eval loads; meetings wait for C3
 SLACK_TEAM = "T0RETAIL"
 TENANT = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://acme.test/entra"))
+TEAMS_CHANNEL = "19:renodchandover@thread.tacv2"  # the Reno DC team's Shift handover channel, in Teams' own form (C1a)
+TEAMS_APP = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://acme.test/teams-app"))  # the company's Teams app's id
 
 TEAMS = (  # slug, name, who can find it: org (anyone in the org can search it, within their own permissions) or private
     ("company", COMPANY, "org"),
@@ -73,8 +76,9 @@ KEY_SPOTS = ("in the key box in the manager's office, on hook 4", "in the front 
 # C2a: the chat messages no answer may use, though Slack lets their channel's members read them: (thread, position)
 SENSITIVE_MESSAGES = (("medical-thread", 0), ("hr-warning", 0))
 # C2b: the Slack channels captured, each turned on in the channel by its creator and confirmed by its team's admin; their
-# threads may be proposed from, as pages and tickets are. CO201's holds a sensitive message, never proposed from.
-CAPTURED = ("CRTSCO201",)
+# threads may be proposed from, as pages and tickets are. CO201's holds a sensitive message, never proposed from. C1a:
+# the Teams channel, whose team's owner (its lead) consented to the company's app, confirmed by its team's admin.
+CAPTURED = ("CRTSCO201", TEAMS_CHANNEL)
 # C2c: messages saved to Aerugo, as (thread, message), each by the thread's first author: someone else's message, so
 # only in a captured channel; it becomes a proposed unit with exactly its channel's readers.
 SAVES = (("key-thread-CO201", 1),)
@@ -393,7 +397,7 @@ def _containers(places: tuple[Place, ...]) -> tuple[Container, ...]:
     return (tuple(Container("confluence", key, name, team, readers, 7101 + i) for i, (key, name, team, readers) in enumerate(spaces))
             + tuple(Container("jira", key, name, team, readers) for key, name, team, readers in projects)
             + tuple(Container("slack", cid, name, team, readers) for cid, name, team, readers in channels)
-            + (Container("teams", "reno-dc-handover", "Reno DC / Shift handover", "distribution", ("team-distribution",)),
+            + (Container("teams", TEAMS_CHANNEL, "Reno DC / Shift handover", "distribution", ("team-distribution",)),
                Container("meeting", "recall-standups", "TrailLite 2 recall stand-ups", "product-quality", ("team-product-quality",))))
 
 
@@ -401,6 +405,21 @@ def _ts(when: str, n: int = 0) -> str:
     """A Slack timestamp for 'YYYY-MM-DD HH:MM', n minutes later."""
     at = datetime.fromisoformat(when).replace(tzinfo=timezone.utc).timestamp() + 60 * n
     return f"{int(at)}.000100"
+
+
+def _ms(when: str, n: int = 0) -> str:
+    """A Teams message's id for 'YYYY-MM-DD HH:MM' (its time in milliseconds, as Teams' ids are), n minutes later."""
+    return str(int(datetime.fromisoformat(when.replace("T", " ")).replace(tzinfo=timezone.utc).timestamp() * 1000) + 60000 * n)
+
+
+def teams_key(channel: str, post: str) -> str:
+    """A Teams post's key, as the connector makes it: the channel by a hash, then the post's id."""
+    return f"teams-{hashlib.sha256(channel.encode()).hexdigest()[:10]}-{post}"
+
+
+def teams_team(channel: str) -> str:
+    """The id of the team a Teams channel is in."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://acme.test/teams/{channel}"))
 
 
 def _docs(people: tuple[Person, ...], places: tuple[Place, ...]) -> list[Doc]:
@@ -425,7 +444,8 @@ def _docs(people: tuple[Person, ...], places: tuple[Place, ...]) -> list[Doc]:
                         tuple(comments), restricted, resolved))
 
     def thread(name, channel, title, when, messages, source="slack"):
-        key = f"slack-{channel}-{_ts(when)}" if source == "slack" else f"{source}-{channel}-{when[:10]}"
+        key = (f"slack-{channel}-{_ts(when)}" if source == "slack" else teams_key(channel, _ms(when)) if source == "teams"
+               else f"{source}-{channel}-{when[:10]}")
         docs.append(Doc(name, key, source, channel, title, when[:10],
                         messages=tuple((author, f"{when[:10]}T{when[11:]}", text) for author, text in messages)))
 
@@ -764,8 +784,8 @@ LOAD_STG_WMS_INV waited for the WMS extract until 04:10, so LOAD_INV_DAILY finis
         (who(place="CO201", title="Assistant store manager"), "Sam Rivera is having surgery on Tuesday, so I'm covering Sam's shifts all next week."),
         ("Dara Singh", "Thanks. Wishing Sam a quick recovery.")))
 
-    # Not loaded yet: what C1 (Teams) and C3 (meetings) will bring in
-    thread("teams-forklift", "reno-dc-handover", "Shift handover", "2026-10-13 14:00", (
+    # A Teams channel (C1a); a meeting's transcript, not loaded until C3
+    thread("teams-forklift", TEAMS_CHANNEL, "Shift handover", "2026-10-13 14:00", (
         ("Eli Brooks", "Forklift 3 is out of service until the hydraulic part arrives on Thursday. Use forklift 5 for dock 2."),),
         source="teams")
     thread("meeting-recall-standup", "recall-standups", "TrailLite 2 recall stand-up", "2026-05-14 09:00", (
@@ -942,7 +962,7 @@ def _questions() -> tuple[Question, ...]:
         Q("late-shipment", "eli", "A vendor shipment is two days late. What's the procedure?", "procedure", ("late-shipments",), facts=("late-shipment",)),
         Q("northpeak-last-time", "eli", "What happened last time a Northpeak shipment was late?", "lesson", ("DC-55", "dc-northpeak"),
           facts=("northpeak-lesson",)),
-        Q("forklift-dock-2", "eli", "Which forklift do I use at dock 2 this week?", "capture", ("teams-forklift",), needs="C1", facts=("forklift",)),
+        Q("forklift-dock-2", "eli", "Which forklift do I use at dock 2 this week?", "capture", ("teams-forklift",), facts=("forklift",)),
         Q("sell-through", "gus", "How is sell-through calculated in the weekly report?", "definition", ("merch-glossary",), facts=("sell-through",)),
         Q("weeks-of-supply", "gus", "What is weeks of supply?", "definition", ("merch-glossary",), facts=("weeks-of-supply",)),
         Q("allocation-fewer-units", "dara", "Why would a store get fewer units of a new jacket than other stores?", "policy", ("allocation-rules",),
@@ -999,8 +1019,9 @@ def problems(world: World) -> list[str]:
     out = [f"fact {f.id}: no page {e}" for f in world.facts for e in f.evidence if e not in names]
     out += [f"sensitive message: no {n}, or no message {i} in it" for n, i in SENSITIVE_MESSAGES
             if n not in names or len(world.doc(n).messages) <= i]
-    slack = {c.id: c for c in world.containers if c.source == "slack"}
-    out += [f"captured channel {c}: not a Slack channel with a creator" for c in CAPTURED if c not in slack or not creator_of(world, slack[c])]
+    chats = {c.id: c for c in world.containers if c.source in ("slack", "teams")}
+    out += [f"captured channel {c}: not a Slack channel with a creator, or a Teams channel with an owner" for c in CAPTURED
+            if c not in chats or not creator_of(world, chats[c])]
     out += [f"save {n}/{i}: not someone else's message in a captured channel" for n, i in SAVES
             if n not in names or world.doc(n).container not in CAPTURED or len(world.doc(n).messages) <= i
             or world.doc(n).messages[i][0] == world.doc(n).messages[0][0]]
@@ -1099,7 +1120,8 @@ def jira_site(world: World) -> dict:
 
 
 def creator_of(world: World, channel: Container) -> Person | None:
-    """Who created a Slack channel: a store's channel its store manager, any other its team's lead (C2b's first key)."""
+    """Who created a Slack channel: a store's channel its store manager, any other its team's lead (C2b's first key); for
+    a Teams channel, its team's owner, who consented to the company's app (C1a's first key)."""
     store = next((p for p in world.places if p.kind == "store" and channel.id == f"CRTS{p.code}"), None)
     return next((p for p in world.people if p.active and (p.title == "Store manager" and p.place == store.code if store
                                                           else p.team == channel.team and p.leads)), None)
@@ -1125,6 +1147,34 @@ def slack_workspace(world: World) -> dict:
     users = [{"id": p.slack, "team_id": SLACK_TEAM, "name": p.email.split("@")[0], "deleted": not p.active,
               "profile": {"real_name": p.name, "email": p.email}} for p in world.people]
     return {"users": users, "channels": channels}
+
+
+def teams_tenant(world: World, app: str = TEAMS_APP) -> dict:
+    """Teams' teams (C1a), as Graph lists them: each Teams channel's team, consented to by the company's app (its owner
+    installed it), its members exactly the channel's readers (its owner among them), and the posts with their replies."""
+    by_name = {p.name: p for p in world.people}
+    teams: dict = {}
+    for c in (c for c in world.containers if c.source == "teams"):
+        owner = creator_of(world, c)
+        readers = frozenset().union(*(world.groups[g] for g in c.readers))
+        members = [{"userId": p.entra, "email": p.email, "displayName": p.name, "roles": ["owner"] if p == owner else []}
+                   for p in world.people if p.active and p.email in readers]
+
+        def message(author: str, at: str, text: str, mid: str, post: str | None = None) -> dict:
+            when = f"{at.replace(' ', 'T')}:00Z"
+            return {"id": mid, "messageType": "message", "createdDateTime": when, "lastModifiedDateTime": when, "replyToId": post,
+                    "from": {"user": {"id": by_name[author].entra, "displayName": author}},
+                    "body": {"contentType": "html", "content": f"<p>{html.escape(text)}</p>"},
+                    "webUrl": f"https://teams.microsoft.com/l/message/{mid}"}
+        posts = []
+        for d in (d for d in world.docs if d.source == "teams" and d.container == c.id):
+            (author, at, text), rest = d.messages[0], d.messages[1:]
+            post = _ms(at)
+            posts.append({**message(author, at, text, post),
+                          "replies": [message(a, t, x, _ms(t, i), post) for i, (a, t, x) in enumerate(rest, start=1)]})
+        team = teams.setdefault(teams_team(c.id), {"name": c.name.split(" / ")[0], "consented": [app], "members": members, "channels": {}})
+        team["channels"][c.id] = {"name": c.name.split(" / ", 1)[1], "membershipType": "standard", "messages": posts}
+    return {"teams": teams}
 
 
 def manager_of(world: World, person: Person) -> Person | None:

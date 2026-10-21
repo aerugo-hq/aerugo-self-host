@@ -123,7 +123,7 @@ p = Page("2. Components", "Inside Aerugo: the parts, layer by layer",
          "right runs through every layer.")
 layers = [
     ("Surfaces: where people meet it", 130, [("Web app (Next.js)", S_BUILT), ("Slack bot: asks, capture, saves", S_BUILT),
-                                              ("Teams bot", S_NEW),
+                                              ("Teams bot: capture notice, don't capture", S_BUILT), ("Teams bot: asks, saves", S_NEW),
                                               ("Frontline mobile view", S_NEW), ("IDE extension, pull-request bot", S_NEW),
                                               ("MCP server, APIs, SDKs", S_BUILT)]),
     ("Services: what it does", 290, [("Answers (search, Ask)", S_BUILT), ("Architect agent, playbooks", S_NEW),
@@ -142,7 +142,7 @@ layers = [
                                      ("Permissions (OpenFGA)", S_DB_BUILT), ("Credentials (OpenBao, Secret Manager)", S_DB_BUILT)]),
     ("Connectors and capture: how it reads", 770, [("Docs: Confluence, Drive, SharePoint, Notion", S_BUILT),
                                                     ("Tickets and chat: Jira, Slack, Slack capture", S_BUILT),
-                                                    ("Teams capture, meetings, handovers", S_NEW),
+                                                    ("Teams channels and capture", S_BUILT), ("Meetings, handovers", S_NEW),
                                                     ("Code: GitHub (thousands of repos)", S_BUILT),
                                                     ("Warehouses, catalogs, usage logs", S_NEW),
                                                     ("Schedulers and ETL: Control-M, Airflow", S_NEW)]),

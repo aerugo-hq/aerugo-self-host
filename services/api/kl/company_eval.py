@@ -60,7 +60,7 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 
-from . import company, evals, slack, smoke
+from . import company, evals, slack, smoke, teams_bot
 from .smoke import BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, OWNER_DB, TOKEN_URL, api, api_ready, ask_as
 
 ADMIN = "olivia"  # the org admin makes the teams and connections
@@ -73,6 +73,8 @@ CREDENTIALS = {  # the fakes' own dev credentials, as the migration scenario's c
     "slack": {"bot_token": "xoxb-smoke-slack-token"},
 }
 DIRECTORY = "retail-directory"
+TEAMS_BOT = f"{FAKE_LLM}/teams-bot"  # the fake Bot Connector, where the Teams bot posts capture's notice (C1a)
+CHATS = ("slack", "teams")  # the sources whose documents are conversations: proposed from only where captured
 ASK_TEAM = "stores"
 ASK_MODEL = f"{ASK_TEAM}/smoke-fake"
 DEFAULT = (7, 6)  # seed and stores: the baseline is recorded for these
@@ -123,7 +125,8 @@ def teams() -> None:
 
 
 def serve(world: company.World) -> dict:
-    """Each fake's content, and an Entra app for the directory (its certificate is new each time)."""
+    """Each fake's content, an Entra app for the directory, and the company's Teams app, whose team's owner consented to
+    it (C1a). Each app's certificate is new each time; the Teams app keeps its id, so its connection keeps its channels."""
     for source, state in (("confluence", company.confluence_site(world)), ("jira", company.jira_site(world)),
                           ("slack", company.slack_workspace(world))):
         r = httpx.post(f"{SITES[source]}/setup", json=state, timeout=30)
@@ -131,7 +134,10 @@ def serve(world: company.World) -> dict:
             raise SystemExit(f"the fake {source} didn't take the company ({r.status_code}): is fake-llm running?")
     if httpx.post(f"{FAKE_MICROSOFT}/setup", json=company.entra_tenant(world), timeout=30).status_code != 200:
         raise SystemExit("the fake Entra didn't take the company's directory")
-    return httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT}, timeout=30).json()
+    if httpx.post(f"{FAKE_MICROSOFT}/teams", json=company.teams_tenant(world), timeout=30).status_code != 200:
+        raise SystemExit("the fake Graph didn't take the company's Teams")
+    return {"directory": httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT}, timeout=30).json(),
+            "teams": httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT, "client_id": company.TEAMS_APP}, timeout=30).json()}
 
 
 def plan(world: company.World, storage: str = "index") -> list[tuple[str, str, dict]]:
@@ -147,14 +153,23 @@ def plan(world: company.World, storage: str = "index") -> list[tuple[str, str, d
                     scope: held, "every_minutes": 10080, "storage": kept, **CREDENTIALS[source]}
             body |= {"company_site": True} if source in ("confluence", "jira") else {"company_workspace": True, "history_days": 3650}
             out.append((slug, source, body))
+    for slug, _, _ in company.TEAMS:  # C1a: Teams is always indexed, whatever this run keeps the others as
+        held = [c.id for c in world.containers if c.source == "teams" and c.team == slug]
+        if held:
+            out.append((slug, "teams", {"name": f"retail-teams-{slug}", "api_base": FAKE_MICROSOFT, "tenant_id": company.TENANT,
+                                        "client_id": company.TEAMS_APP, "team_ids": sorted({company.teams_team(c) for c in held}),
+                                        "channels": held, "history_days": 3650, "bot_service": TEAMS_BOT, "every_minutes": 10080}))
     return out
 
 
-def connect(world: company.World, app: dict, storage: str = "index") -> list[tuple[str, str]]:
+def connect(world: company.World, apps: dict, storage: str = "index") -> list[tuple[str, str]]:
     """Make each connection, or sync it again, switching it to this run's storage when it keeps the other (F11a: its
-    full read rewrites everything); the directory is made again. Returns (team, name) of each."""
-    made = []
+    full read rewrites everything); a Teams connection takes its app's new certificate (C1a); the directory is made
+    again. Returns (team, name) of each."""
+    made, app = [], apps["directory"]
     for team, kind, body in plan(world, storage):
+        if kind == "teams":
+            body = {**body, "certificate": apps["teams"]["certificate"]}
         path = f"/v1/workspaces/{team}/connections/{body['name']}"
         held = api("GET", path, ADMIN)
         if held.status_code == 200 and held.json()["status"] == "error":  # an earlier run's error (its fake restarted empty):
@@ -163,6 +178,8 @@ def connect(world: company.World, app: dict, storage: str = "index") -> list[tup
             held = api("GET", path, ADMIN)
         if held.status_code != 200:
             r = api("POST", f"/v1/workspaces/{team}/connections/{kind}", ADMIN, json=body)
+        elif kind == "teams":  # its app's certificate is new with the fake: rotating it reads everything again
+            r = api("PATCH", path, ADMIN, json={"certificate": body["certificate"]})
         elif (held.json()["settings"].get("storage") or "index") != body["storage"]:
             r = api("PATCH", path, ADMIN, json={"storage": body["storage"]})
         else:
@@ -530,12 +547,13 @@ def model_for_stores(team: str = ASK_TEAM) -> None:
                json={"data": {"api_key": "unused"}}, timeout=10).raise_for_status()
 
 
-EXTRACT_TEAMS = ("stores", "product-quality")  # F2: opted in with the fake model, which measures the pipeline, not quality
+EXTRACT_TEAMS = ("stores", "product-quality", "distribution")  # F2: opted in with the fake model, which measures the pipeline,
+# not quality; distribution's for its Teams channel (C1a)
 TEAM_DOCUMENTS_SQL = """
 SELECT count(*) FILTER (WHERE s.content_hash = d.content_hash) AS read, count(*) AS of
 FROM kl.workspace_documents wd JOIN kl.workspaces w ON w.id = wd.workspace_id JOIN kl.documents d ON d.id = wd.document_id
 LEFT JOIN kl.extraction_state s ON s.workspace_id = w.id AND s.document_id = d.id
-WHERE w.slug = %s AND (d.source_kind = ANY(%s) OR (d.source_kind = 'slack' AND d.container_ref = ANY(%s)))
+WHERE w.slug = %s AND (d.source_kind = ANY(%s) OR (d.source_kind IN ('slack', 'teams') AND d.container_ref = ANY(%s)))
 """
 PROPOSALS_SQL = """
 SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team, u.duplicate_of::text AS duplicate_of FROM kl.knowledge_units u
@@ -627,6 +645,9 @@ def capture_on(world: company.World) -> list[str]:
     names, problems, saves = {slug: name for slug, name, _ in company.TEAMS}, [], []
     for channel in company.CAPTURED:
         c = next(c for c in world.containers if c.id == channel)
+        if c.source == "teams":
+            problems += teams_capture_on(c, names[c.team])
+            continue
         path = f"/v1/workspaces/{c.team}/connections/retail-slack-{c.team}"
         state = lambda: next((x["capture"] for x in api("GET", path + "/capture", ADMIN).json()["channels"] if x["channel"] == channel), None)
         signing = secrets.token_hex(16)  # the app's signing secret, set on the connection's webhook each run
@@ -652,15 +673,41 @@ def capture_on(world: company.World) -> list[str]:
                 and time.monotonic() < deadline + 120:
             time.sleep(2)
         saves += save_messages(world, channel, hook.json()["url"], signing)  # someone else's message: only once capture is on
+    ours = [p for p in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json() if p.get("app") == company.TEAMS_APP]  # not smoke's
+    teams_notices = [p for p in ours if p["channel"] in company.CAPTURED]
+    problems += [f"the Teams bot posted in {p['channel']}: {p['text'][:80]}" for p in ours if p["channel"] not in company.CAPTURED
+                 or p["text"] != teams_bot.NOTICE_ON.format(team=names[world.container("teams", p["channel"]).team])]
     posted = [p for p in httpx.get(f"{SITES['slack']}/posted", timeout=10).json() if not p.get("ephemeral")]  # C2c's replies aside
     for p in posted:
         team = next((c.team for c in world.containers if c.id == p["channel"] and c.id in company.CAPTURED), None)
         if not team or p["text"] != slack.NOTICE_ON.format(team=names[team]):
             problems.append(f"the bot posted in {p['channel']}: {p['text'][:80]}")
-    print(f"\nCapture (C2b): {', '.join(company.CAPTURED)} on, with both keys; the bot posted {len(posted)} message(s), "
-          f"{len(problems)} of them anything but a captured channel's notice; {len(company.SAVES) - len(saves)} of "
-          f"{len(company.SAVES)} saves (C2c) proposed")
+    print(f"\nCapture (C2b, C1a): {', '.join(company.CAPTURED)} on, with both keys; the Slack bot posted {len(posted)} message(s) and "
+          f"the Teams bot {len(teams_notices)}, {len(problems)} of them anything but a captured channel's notice; "
+          f"{len(company.SAVES) - len(saves)} of {len(company.SAVES)} saves (C2c) proposed")
     return problems + saves
+
+
+def teams_capture_on(c: company.Container, team_name: str) -> list[str]:
+    """C1a on the retailer: the Teams channel arrives requested, its team's owner having consented to the company's app
+    (the first key); its team's admin confirms, and the bot posts its one notice there. Returns what went wrong."""
+    path = f"/v1/workspaces/{c.team}/connections/retail-teams-{c.team}"
+    state = lambda: next((x["capture"] for x in api("GET", path + "/capture", ADMIN).json()["channels"] if x["channel"] == c.id), None)
+    deadline = time.monotonic() + 120
+    while state() not in ("requested", "on") and time.monotonic() < deadline:
+        time.sleep(2)
+    if state() not in ("requested", "on"):
+        return [f"{c.id} never arrived requesting capture, though its team's owner consented: {state()}"]
+    if state() == "on":
+        return []
+    r = api("POST", f"{path}/capture/{c.id}", ADMIN, json={"action": "confirm"})
+    if r.status_code != 200:
+        raise SystemExit(f"confirming capture of {c.id}: {r.status_code} {r.text[:200]}")
+    notice = teams_bot.NOTICE_ON.format(team=team_name)
+    while not any(p["channel"] == c.id and p["text"] == notice for p in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json()) \
+            and time.monotonic() < deadline + 120:
+        time.sleep(2)
+    return []
 
 
 def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[str], list[str]]:
@@ -669,7 +716,7 @@ def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[
     whose document they can open. Which documents are pages, tickets, and captured threads comes from the truth, never
     from the code under test. With pointers only (F11a), nothing is proposed at all: a pointer keeps no text to extract
     from. Returns (leaks, missing)."""
-    pages = sorted({d.source for d in world.docs if d.source in company.LOADED} - {"slack"})
+    pages = sorted({d.source for d in world.docs if d.source in company.LOADED} - set(CHATS))
     captured = list(company.CAPTURED)
     for team in EXTRACT_TEAMS:
         model_for_stores(team)
@@ -678,8 +725,8 @@ def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[
             raise SystemExit(f"extraction for {team}: {r.status_code} {r.text[:200]}")
     if pointer:
         time.sleep(90)  # a pass a minute: long enough for one to run, had it anything to read
-        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
-            found = conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall()
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:  # Teams keeps its text whatever the others keep (C1a)
+            found = [p for p in conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall() if p["source_kind"] != "teams"]
         print(f"\nExtraction (F2) with no text kept: {len(found)} proposals (none expected)\n")
         return [f"a proposal ({p['id']}) was extracted from {p['external_key']}, a pointer" for p in found], []
     leaks = capture_on(world)
@@ -694,13 +741,13 @@ def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[
             raise SystemExit(f"extraction didn't read every page and ticket in ten minutes: {counts}")
         found = conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall()
     by_key = {d.key: d for d in world.docs}
-    allowed = lambda d: d.source in pages or (d.source == "slack" and d.container in captured)
+    allowed = lambda d: d.source in pages or (d.source in CHATS and d.container in captured)
     outside = [p for p in found if p["external_key"] not in by_key or not allowed(by_key[p["external_key"]])]
     leaks += [f"a proposal ({p['id']}) cites {p['external_key']}, which isn't a page, a ticket, or a captured thread" for p in outside]
     missing = []
-    chat = sum(1 for p in found if p["external_key"] in by_key and by_key[p["external_key"]].source == "slack")
-    if not chat:
-        missing.append(f"nothing was proposed from {', '.join(captured)}, captured with both keys")
+    chat = sum(1 for p in found if p["external_key"] in by_key and by_key[p["external_key"]].source in CHATS)
+    missing += [f"nothing was proposed from {c}, captured with both keys" for c in captured
+                if not any(p["external_key"] in by_key and by_key[p["external_key"]].container == c for p in found)]
     print(f"\nExtraction (F2), the fake model for {' and '.join(EXTRACT_TEAMS)}: {len(found)} proposals from "
           f"{len({p['external_key'] for p in found})} documents ({chat} from captured threads), {len(outside)} of them "
           "outside pages, tickets, and captured threads; who sees them, against the truth\n")

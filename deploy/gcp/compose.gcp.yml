@@ -13,6 +13,8 @@ x-prod-env: &prod-env
   KL_GOOGLE_API_BASES: https://www.googleapis.com
   KL_GOOGLE_ADMIN_API_BASES: https://admin.googleapis.com
   KL_MICROSOFT_GRAPH_BASES: https://graph.microsoft.com
+  KL_TEAMS_BOT_SERVICES: https://smba.trafficmanager.net/
+  KL_TEAMS_BOT_OPENID: https://login.botframework.com/v1/.well-known/openidconfiguration
   KL_DATAPLEX_API_BASES: https://googleapis.com
   KL_DATABRICKS_API_BASES: ""
   KL_AWS_API_BASES: ""

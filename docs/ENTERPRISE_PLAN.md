@@ -271,6 +271,11 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 
 ### Capture
 - [ ] **C1.** Teams: the message action, the bot, opted-in standard channels (resource-specific consent); sensitive topics excluded; exclusions honored.
+      (Decided 2026-10-21: the team owner's consent to the company's Teams app is capture's first key, the team admin's
+      confirm the second; Microsoft's signed Bot Framework token stands in for an HMAC, and everything the bot acts on is
+      read back from Graph or the Bot Connector; a question asked of the bot directly is the recorded exception. C1a,
+      consented teams' standard channels as a source, their capture, its notices, and "Don't capture": built. C1b, the
+      bot's private answers and Save to Aerugo: next.)
 - [x] **C2.** Slack: the same three, on the existing connector. (Decided 2026-10-20: Slack before Teams; a channel is
       captured only with two keys, its creator or a workspace admin in the channel and the team admin in Aerugo; the bot
       posts only the capture notice and private replies. C2a, sensitive chat never kept or answered from, and C2b,

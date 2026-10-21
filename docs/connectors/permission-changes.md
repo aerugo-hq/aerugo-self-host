@@ -13,7 +13,7 @@ expiring a delta link, Drive refusing a changes token) is read in full at once, 
 ## The readers refresh (every few minutes)
 
 Between content syncs, the worker re-reads only who may read each item, every `KL_READERS_REFRESH_MINUTES` (5 by
-default), for Google Drive, Jira, Confluence, Slack, Microsoft 365, and Notion. No body is read: an item someone may
+default), for Google Drive, Jira, Confluence, Slack, Microsoft 365, Teams, and Notion. No body is read: an item someone may
 no longer read leaves at once, and a changed or new item waits for the next content sync. GitHub's sync is its readers
 (its webhooks keep it fresh), a directory's sync is who has left (on its own cadence), and a catalog's readers come
 with its listing. A connection's row says when its permissions were last read. When a Google Workspace or Entra

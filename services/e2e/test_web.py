@@ -242,6 +242,50 @@ def test_a_team_admin_opens_the_microsoft_365_form(page):
     expect(form.get_by_text("never tenant-wide")).to_be_visible()
 
 
+def test_a_team_admin_connects_teams_and_confirms_capture_once_its_owner_added_the_app(page):
+    """C1a: the Teams form says what's never read and keeps its text indexed; a consented team's channel arrives in the
+    Capture panel as its owner's first key, and the team's admin confirms it, turns it off, and may confirm it again."""
+    import time
+    sign_in(page, "alice")
+    open_connector(page, "Microsoft Teams")
+    form = page.get_by_role("form", name="Connect Microsoft Teams")
+    expect(form.get_by_label(re.compile(r"^Teams"))).to_be_visible()
+    expect(form.get_by_label(re.compile(r"^Certificate"))).to_be_visible()
+    expect(form).to_contain_text("private and shared channels, group chats, and 1:1 chats are never read")
+    expect(form.get_by_label(re.compile(r"^Keep"))).to_have_count(0)  # Teams is indexed only
+
+    tag, tenant, team = uuid.uuid4().hex[:6], str(uuid.uuid4()), str(uuid.uuid4())
+    channel, name = f"19:e2e{tag}@thread.tacv2", f"e2e-teams-{tag}"
+    json_post = lambda url, body: page.request.post(url, data=json.dumps(body), headers={"Content-Type": "application/json"})
+    app = json_post("http://fake-llm:8080/microsoft/app", {"tenant_id": tenant})
+    assert app.ok, "the fake Graph (fake-llm, from make smoke) isn't up"
+    app = app.json()
+    assert json_post("http://fake-llm:8080/microsoft/teams", {"teams": {team: {
+        "name": "Floor", "consented": [app["client_id"]], "members": [{"userId": str(uuid.uuid4()), "email": "alice@acme.test", "roles": ["owner"]}],
+        "channels": {channel: {"name": "Handover", "membershipType": "standard", "messages": []}}}}}).ok
+    write, base = {"Origin": WEB, "Content-Type": "application/json"}, f"{WEB}/api/workspaces/payments/connections"
+    made = page.request.post(f"{base}/teams", headers=write, data=json.dumps({
+        "name": name, "api_base": "http://fake-llm:8080/microsoft", "tenant_id": tenant, "client_id": app["client_id"],
+        "certificate": app["certificate"], "team_ids": [team], "bot_service": "http://fake-llm:8080/teams-bot", "every_minutes": 10080}))
+    assert made.status == 201, made.text()
+    try:
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and not page.request.get(f"{base}/{name}/capture").json()["channels"]:
+            time.sleep(2)
+        page.reload()  # the same address as the form's: closes the gallery, lists the new connection
+        row = panel(page, "Connections").get_by_role("row").filter(has_text=name)
+        row.get_by_role("button", name="Capture").click()
+        group = page.get_by_role("group", name=f"Capture for {name}")
+        expect(group.get_by_text("Its team's owner added the app")).to_be_visible(timeout=30_000)
+        group.get_by_role("button", name="Confirm").click()
+        expect(group.get_by_text("On", exact=True)).to_be_visible(timeout=30_000)
+        group.get_by_role("button", name="Turn off").click()
+        expect(group.get_by_text("Off", exact=True)).to_be_visible(timeout=30_000)
+        expect(group.get_by_role("button", name="Confirm")).to_be_visible()  # the owner's consent still holds
+    finally:
+        page.request.delete(f"{base}/{name}", headers={"Origin": WEB})
+
+
 def test_the_notion_form_says_who_will_read_it(page):
     sign_in(page, "alice")
     open_connector(page, "Notion")

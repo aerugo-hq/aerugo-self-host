@@ -21,6 +21,7 @@ const MARKS = { // our file name: its names in the logos set, then in Simple Ico
   slack: { logos: ["slack-icon"], simple: "slack" },
   okta: { logos: ["okta-icon", "okta"], simple: "okta" },
   microsoftsharepoint: { logos: ["microsoft-sharepoint", "sharepoint"], simple: "microsoftsharepoint" },
+  microsoftteams: { logos: ["microsoft-teams"], simple: "microsoftteams" },
   apacheairflow: { logos: ["airflow-icon", "airflow"], simple: "apacheairflow" },
   googlecloud: { logos: ["google-cloud"], simple: "googlecloud" },
   databricks: { logos: ["databricks"], simple: "databricks" },

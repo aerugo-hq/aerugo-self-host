@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, field_validator
 
-from . import config, confluence, dataplex, datahub, directory, gcp_secrets, gdrive, glue, jira, microsoft365, notion, purview, secret_refs, slack, unity
+from . import config, confluence, dataplex, datahub, directory, gcp_secrets, gdrive, glue, jira, microsoft365, notion, purview, secret_refs, slack, teams, teams_bot, unity
 from .hooks import HOOK_KINDS
 from .auth import Caller, authenticate
 from .db import resolve_org_id, scoped
@@ -487,6 +487,73 @@ def create_microsoft_connection(ws: str, body: MicrosoftConnectionIn, caller: Ca
     return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
 
 
+class TeamsConnectionIn(IndexedOnly):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+    tenant_id: str = Field(max_length=36)
+    client_id: str = Field(max_length=36)  # the company's Teams app: its app registration, and its bot's id
+    certificate: str | None = Field(default=None, max_length=20000, repr=False)  # its private key and certificate (PEM)
+    credential_ref: str | None = Field(default=None, max_length=300)
+    team_ids: list[str] = Field(min_length=1, max_length=200)  # the teams it may read, by id; each owner's consent decides
+    channels: list[str] | None = Field(default=None, max_length=500)  # channel ids; None: every standard channel
+    history_days: int | None = Field(default=None, ge=1, le=3650)  # how far back it reads; a year unless set
+    api_base: str = directory.GRAPH
+    bot_service: str = teams_bot.SERVICE  # where its bot posts capture's notice
+    every_minutes: int | None = Field(default=None, ge=5, le=10080)
+
+
+@router.post("/connections/teams", status_code=201)
+def create_teams_connection(ws: str, body: TeamsConnectionIn, caller: Caller = Depends(authenticate),
+                            managed: tuple | None = Depends(managed_header)):
+    """Connect Microsoft Teams to a team (C1a): the company's own Teams app, signing in with its certificate. Only the
+    standard channels of teams whose owners consented to the app (resource-specific consent) are read; each post is
+    readable by its team's own members, never a guest, never the whole org. A consented team's channels arrive
+    requesting capture (the owner's consent is the first key), for this team's admins to confirm one by one. Its
+    admins only."""
+    require_workspace_admin(caller, ws)
+    if not directory.allowed_graph(body.api_base):
+        raise HTTPException(422, "that Microsoft Graph address isn't allowed here")
+    if not teams_bot.allowed_service(body.bot_service):
+        raise HTTPException(422, "that Bot Framework service address isn't allowed here")
+    if not directory.GUID.fullmatch(body.tenant_id) or not directory.GUID.fullmatch(body.client_id):
+        raise HTTPException(422, "name the tenant and the app registration by their ids")
+    if not all(directory.GUID.fullmatch(t) for t in body.team_ids):
+        raise HTTPException(422, "teams are named by their ids (the team's group id)")
+    if body.channels is not None and not all(teams.CHANNEL.fullmatch(c) for c in body.channels):
+        raise HTTPException(422, "channels are named by their ids, like 19:...@thread.tacv2")
+    if bool(body.certificate) == bool(body.credential_ref):
+        raise HTTPException(422, "give the app's certificate (its private key and certificate, PEM), or a credential reference: one, not both")
+    try:
+        secret = {"certificate": directory.entra_certificate(body.certificate)} if body.certificate else None
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if body.credential_ref and not team_secret(ws, body.credential_ref):
+        raise HTTPException(422, ref_rule(ws))
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with vault.kept_if_committed() as put, scoped(org_id, caller.principals) as conn:  # H5: a failed create keeps no secret
+        ws_row = conn.execute("SELECT id FROM workspaces WHERE slug = %s", (ws,)).fetchone()
+        if not ws_row:
+            raise HTTPException(404, "workspace not found")
+        if conn.execute("SELECT 1 FROM connections WHERE workspace_id = %s AND name = %s", (ws_row["id"], body.name)).fetchone():
+            raise HTTPException(409, "a connection with that name already exists in this workspace")
+        cid = uuid.uuid4()
+        ref = body.credential_ref or put(f"kl/connections/{cid}", secret)
+        row = conn.execute(
+            """INSERT INTO connections (id, org_id, workspace_id, kind, name, config, credential_ref, created_by)
+               VALUES (%s, %s, %s, 'teams', %s, %s, %s, %s) RETURNING id, name, kind, status""",
+            (cid, org_id, ws_row["id"], body.name,
+             Jsonb({"api_base": body.api_base.rstrip("/"), "tenant_id": body.tenant_id.lower(), "client_id": body.client_id.lower(),
+                    "team_ids": [t.lower() for t in body.team_ids], "channels": body.channels, "history_days": body.history_days,
+                    "bot_service": body.bot_service.rstrip("/"), "every_minutes": body.every_minutes}), ref, caller.username),
+        ).fetchone()
+        note_managed(conn, org_id, "connection", f"{ws}/{body.name}", managed, caller.username)
+        conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.discover', %s)",
+                     (org_id, Jsonb({"connection_id": str(row["id"])})))
+        audit(conn, org_id, caller.username, "connection.create", [ws],
+              {"name": body.name, "kind": "teams", "tenant_id": body.tenant_id.lower(), "team_ids": body.team_ids, "channels": body.channels,
+               "credential": "reference" if body.credential_ref else "stored"})
+    return {"id": str(row["id"]), "name": row["name"], "kind": row["kind"], "status": row["status"]}
+
+
 class CatalogConnectionIn(IndexedOnly):
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
     provider: str = Field(pattern=r"^(dataplex|unity|glue|purview|datahub)$")
@@ -782,15 +849,19 @@ class CaptureIn(BaseModel):
     action: Literal["confirm", "off"]  # the second key, or stopping capture
 
 
+CAPTURE_KINDS = {"slack": slack.CHANNEL, "teams": teams.CHANNEL}  # each kind's channels, by its own ids
+
+
 @router.get("/connections/{name}/capture")
 def list_capture(ws: str, name: str, caller: Caller = Depends(authenticate)):
-    """A Slack connection's channels and each one's capture (C2b): off, requested in the channel (the first key), or on."""
+    """A Slack or Teams connection's channels and each one's capture (C2b, C1a): off, requested (the first key: in Slack,
+    asked for in the channel; in Teams, its team's owner consented to the app), or on."""
     require_workspace_admin(caller, ws)
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = owned_connection(conn, ws, name)
-        if c["kind"] != "slack":
-            raise HTTPException(422, "only a Slack connection's channels are captured")
+        if c["kind"] not in CAPTURE_KINDS:
+            raise HTTPException(422, "only a Slack or Teams connection's channels are captured")
         rows = conn.execute("SELECT external_id, display_name, capture, capture_changed_at FROM connection_containers "
                             "WHERE connection_id = %s AND selected ORDER BY external_id", (c["id"],)).fetchall()
     return {"channels": [{"channel": r["external_id"], "name": r["display_name"], "capture": r["capture"],
@@ -799,27 +870,27 @@ def list_capture(ws: str, name: str, caller: Caller = Depends(authenticate)):
 
 @router.post("/connections/{name}/capture/{channel}")
 def set_capture(ws: str, name: str, channel: str, body: CaptureIn, caller: Caller = Depends(authenticate)):
-    """The team admin's key (C2b): confirm a channel whose creator or a workspace admin asked for capture in it (never one
-    no one asked for there), or stop capture; the channel is told either way, by the bot's one notice."""
+    """The team admin's key (C2b, C1a): confirm a channel whose first key is turned (in Slack, its creator or a workspace
+    admin asked in it; in Teams, its team's owner consented to the app, which holds until they remove it), never one
+    without it, or stop capture; the channel is told either way, by the bot's one notice."""
     require_workspace_admin(caller, ws)
-    if not slack.CHANNEL.fullmatch(channel):
-        raise HTTPException(404, "channel not found")
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
         c = owned_connection(conn, ws, name)
+        rule = CAPTURE_KINDS.get(c["kind"])
         row = conn.execute("SELECT capture FROM connection_containers WHERE connection_id = %s AND external_id = %s AND selected",
-                           (c["id"], channel)).fetchone() if c["kind"] == "slack" else None
+                           (c["id"], channel)).fetchone() if rule and rule.fullmatch(channel) else None
         if not row:
             raise HTTPException(404, "channel not found")
-        if body.action == "confirm" and row["capture"] != "requested":
+        if body.action == "confirm" and c["kind"] == "slack" and row["capture"] != "requested":  # Teams' key holds while it's listed
             raise HTTPException(409, "capture starts only once the channel's creator or a workspace admin runs /aerugo capture on in it")
         state = "on" if body.action == "confirm" else "off"
         if row["capture"] != state:
             conn.execute("UPDATE connection_containers SET capture = %s, capture_changed_at = now() WHERE connection_id = %s AND external_id = %s",
                          (state, c["id"], channel))
             if state == "on" or row["capture"] == "on":
-                conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'slack.notice', %s)",
-                             (org_id, Jsonb({"connection_id": str(c["id"]), "channel": channel, "state": state})))
+                conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, %s, %s)",
+                             (org_id, f"{c['kind']}.notice", Jsonb({"connection_id": str(c["id"]), "channel": channel, "state": state})))
         audit(conn, org_id, caller.username, f"capture.{body.action}", [ws], {"name": name, "channel": channel, "was": row["capture"]})
     return {"channel": channel, "capture": state}
 
@@ -873,7 +944,7 @@ def remove_webhook(ws: str, name: str, caller: Caller = Depends(authenticate)):
 SETTINGS = ("api_base", "projects", "company_site", "every_minutes", "domain", "drives", "repositories", "provider",
             "spaces", "labels", "page_trees", "admin_email", "tenant_id", "client_id", "channels", "company_workspace",
             "history_days", "sites", "location", "catalogs", "region", "role_arn", "databases", "collections", "platforms",
-            "storage")
+            "storage", "team_ids", "bot_service")
 
 
 def settings_of(ws: str, cfg: dict, credential_ref: str | None) -> dict:
@@ -976,7 +1047,8 @@ class ConnectionPatch(BaseModel):
     page_trees: list[str] | None = Field(default=None, max_length=100)  # Confluence: only these trees
     channels: list[str] | None = Field(default=None, max_length=500)  # Slack: the channels it brings in, by id
     sites: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Microsoft 365: the sites it reads
-    history_days: int | None = Field(default=None, ge=1, le=3650)     # Slack: how far back it reads
+    team_ids: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Teams: the teams it may read
+    history_days: int | None = Field(default=None, ge=1, le=3650)     # Slack, Teams: how far back it reads
     catalogs: list[str] | None = Field(default=None, max_length=200)    # Unity Catalog: the catalogs it reads
     databases: list[str] | None = Field(default=None, max_length=500)   # Glue: the databases it reads
     collections: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Purview: its collections
@@ -1038,12 +1110,16 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             values = getattr(body, field)
             if values is not None and (c["kind"] != "catalog" or provider != owner or not all(rule.fullmatch(v) for v in values)):
                 raise HTTPException(422, f"only a {owner} catalog has {field}, named as it names them")
-        if (body.channels is not None or body.history_days is not None or body.bot_token) and c["kind"] != "slack":
-            raise HTTPException(422, "only a Slack connection has channels, a history window, and a bot token")
+        if body.bot_token and c["kind"] != "slack":
+            raise HTTPException(422, "only a Slack connection has a bot token")
+        if (body.channels is not None or body.history_days is not None) and c["kind"] not in CAPTURE_KINDS:
+            raise HTTPException(422, "only a Slack or Teams connection has channels and a history window")
+        if body.team_ids is not None and (c["kind"] != "teams" or not all(directory.GUID.fullmatch(t) for t in body.team_ids)):
+            raise HTTPException(422, "only a Teams connection has team ids")
         if body.sites is not None and (c["kind"] != "microsoft" or not all(microsoft365.SITE.fullmatch(s) for s in body.sites)):
             raise HTTPException(422, "only a Microsoft 365 connection has sites, by Graph's site id")
-        if body.channels is not None and not all(slack.CHANNEL.fullmatch(ch) for ch in body.channels):
-            raise HTTPException(422, "channels are named by their ids, like C0123ABCD")
+        if body.channels is not None and not all(CAPTURE_KINDS[c["kind"]].fullmatch(ch) for ch in body.channels):
+            raise HTTPException(422, "channels are named by their ids, like C0123ABCD in Slack or 19:...@thread.tacv2 in Teams")
         if body.bot_token and not body.bot_token.startswith("xoxb-"):
             raise HTTPException(422, "that isn't a bot token (xoxb-...): a user token would read as a person")
         if body.storage is not None and c["kind"] not in POINTER_KINDS:
@@ -1061,6 +1137,9 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
         if body.projects is not None:
             cfg["projects"] = body.projects
             changed.append("projects")
+        if body.team_ids is not None:
+            cfg["team_ids"] = [t.lower() for t in body.team_ids]
+            changed.append("team_ids")
         for field in ("channels", "history_days", "sites", "catalogs", "databases", "collections", "platforms"):
             if getattr(body, field) is not None:
                 cfg[field] = getattr(body, field)
@@ -1107,8 +1186,8 @@ def update_connection(ws: str, name: str, body: ConnectionPatch, caller: Caller 
             elif body.bot_token:
                 secret = {"bot_token": body.bot_token}
             elif body.certificate:
-                if not (c["kind"] == "microsoft" or (c["kind"], provider) in (("directory", "entra"), ("catalog", "purview"))):
-                    raise HTTPException(422, "only an Entra directory, Microsoft 365, and Purview have a certificate")
+                if not (c["kind"] in ("microsoft", "teams") or (c["kind"], provider) in (("directory", "entra"), ("catalog", "purview"))):
+                    raise HTTPException(422, "only an Entra directory, Microsoft 365, Teams, and Purview have a certificate")
                 try:
                     secret = {"certificate": directory.entra_certificate(body.certificate)}
                 except ValueError as e:

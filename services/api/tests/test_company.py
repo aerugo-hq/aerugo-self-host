@@ -43,7 +43,8 @@ def test_each_person_reads_only_what_the_sources_grant(world):
     assert {"lp-leaders", "pos-down", "QUAL-8"} <= cora and "QUAL-9" not in cora   # a leader, but not a quality lead
     assert "pay-ranges" in ivy and "QUAL-9" in kai
     assert not {"leave-requests", "hr-warning"} & gus                               # People is a private team
-    assert not {"teams-forklift", "meeting-recall-standup"} & world.visible("eli")   # not loaded until C1 and C3
+    assert "teams-forklift" in world.visible("eli") and "teams-forklift" not in ana  # a Teams channel: its team alone (C1a)
+    assert "meeting-recall-standup" not in world.visible("kai")                     # not loaded until C3
 
 
 def test_the_truth_holds_every_kind_of_trap(world):
@@ -53,7 +54,7 @@ def test_the_truth_holds_every_kind_of_trap(world):
     assert facts["recall-decision"].kind == "decision"
     kinds = {q.kind for q in world.questions}
     assert {"stale", "decision", "location", "permission", "undocumented", "sensitive", "capture", "two-source"} <= kinds
-    assert {q.needs for q in world.questions} >= {"C1", "C3"}  # F8's questions count since it was built, and C2a's
+    assert "C3" in {q.needs for q in world.questions} and "C1" not in {q.needs for q in world.questions}  # C1a's count now
     max_weber = next(p for p in world.people if p.name == "Max Weber")
     assert not max_weber.active and not any(max_weber.email in members for members in world.groups.values())
 
@@ -80,3 +81,17 @@ def test_pages_become_confluences_storage_format_with_their_text_escaped():
     assert company.storage("Fish & <chips>\n## Steps\n1. one\n2. two\n- a\n| A | B |\n| 1 | 2 |") == (
         "<p>Fish &amp; &lt;chips&gt;</p><h2>Steps</h2><ol><li>one</li><li>two</li></ol><ul><li>a</li></ul>"
         "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>")
+
+
+def test_the_teams_channel_is_served_as_graph_lists_it(world):
+    """C1a: its team is consented to by the company's app, its members are exactly the channel's readers (its owner, the
+    team's lead, among them), and each post's key is the one the connector makes."""
+    from kl import teams
+    served = company.teams_tenant(world, "app-1")["teams"]
+    team = served[company.teams_team(company.TEAMS_CHANNEL)]
+    readers = world.doc("teams-forklift").readers
+    assert team["consented"] == ["app-1"] and {m["email"] for m in team["members"]} == readers
+    assert [m["email"] for m in team["members"] if m["roles"] == ["owner"]] == [world.person("eli").email]
+    posts = team["channels"][company.TEAMS_CHANNEL]["messages"]
+    assert [teams.key_of(company.TEAMS_CHANNEL, p["id"]) for p in posts] == [world.doc("teams-forklift").key]
+    assert teams.CHANNEL.fullmatch(company.TEAMS_CHANNEL) and all(teams.kept(p) for p in posts)

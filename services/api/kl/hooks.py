@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse, Response
 from psycopg.types.json import Jsonb
 from starlette.concurrency import run_in_threadpool
 
-from . import config, telemetry
+from . import config, teams_bot, telemetry
 from .db import resolve_org_id, scoped
 from .policy import audit
 from .slack import ASK_COMMAND, DONT_CAPTURE, SAVE_COMMAND, SAVE_SHORTCUT, capture_action as slack_capture_action
@@ -40,6 +40,7 @@ SLACK_EVENT = re.compile(r"^Ev[A-Za-z0-9]{1,40}$")
 CHANNEL = re.compile(r"^[CG][A-Z0-9]{2,20}$")
 SLACK_USER = re.compile(r"^[UW][A-Z0-9]{2,20}$")
 SLACK_TS = re.compile(r"^[0-9]{9,11}\.[0-9]{1,6}$")
+TEAMS_ACTIVITY = re.compile(r"^[A-Za-z0-9:_.|=-]{1,128}$")  # a Bot Framework activity's id
 COMMAND_REPLY = {  # private to whoever ran it (Slack shows an ephemeral reply only to them); it promises nothing it can't check
     "on": "Asked. If you created this channel or administer this workspace, its team's admins are asked to confirm capture "
           "in Aerugo; the channel is told when it starts.",
@@ -205,6 +206,53 @@ async def slack_interaction(connection_id: str, request: Request, x_slack_signat
 def refused(reason: str):
     telemetry.webhook_rejected(reason)
     return HTTPException(401, "invalid signature")
+
+
+def teams_app(connection_id: str) -> tuple[str, str, str] | None:
+    """The org, app, and tenant of a Teams connection that isn't paused; None otherwise, or on any error."""
+    try:
+        org_id = resolve_org_id(config.ORG_SLUG)
+        with scoped(org_id, SERVICE) as conn:
+            row = conn.execute("SELECT kind, status, config->>'client_id' AS app, config->>'tenant_id' AS tenant FROM connections "
+                               "WHERE id = %s", (connection_id,)).fetchone()
+        if not row or row["kind"] != "teams" or row["status"] == "disabled" or not row["app"] or not row["tenant"]:
+            return None
+        return str(org_id), row["app"], row["tenant"]
+    except Exception as e:  # noqa: BLE001 - the database unreachable: fail closed, and say why in the log
+        log.warning("teams app unavailable for %s: %s", connection_id, type(e).__name__)
+        return None
+
+
+@router.post("/v1/hooks/teams/{connection_id}/messages")
+async def teams_activity(connection_id: str, request: Request, authorization: str = Header(default="")):
+    """The company's Teams bot's messaging address (C1a). A delivery stands only on Microsoft's signed token (invariant 13
+    for Teams, decided 2026-10-21: it takes the HMAC's place), checked before anything is acted on; anything wrong, an
+    unknown connection included, is the same 401. It's taken once, by its activity's id, and only queues a job, which
+    reads back from Graph whatever it acts on. Today it takes "Don't capture" alone, answered privately in Teams."""
+    body = await capped_body(request, MAX_BODY)
+    if body is None:
+        telemetry.webhook_rejected("too_large")
+        raise HTTPException(413, "payload too large")
+    if not CONNECTION.fullmatch(connection_id):
+        raise refused("unknown")
+    found = await run_in_threadpool(teams_app, connection_id)
+    try:
+        activity = json.loads(body)
+    except json.JSONDecodeError:
+        activity = None
+    if not found or not isinstance(activity, dict):
+        raise refused("unknown")
+    org_id, app, tenant = found
+    try:
+        await run_in_threadpool(teams_bot.verify, authorization, app, str(activity.get("serviceUrl") or ""))
+    except teams_bot.Refused:
+        raise refused("signature")
+    asked = teams_bot.mark_request(activity, tenant)
+    if asked and TEAMS_ACTIVITY.fullmatch(str(activity.get("id") or "")):
+        result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"mark-{activity['id']}", "teams.exclude", asked)
+        log.info("teams don't-capture for %s: %s", connection_id, result)
+        return JSONResponse({"task": {"type": "message", "value": teams_bot.MARK_REPLY}}, status_code=200)
+    return Response(status_code=200)
 
 
 @router.post("/v1/hooks/{kind}/{connection_id}", status_code=202)
