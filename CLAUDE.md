@@ -2268,6 +2268,48 @@ baseline exactly, `recall-decision` at #5: QUAL-7's comment "Recommending a reca
 decision page, and two permission-trap questions cite other pages their askers may read; nothing else moved. Not run:
 the full smoke suite and the other evaluation sets (CI's run on the pull request), and the browser tests and the
 provider's tests (nothing they use changed). Not built: comment recall for live-only Jira (above).
+F6's evidence by its text (found by C2d's proof on a long-lived stack, its own item, 2026-10-21). F6 snapshotted each
+evidence document's `content_hash` at confirmation and sent a unit back for review when it moved, but a synced
+document's `content_hash` is its source's version, so a version that moved with the same text counted as a change: the
+Jira comment visibility item (pull request 76) made Jira's version `jira.version_of`, every issue was read once more
+under it, and every confirmed unit citing a Jira issue went stale, its text unchanged (eight on C2d's stack:
+recall-decision, recall-reports, flash-sale-lesson, and others). Migration 0069: `kl.evidence_fingerprints(ids)`, one
+definition of what a unit's evidence snapshot holds, a fingerprint per document in the evidence's order: the SHA-256 of
+the text it keeps (each section's heading and body, in order, as a JSON array) when it's indexed; its version when it
+keeps no text (a pointer or live only, F11, or an indexed document with no sections); '' for one that's gone, as
+before. It runs as its caller, so a confirmation reads it under the curator's row-level security (who reads every piece
+of the unit's evidence, F1) and the worker within its org. Confirming (`lifecycle.SNAPSHOT`) and the pass
+(`ACTIVE_SQL`, for confirmed units only) both call it; `transition` is unchanged. The whole document, not the cited
+section: F6's meaning stays "a piece of its evidence changed", and the retailer's truth has a page change send back
+every unit citing it, whatever section each cites. The same migration gives existing confirmed units a fair snapshot:
+one whose snapshot still equals its documents' versions (unchanged since it was confirmed, as far as versions tell)
+takes their fingerprints, so an upgrade that reads every document again under a new version sends none back; one whose
+versions already moved keeps them and goes stale at the next pass, as it would have; a unit already stale stays stale
+(a recorded change, for its owners to confirm). Decided: a pointer keeps the version comparison (it has nothing else),
+so a pointer Jira issue's units still go back once for pull request 76's version on an upgrade, and whenever Jira marks
+the issue updated; a unit confirmed before F6's snapshots still has none (its cadence decides, as before). Smoke:
+`a_unit_goes_back_for_review_only_when_its_evidences_text_changes` (two Jira issues, a confirmed unit on each: Jira
+marks both updated with the same text, a full read reads both again, and both stay confirmed through a lifecycle pass
+begun after it; one issue's text changes and the other leaves Jira, and both go stale, saying their evidence changed;
+as pointers, the version alone moving sends the unit back). Red first: against main's lifecycle the check failed ("a
+version that moved with the same text sent a unit back for review: stale, stale"); with the function replaced as owner
+to hash a pointer's empty sections too, it failed ("a pointer's version moved and its unit stayed confirmed"), the
+function then restored exactly (`pg_get_functiondef` compared) and the check green. The upgrade, by hand, on a stack
+built from main with the retailer loaded: every Jira issue made to look read, and every confirmed unit citing one
+confirmed, under an older version (a prefix on each version, the text unchanged); on main, a full read of the five
+Jira connections sent all 10 of those units back for review; planted again, the worker stopped, the stack upgraded to
+this branch (provision applied 0069, which re-snapshotted all 10 to text fingerprints), and the same read sent none
+back. Proof, on that stack of its own (`klf6t`, CI's settings: the example `.env`, an empty `.secrets/`), from main at
+1f98464: `make unit` 218 passed; the new check and F6's own check passed; `make eval-company` on main and again on the
+branch after the upgrade: everyone opening exactly what the truth says, no leak, Recall@10 100% over 52 counted
+questions, Ask citing a right page for 27 of 27 and leading with a right unit for 15 of 26, exactly the truth's 3 of 48
+units stale, the truth's 1 gap, no regression (its MRR read 0.92, ten cases better than the baseline's 0.83, since this
+stack never ran the full smoke suite or the scenario, whose pages compete; not recorded). Not run: the full smoke
+suite, the other evaluation sets, the browser tests, and the provider's tests (CI's run on the pull request; nothing
+the web app or the provider use changed). Not built: comparing only the cited section; each document's text hash kept
+at its sync, so the pass reads a column instead of hashing every confirmed unit's evidence each minute (the ponytail
+note in `lifecycle.py`, once an org holds hundreds of thousands of units); and bringing back units that already went
+stale this way on a long-lived stack (their owners confirm them again).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2280,8 +2322,8 @@ units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, w
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
 answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
 loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
-fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up; next, C2d (the bot
-answers privately), then Teams (C1a, C1b), C3, and C4.
+fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and F6's evidence
+by its text; next, C2d (the bot answers privately), then Teams (C1a, C1b), C3, and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
