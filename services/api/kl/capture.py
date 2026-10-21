@@ -97,7 +97,8 @@ def tell(c, channel: str, user: str, text: str) -> None:
 def save(conn, job) -> dict:
     """"Save to Aerugo" on a message (C2c): read again from Slack (who saved it, the message, the channel), and, as the
     rules allow (`slack.may_save`), proposed as a unit citing the document that holds it, so it has exactly that
-    channel's readers, for the connection's team's curators to confirm. The person who saved is told privately."""
+    channel's readers, for the connection's team's curators to confirm. Its trust is what was said (observed), so no
+    answer uses it until a curator confirms it (F4). The person who saved is told privately."""
     p = job["payload"]
     c, ts, user = channel_of(conn, p), str(p.get("ts") or ""), str(p.get("user") or "")
     if c is None or not slack.TS.fullmatch(ts) or not slack.USER.fullmatch(user):
@@ -140,7 +141,7 @@ def save(conn, job) -> dict:
         else:
             added = conn.execute(
                 "INSERT INTO knowledge_units (org_id, owner_team, kind, topic, title, body, trust, status, evidence, sections, created_by) "
-                "VALUES (%s, %s, 'fact', %s, %s, %s, 'documented', 'proposed', %s::uuid[], %s, 'slack-save') RETURNING id",
+                "VALUES (%s, %s, 'fact', %s, %s, %s, 'observed', 'proposed', %s::uuid[], %s, 'slack-save') RETURNING id",
                 (c["org_id"], c["team_id"], topic, body.splitlines()[0][:120] or "Saved from Slack", body, [held["id"]],
                  [held["heading_path"]])).fetchone()
             audit(conn, c["org_id"], "capture.save", {"connection_id": str(c["id"]), "channel": p["channel"], "message": ts,

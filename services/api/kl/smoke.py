@@ -5072,6 +5072,7 @@ def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
             conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
                          "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
     fga.write(writes=links)
+    ensure_fake_models()
     cid = None
     try:
         assert httpx.post(f"{FAKE_SLACK}/setup", json=state(), timeout=10).status_code == 200
@@ -5094,6 +5095,8 @@ def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
         assert api("GET", f"/v1/units/{unit}", "alice").status_code == 200, "a member of the channel can't read the save"
         assert api("GET", f"/v1/units/{unit}", "bob").status_code == 404, "someone outside the channel read the save"
         assert until(lambda: any(t.startswith("Saved for Payments") for t in told("carol"))), told("carol")
+        cited = ask_as("alice", "How do we prop the dock door before the truck backs in?", "payments/smoke-fake").json()
+        assert f"unit:{unit}" not in {c.get("id") for c in cited.get("citations") or []}, "an answer used a save no curator confirmed"
 
         for mts, why in ((ts(2), "your own messages"), (ts(3), "personal matters"), (ts(4), "don't capture")):
             assert save("carol", mts).status_code == 200
@@ -5119,8 +5122,11 @@ def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
         assert until(lambda: topic(fresh) in saved(), 300), "a message newer than the last sync was never saved"
         assert save("carol", ts(1)).status_code == 200
         assert until(lambda: any("already saved" in t for t in told("carol")))
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(), timeout=10).status_code == 200  # carol deleted it in Slack
+        assert api("POST", path + "/refresh", "alice").status_code in (200, 202)
+        assert until(lambda: not stored_anywhere(words[5]), 240), f"a save outlived its message being deleted in Slack: {stored_anywhere(words[5])}"
 
-        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(marked=(1, 4), late=True), timeout=10).status_code == 200
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state(marked=(1, 4)), timeout=10).status_code == 200
         event = json.dumps({"type": "event_callback", "event_id": f"Ev{tag}1", "event": {
             "type": "reaction_added", "user": uid["alice"], "reaction": "no_entry_sign", "item": {"type": "message", "channel": channel, "ts": ts(1)}}}).encode()
         raw_stamp = str(int(time.time()))
@@ -5128,7 +5134,7 @@ def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
         assert httpx.post(f"{API}/v1/hooks/slack/{cid}", content=event, timeout=10, headers={
             "Content-Type": "application/json", "X-Slack-Request-Timestamp": raw_stamp, "X-Slack-Signature": signature}).status_code == 202
         assert until(lambda: topic(ts(1)) not in saved()), "a message marked don't capture kept its save"
-        assert topic(ts(2)) in saved() and topic(fresh) in saved(), "a mark on one message removed another's save"
+        assert topic(ts(2)) in saved(), "a mark on one message removed another's save"
 
         assert api("PATCH", path, "alice", json={"storage": "pointer"}).status_code == 200
         assert until(lambda: not saved(), 240), f"switched to pointers, unconfirmed saves still hold text: {saved()}"
