@@ -301,15 +301,20 @@ def handle_connection_discover(conn, job) -> dict:
         raise RuntimeError(health.detail)
     found = connector.discover()
     with conn.transaction():
+        captured = {r["external_id"]: r for r in conn.execute(  # a channel's capture outlives a rediscovery (C2b)
+            "SELECT external_id, capture, capture_changed_at FROM connection_containers WHERE connection_id = %s", (cid,))}
         conn.execute("DELETE FROM connection_containers WHERE connection_id = %s", (cid,))
         for ct in found:
+            was = captured.get(ct.external_id) or {}
             conn.execute(
                 """INSERT INTO connection_containers
-                     (connection_id, org_id, external_id, container_kind, visibility, default_ref, selected, display_name)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                     (connection_id, org_id, external_id, container_kind, visibility, default_ref, selected, display_name,
+                      capture, capture_changed_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (cid, c["org_id"], ct.external_id, ct.kind, ct.visibility, ct.default_ref,
                  wanted is None or ct.external_id in wanted or ct.kind == "folder",  # a folder shared with it is chosen by that sharing
-                 (ct.name or "")[:300] or None))  # its name as the source gives it, for the Documents tree
+                 (ct.name or "")[:300] or None,  # its name as the source gives it, for the Documents tree
+                 was.get("capture", "off"), was.get("capture_changed_at")))
         conn.execute(CONNECTION_READY_SQL, (cid,))
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",  # a full read (H6)
                      (c["org_id"], Jsonb({"connection_id": str(cid), "full": True})))
@@ -716,6 +721,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "proposal.refresh": lambda conn, job: curator.refresh(conn, job["payload"]["proposal_id"]), "connection.discover": handle_connection_discover,
             "connection.sync": handle_connection_sync, "connection.refresh_readers": handle_connection_refresh_readers,
             "slack.capture": capture.request, "slack.notice": capture.notice, "slack.exclude": capture.exclude,  # C2b
+            "slack.save": capture.save,  # C2c
             "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,

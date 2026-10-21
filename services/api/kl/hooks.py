@@ -17,14 +17,14 @@ import time
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from psycopg.types.json import Jsonb
 from starlette.concurrency import run_in_threadpool
 
 from . import config, telemetry
 from .db import resolve_org_id, scoped
 from .policy import audit
-from .slack import DONT_CAPTURE, capture_action as slack_capture_action
+from .slack import DONT_CAPTURE, SAVE_COMMAND, SAVE_SHORTCUT, capture_action as slack_capture_action
 from .vault import vault
 
 router = APIRouter()
@@ -44,6 +44,7 @@ COMMAND_REPLY = {  # private to whoever ran it (Slack shows an ephemeral reply o
     "on": "Asked. If you created this channel or administer this workspace, its team's admins are asked to confirm capture "
           "in Aerugo; the channel is told when it starts.",
     "off": "Asked. If you created this channel or administer this workspace, capture stops, and the channel is told.",
+    "save": "To save something for your team, post it in the channel, then choose Save to Aerugo from that message's menu.",
     None: "Use /aerugo capture on or /aerugo capture off in a channel Aerugo reads. React :no_entry_sign: to keep a message out.",
 }
 
@@ -138,11 +139,51 @@ async def slack_command(connection_id: str, request: Request, x_slack_signature:
     form = {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace")).items()}
     channel, user = form.get("channel_id", ""), form.get("user_id", "")
     action = slack_capture_action(form.get("text", ""))
+    if not action and SAVE_COMMAND.match(form.get("text", "")):  # a note is posted, then saved: its text is never taken from here
+        return JSONResponse({"response_type": "ephemeral", "text": COMMAND_REPLY["save"]}, status_code=200)
     if action and CHANNEL.fullmatch(channel) and SLACK_USER.fullmatch(user):
         delivery = "cmd-" + hashlib.sha256(x_slack_signature.encode()).hexdigest()[:32]  # a replay is the same signature
         await run_in_threadpool(queue_job, found[0], "slack", connection_id, delivery, "slack.capture",
                                 {"channel": channel, "user": user, "action": action})
     return JSONResponse({"response_type": "ephemeral", "text": COMMAND_REPLY[action]}, status_code=200)
+
+
+def save_request(form: dict) -> dict | None:
+    """The channel, message, and person of a "Save to Aerugo" shortcut (C2c), or None: only those ids are taken from a
+    delivery, and the worker reads everything else again from Slack."""
+    try:
+        payload = json.loads(form.get("payload") or "")
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "message_action" or payload.get("callback_id") != SAVE_SHORTCUT:
+        return None
+    channel = str((payload.get("channel") or {}).get("id") or "") if isinstance(payload.get("channel"), dict) else ""
+    user = str((payload.get("user") or {}).get("id") or "") if isinstance(payload.get("user"), dict) else ""
+    ts = str(payload.get("message_ts") or "")
+    if not (CHANNEL.fullmatch(channel) and SLACK_USER.fullmatch(user) and SLACK_TS.fullmatch(ts)):
+        return None
+    return {"channel": channel, "ts": ts, "user": user}
+
+
+@router.post("/v1/hooks/slack/{connection_id}/interactions")
+async def slack_interaction(connection_id: str, request: Request, x_slack_signature: str = Header(default=""),
+                            x_slack_request_timestamp: str = Header(default="")):
+    """The Slack app's interactivity address (C2c): "Save to Aerugo" on a message, signed as its events are; it only
+    queues the worker's save, and Slack is answered at once, an empty 200, whatever was sent."""
+    body = await capped_body(request, MAX_BODY)
+    if body is None:
+        telemetry.webhook_rejected("too_large")
+        raise HTTPException(413, "payload too large")
+    if not CONNECTION.fullmatch(connection_id):
+        raise refused("unknown")
+    found = await run_in_threadpool(hook_secret, "slack", connection_id)
+    if not found or not slack_signed(found[1], body, x_slack_request_timestamp, x_slack_signature):
+        raise refused("signature" if found else "unknown")
+    asked = save_request({k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace")).items()})
+    if asked:
+        delivery = "act-" + hashlib.sha256(x_slack_signature.encode()).hexdigest()[:32]  # a replay is the same signature
+        await run_in_threadpool(queue_job, found[0], "slack", connection_id, delivery, "slack.save", asked)
+    return Response(status_code=200)
 
 
 def refused(reason: str):

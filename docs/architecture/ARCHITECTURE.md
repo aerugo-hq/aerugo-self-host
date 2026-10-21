@@ -142,6 +142,12 @@ proposals readable by the channel's members. The bot's one write is the notice w
 :no_entry_sign: reaction is read back from Slack, recorded (`capture_exclusions`), dropped like a sensitive message from
 what the channel keeps, and the unconfirmed proposals from it are removed.
 
+Save to Aerugo (C2c): a message shortcut, signed by the Slack app, queues a save with only the channel, message, and
+saver's ids; the worker reads the saver, the message, and the channel's members again from Slack, applies the rules
+(your own message anywhere the bot reads, someone else's only where capture is on, never a marked or sensitive one,
+never on a connection that keeps no text), and proposes a unit citing the channel's own document, so its readers are
+the channel's and follow its membership. The person who saved is told privately.
+
 ## 7. The engineering and data pack
 
 Sources: GitHub (repos, Terraform, conventions), the EDW (metadata, query logs), Control-M (jobs, order, scripts),

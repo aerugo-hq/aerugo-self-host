@@ -46,9 +46,17 @@ FORGET_SQL = (
     "DELETE FROM entity_scans WHERE document_id = %(doc)s",
     "DELETE FROM reference_links WHERE source_id = %(doc)s",
     "DELETE FROM reference_scans WHERE document_id = %(doc)s",
-    "DELETE FROM knowledge_units WHERE created_by = 'extraction' AND status = 'proposed' AND evidence = ARRAY[%(doc)s]::uuid[]",
+    "DELETE FROM knowledge_units WHERE created_by IN ('extraction', 'slack-save') AND status = 'proposed' AND evidence = ARRAY[%(doc)s]::uuid[]",
     "DELETE FROM extraction_state WHERE document_id = %(doc)s",
 )
+# A save whose message left its document (deleted or edited in the source, or now dropped) goes with it, unless a curator
+# confirmed it (C2c); its exact section is what was saved.
+UNSAVED_SQL = """DELETE FROM knowledge_units u WHERE u.created_by = 'slack-save' AND u.status = 'proposed'
+AND u.evidence = ARRAY[%(doc)s]::uuid[] AND NOT EXISTS (
+  SELECT 1 FROM chunks k WHERE k.document_id = %(doc)s AND k.heading_path = u.sections[1] AND k.body = u.body)"""
+# What no one confirmed, made from documents the source no longer has, goes with them: a save, and a model's proposal.
+ORPHANED_SQL = """DELETE FROM knowledge_units WHERE created_by IN ('extraction', 'slack-save') AND status = 'proposed'
+AND evidence && %s::uuid[]"""
 
 
 def storage_of(connection: dict) -> str:
@@ -171,6 +179,7 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
                         conn.execute("INSERT INTO chunk_embeddings (chunk_id, model_id, org_id, acl_principals, embedding, context) "
                                      "VALUES (%s, %s, %s, %s, %s::vector, %s)",
                                      (chunk, m["id"], org_id, item.acl, vector_literal(vecs[ordinal]), CONTEXT))
+                conn.execute(UNSAVED_SQL, {"doc": doc_id})
                 changed += 1
             else:  # the same content; its readers may have changed
                 doc_id = prev["id"]
@@ -189,6 +198,7 @@ def sync_container(conn, connection: dict, container: str, source_kind: str, ite
     gone = [(k, r["id"]) for k, r in existing.items() if (k not in keep if complete else k in set(removed))]  # deleted, or readable by no one
     with conn.transaction():
         if gone:
+            conn.execute(ORPHANED_SQL, ([doc for _, doc in gone],))
             conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([doc for _, doc in gone],))
         leave_former_teams(conn, connection, container, team)  # a container routed to another team moves there
         if not readers_only:  # a readers refresh reads no content, so it neither moves the cursor nor reconciles
@@ -214,6 +224,7 @@ def retire_unlisted(conn, connection: dict, source_kind: str, containers: list[s
     if held:
         fga.write(deletes=held)
     with conn.transaction():
+        conn.execute(ORPHANED_SQL, ([r["id"] for r in rows],))
         conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([r["id"] for r in rows],))
     return len(rows)
 

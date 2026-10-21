@@ -8,6 +8,7 @@ step here is a job a signed delivery queued: the delivery is only a hint (invari
 as the connection's bot, before it changes anything. Run by the worker, as kl_ingest in its org."""
 import logging
 
+import httpx
 from psycopg.types.json import Jsonb
 
 from . import slack
@@ -15,13 +16,19 @@ from . import slack
 log = logging.getLogger(__name__)
 
 CONTAINER_SQL = """
-SELECT c.id, c.org_id, c.kind, c.status, c.config, c.credential_ref, w.slug AS team, w.name AS team_name, cc.capture
+SELECT c.id, c.org_id, c.kind, c.status, c.config, c.credential_ref, w.id AS team_id, w.slug AS team, w.name AS team_name, cc.capture
 FROM connections c JOIN workspaces w ON w.id = c.workspace_id
 JOIN connection_containers cc ON cc.connection_id = c.id AND cc.external_id = %(channel)s AND cc.selected
 WHERE c.id = %(connection)s AND c.kind = 'slack' AND c.status <> 'disabled'
 """
-DROP_PROPOSALS_SQL = """DELETE FROM knowledge_units WHERE created_by = 'extraction' AND status = 'proposed'
-AND evidence && ARRAY(SELECT id FROM documents WHERE connection_id = %s AND external_key = ANY(%s))"""
+DROP_PROPOSALS_SQL = """DELETE FROM knowledge_units WHERE status = 'proposed'
+AND evidence && ARRAY(SELECT id FROM documents WHERE connection_id = %s AND external_key = ANY(%s))
+AND (created_by = 'extraction' OR (created_by = 'slack-save' AND topic = %s))"""  # a save of that message alone (C2c)
+# The section holding a saved message, in a document the connection keeps for its channel (C2c).
+HELD_SQL = """SELECT d.id, k.heading_path FROM documents d JOIN chunks k ON k.document_id = d.id
+WHERE d.connection_id = %s AND d.external_key = ANY(%s) AND d.storage = 'index' AND k.heading_path = %s AND k.body = %s
+ORDER BY d.external_key LIMIT 1"""
+SAVE_TRIES = 5  # a minute apart: a message newer than the last sync waits for the one this queues
 SET_SQL = "UPDATE connection_containers SET capture = %s, capture_changed_at = now() WHERE connection_id = %s AND external_id = %s"
 
 
@@ -74,6 +81,75 @@ def notice(conn, job) -> dict:
     return {"posted": p["state"]}
 
 
+def saved_topic(channel: str, ts: str) -> str:
+    """A saved message's unit's topic: one per message, so a save is never made twice and a mark finds it."""
+    return f"slack-save-{channel.lower()}-{ts.replace('.', '-')}"  # a unit's topic is lower case, digits, and hyphens
+
+
+def tell(c, channel: str, user: str, text: str) -> None:
+    """A private reply to the person who saved; failing to send it never undoes the save."""
+    try:
+        slack.client_for(c).whisper(channel, user, text)
+    except (slack.SlackError, httpx.HTTPError, ValueError) as e:
+        log.warning("couldn't tell a Slack user about their save: %s", type(e).__name__)
+
+
+def save(conn, job) -> dict:
+    """"Save to Aerugo" on a message (C2c): read again from Slack (who saved it, the message, the channel), and, as the
+    rules allow (`slack.may_save`), proposed as a unit citing the document that holds it, so it has exactly that
+    channel's readers, for the connection's team's curators to confirm. Its trust is what was said (observed), so no
+    answer uses it until a curator confirms it (F4). The person who saved is told privately."""
+    p = job["payload"]
+    c, ts, user = channel_of(conn, p), str(p.get("ts") or ""), str(p.get("user") or "")
+    if c is None or not slack.TS.fullmatch(ts) or not slack.USER.fullmatch(user):
+        return {"skipped": "not a message this connection syncs"}
+    if (c["config"] or {}).get("storage", "index") != "index":  # a pointer or live-only connection keeps no text (F11)
+        tell(c, p["channel"], user, slack.NOT_SAVED["no text"])
+        return {"refused": "no text"}
+    client = slack.client_for(c)
+    team, users = client.team(), client.users()
+    names = {uid: u["name"] for uid, u in users.items()}
+    excluded = frozenset(r["message"] for r in conn.execute(
+        "SELECT message FROM capture_exclusions WHERE connection_id = %s AND container = %s", (c["id"], p["channel"])))
+    message = client.message(p["channel"], ts)
+    why = slack.may_save(client.user(user), client.members(p["channel"]), message if message.get("ts") == ts else {},
+                         team["id"], c["capture"] == "on", names, excluded)
+    if why:
+        tell(c, p["channel"], user, slack.NOT_SAVED[why])
+        with conn.transaction():
+            audit(conn, c["org_id"], "capture.save.refused", {"connection_id": str(c["id"]), "channel": p["channel"],
+                                                              "message": ts, "user": user, "why": why})
+        return {"refused": why}
+    heading, body = slack.sections_of([message], names)[0]
+    held = conn.execute(HELD_SQL, (c["id"], slack.holding(p["channel"], message), heading, body)).fetchone()
+    if not held:  # newer than the last sync, or edited since: read the channel again, and try once more in a minute
+        tries = int(p.get("tries") or 0)
+        if tries + 1 >= SAVE_TRIES:
+            tell(c, p["channel"], user, slack.NOT_SAVED["not found"])
+            return {"refused": "not found"}
+        with conn.transaction():
+            conn.execute("INSERT INTO jobs (org_id, kind, payload) SELECT %s, 'connection.sync', %s WHERE NOT EXISTS ("
+                         "SELECT 1 FROM jobs WHERE kind = 'connection.sync' AND status = 'queued' AND payload->>'connection_id' = %s)",
+                         (c["org_id"], Jsonb({"connection_id": str(c["id"]), "reason": "capture.save"}), str(c["id"])))
+            conn.execute("INSERT INTO jobs (org_id, kind, payload, run_after) VALUES (%s, 'slack.save', %s, now() + interval '1 minute')",
+                         (c["org_id"], Jsonb({**p, "tries": tries + 1})))
+        return {"waiting": tries + 1}
+    topic = saved_topic(p["channel"], ts)
+    with conn.transaction():
+        if conn.execute("SELECT 1 FROM knowledge_units WHERE owner_team = %s AND topic = %s", (c["team_id"], topic)).fetchone():
+            added = None
+        else:
+            added = conn.execute(
+                "INSERT INTO knowledge_units (org_id, owner_team, kind, topic, title, body, trust, status, evidence, sections, created_by) "
+                "VALUES (%s, %s, 'fact', %s, %s, %s, 'observed', 'proposed', %s::uuid[], %s, 'slack-save') RETURNING id",
+                (c["org_id"], c["team_id"], topic, body.splitlines()[0][:120] or "Saved from Slack", body, [held["id"]],
+                 [held["heading_path"]])).fetchone()
+            audit(conn, c["org_id"], "capture.save", {"connection_id": str(c["id"]), "channel": p["channel"], "message": ts,
+                                                      "user": user, "unit": str(added["id"])})
+    tell(c, p["channel"], user, slack.SAVED.format(team=c["team_name"]) if added else slack.NOT_SAVED["already"])
+    return {"saved": bool(added)}
+
+
 def exclude(conn, job) -> dict:
     """A message marked "don't capture": recorded once Slack shows the reaction on it, then the channel is read again
     in full, so its document is kept without it (and F2's proposals from that document are replaced)."""
@@ -91,7 +167,7 @@ def exclude(conn, job) -> dict:
         # A model's proposals from the documents holding it go now, whatever capture and the team's model are by then;
         # once its document is read again without it, a captured channel's next extraction proposes from the rest.
         # One a curator confirmed stays, and F6 sends it back to them when its evidence changes.
-        conn.execute(DROP_PROPOSALS_SQL, (c["id"], slack.holding(p["channel"], message)))
+        conn.execute(DROP_PROPOSALS_SQL, (c["id"], slack.holding(p["channel"], message), saved_topic(p["channel"], ts)))
         if added:
             conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",
                          (c["org_id"], Jsonb({"connection_id": str(c["id"]), "full": True, "reason": "capture.exclude"})))

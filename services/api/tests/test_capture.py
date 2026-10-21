@@ -39,3 +39,49 @@ def test_a_marked_message_names_every_document_it_can_be_in():
     assert slack.holding("C1ABC", {"ts": "1760000060.000100", "thread_ts": "1760000000.000100"}) == [
         "slack-C1ABC-1760000000.000100", "slack-C1ABC-1760000060.000100", "slack-C1ABC-2025-10-09"]  # a reply: its thread
     assert slack.holding("C1ABC", {"ts": "not-a-ts"}) == [] and slack.holding("C1ABC", {}) == []
+
+
+def test_your_own_message_saves_anywhere_and_someone_elses_only_where_capture_is_on():
+    me, other = {"id": "U1", "team_id": "T1"}, {"id": "U2", "team_id": "T1"}
+    mine = {"ts": "1760000060.000100", "user": "U1", "text": "The truck comes at noon."}
+    theirs = {**mine, "user": "U2"}
+    save = lambda saver, message, captured=False, excluded=frozenset(): slack.may_save(
+        saver, ["U1", "U2"], message, "T1", captured, NAMES, excluded)
+    assert save(me, mine) is None
+    assert save(me, theirs) == "someone else's" and save(me, theirs, captured=True) is None
+    assert save(other, theirs) is None
+    assert save({"id": "U3", "team_id": "T1"}, mine, captured=True) == "saver"      # not in the channel
+    assert save({**me, "team_id": "T9"}, mine) == "saver"                            # a guest from a shared channel
+    assert save({**me, "deleted": True}, mine) == "saver" and save({**me, "is_bot": True}, mine) == "saver"
+    assert save(me, {}) == "gone"
+
+
+def test_a_marked_or_sensitive_message_is_never_saved():
+    me = {"id": "U1", "team_id": "T1"}
+    mine = {"ts": "1760000060.000100", "user": "U1", "text": "The truck comes at noon."}
+    save = lambda message, excluded=frozenset(): slack.may_save(me, ["U1"], message, "T1", True, NAMES, excluded)
+    assert save(mine, frozenset({mine["ts"]})) == "marked"
+    assert save({**mine, "reactions": [{"name": "no_entry_sign", "count": 1}]}) == "marked"
+    assert save({**mine, "text": "Sam is having surgery on Tuesday."}) == "sensitive"
+
+
+def test_only_a_save_shortcut_with_valid_ids_is_taken_from_a_delivery():
+    from kl.hooks import save_request
+    import json
+    shortcut = {"type": "message_action", "callback_id": "aerugo_save", "channel": {"id": "C1ABC"}, "user": {"id": "U1ABC"},
+                "message_ts": "1760000060.000100", "message": {"text": "never read from here"}}
+    assert save_request({"payload": json.dumps(shortcut)}) == {"channel": "C1ABC", "ts": "1760000060.000100", "user": "U1ABC"}
+    assert save_request({"payload": json.dumps({**shortcut, "callback_id": "other"})}) is None
+    assert save_request({"payload": json.dumps({**shortcut, "type": "block_actions"})}) is None
+    assert save_request({"payload": json.dumps({**shortcut, "channel": {"id": "C1ABC; DROP"}})}) is None
+    assert save_request({"payload": json.dumps({**shortcut, "channel": "C1ABC"})}) is None
+    assert save_request({"payload": "not json"}) is None and save_request({}) is None
+    assert slack.SAVE_COMMAND.match("save my note") and not slack.SAVE_COMMAND.match("saved") and not slack.SAVE_COMMAND.match("capture on")
+
+
+def test_each_saved_message_has_a_topic_of_its_own_that_a_unit_accepts():
+    import re
+    from kl.capture import saved_topic
+    from kl.units import TOPIC
+    one, other = saved_topic("C1ABC", "1760000060.000100"), saved_topic("C1ABC", "1760000060.000200")
+    assert re.fullmatch(TOPIC, one) and re.fullmatch(TOPIC, other) and one != other

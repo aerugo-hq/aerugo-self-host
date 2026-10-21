@@ -75,6 +75,9 @@ SENSITIVE_MESSAGES = (("medical-thread", 0), ("hr-warning", 0))
 # C2b: the Slack channels captured, each turned on in the channel by its creator and confirmed by its team's admin; their
 # threads may be proposed from, as pages and tickets are. CO201's holds a sensitive message, never proposed from.
 CAPTURED = ("CRTSCO201",)
+# C2c: messages saved to Aerugo, as (thread, message), each by the thread's first author: someone else's message, so
+# only in a captured channel; it becomes a proposed unit with exactly its channel's readers.
+SAVES = (("key-thread-CO201", 1),)
 # Time passing on the retailer, for F6's lifecycle check: the fact whose unit's review comes due, and a page that changes
 # (a fact it holds, the page, and what in it changes); every unit citing that page goes stale with it, and every other
 # unit stays as it is.
@@ -998,6 +1001,9 @@ def problems(world: World) -> list[str]:
             if n not in names or len(world.doc(n).messages) <= i]
     slack = {c.id: c for c in world.containers if c.source == "slack"}
     out += [f"captured channel {c}: not a Slack channel with a creator" for c in CAPTURED if c not in slack or not creator_of(world, slack[c])]
+    out += [f"save {n}/{i}: not someone else's message in a captured channel" for n, i in SAVES
+            if n not in names or world.doc(n).container not in CAPTURED or len(world.doc(n).messages) <= i
+            or world.doc(n).messages[i][0] == world.doc(n).messages[0][0]]
     out += [f"fact {f.id} supersedes {f.supersedes}, which isn't a fact" for f in world.facts if f.supersedes and f.supersedes not in facts]
     out += [f"fact {f.id} contradicts {g}, which isn't a fact" for f in world.facts for g in f.contradicts if g not in facts]
     out += [f"a perspective on {fact} names what isn't there" for fact, *_, evidence in PERSPECTIVES

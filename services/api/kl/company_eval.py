@@ -540,31 +540,65 @@ WHERE w.slug = %s AND (d.source_kind = ANY(%s) OR (d.source_kind = 'slack' AND d
 PROPOSALS_SQL = """
 SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team, u.duplicate_of::text AS duplicate_of FROM kl.knowledge_units u
 JOIN kl.documents d ON d.id = u.evidence[1] JOIN kl.workspaces w ON w.id = u.owner_team
-WHERE u.created_by = 'extraction' AND u.status = 'proposed' AND w.slug = ANY(%s)
+WHERE u.created_by IN ('extraction', 'slack-save') AND u.status = 'proposed' AND w.slug = ANY(%s)
 """
+
+
+def signed_post(url: str, raw: bytes, signing: str) -> httpx.Response:
+    """A delivery as the Slack app sends it, signed with its signing secret."""
+    stamp = str(int(time.time()))
+    signature = "v0=" + hmac.new(signing.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256).hexdigest()
+    return httpx.post(url, content=raw, timeout=10, headers={
+        "Content-Type": "application/x-www-form-urlencoded", "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+
+
+def save_messages(world: company.World, channel: str, hook: str, signing: str) -> list[str]:
+    """C2c on the retailer: each message the truth saves in this channel, by its thread's first author through "Save to
+    Aerugo" (signed as Slack sends it), until its proposed unit exists. Returns the saves that never landed."""
+    from .capture import saved_topic
+    missing = []
+    for name, i in (s for s in company.SAVES if world.doc(s[0]).container == channel):
+        doc = world.doc(name)
+        ts, saver = company._ts(doc.messages[i][1].replace("T", " "), i), next(p for p in world.people if p.name == doc.messages[0][0]).slack
+        topic = saved_topic(channel, ts)
+        if not saved_unit(topic):
+            payload = {"type": "message_action", "callback_id": slack.SAVE_SHORTCUT, "channel": {"id": channel},
+                       "user": {"id": saver}, "team": {"id": company.SLACK_TEAM}, "message_ts": ts}
+            r = signed_post(hook + "/interactions", urlencode({"payload": json.dumps(payload)}).encode(), signing)
+            if r.status_code != 200:
+                raise SystemExit(f"saving {name}: {r.status_code} {r.text[:200]}")
+            deadline = time.monotonic() + 300
+            while not saved_unit(topic) and time.monotonic() < deadline:
+                time.sleep(3)
+        if not saved_unit(topic):
+            missing.append(f"the save of {name}'s message {i} never became a proposed unit")
+    return missing
+
+
+def saved_unit(topic: str) -> bool:
+    with psycopg.connect(OWNER_DB) as conn:
+        return bool(conn.execute("SELECT 1 FROM kl.knowledge_units WHERE created_by = 'slack-save' AND topic = %s", (topic,)).fetchone())
 
 
 def capture_on(world: company.World) -> list[str]:
     """C2b on the retailer: each channel the truth captures is turned on as a company would: its creator runs `/aerugo
     capture on` in it (a command signed with the app's signing secret, as Slack sends it), then its team's admin
     confirms. Returns what went wrong: the bot posting anything but the notice, anywhere but a captured channel."""
-    names, problems = {slug: name for slug, name, _ in company.TEAMS}, []
+    names, problems, saves = {slug: name for slug, name, _ in company.TEAMS}, [], []
     for channel in company.CAPTURED:
         c = next(c for c in world.containers if c.id == channel)
         path = f"/v1/workspaces/{c.team}/connections/retail-slack-{c.team}"
         state = lambda: next((x["capture"] for x in api("GET", path + "/capture", ADMIN).json()["channels"] if x["channel"] == channel), None)
-        if state() == "on":
-            continue
         signing = secrets.token_hex(16)  # the app's signing secret, set on the connection's webhook each run
         hook = api("POST", path + "/webhook", ADMIN, json={"signing_secret": signing})
         if hook.status_code != 201:
             raise SystemExit(f"{path}: no webhook for the capture command ({hook.status_code})")
+        if state() == "on":
+            saves += save_messages(world, channel, hook.json()["url"], signing)
+            continue
         raw = urlencode({"command": "/aerugo", "text": "capture on", "channel_id": channel, "team_id": company.SLACK_TEAM,
                          "user_id": company.creator_of(world, c).slack}).encode()
-        stamp = str(int(time.time()))
-        signature = "v0=" + hmac.new(signing.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256).hexdigest()
-        r = httpx.post(hook.json()["url"] + "/commands", content=raw, timeout=10, headers={  # the address the app's admin is given
-            "Content-Type": "application/x-www-form-urlencoded", "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+        r = signed_post(hook.json()["url"] + "/commands", raw, signing)  # the address the app's admin is given
         if r.status_code != 200:
             raise SystemExit(f"the capture command for {channel}: {r.status_code} {r.text[:200]}")
         deadline = time.monotonic() + 120
@@ -577,14 +611,16 @@ def capture_on(world: company.World) -> list[str]:
         while not any(p["channel"] == channel and p["text"] == notice for p in httpx.get(f"{SITES['slack']}/posted", timeout=10).json()) \
                 and time.monotonic() < deadline + 120:
             time.sleep(2)
-    posted = httpx.get(f"{SITES['slack']}/posted", timeout=10).json()
+        saves += save_messages(world, channel, hook.json()["url"], signing)  # someone else's message: only once capture is on
+    posted = [p for p in httpx.get(f"{SITES['slack']}/posted", timeout=10).json() if not p.get("ephemeral")]  # C2c's replies aside
     for p in posted:
         team = next((c.team for c in world.containers if c.id == p["channel"] and c.id in company.CAPTURED), None)
         if not team or p["text"] != slack.NOTICE_ON.format(team=names[team]):
             problems.append(f"the bot posted in {p['channel']}: {p['text'][:80]}")
     print(f"\nCapture (C2b): {', '.join(company.CAPTURED)} on, with both keys; the bot posted {len(posted)} message(s), "
-          f"{len(problems)} of them anything but a captured channel's notice")
-    return problems
+          f"{len(problems)} of them anything but a captured channel's notice; {len(company.SAVES) - len(saves)} of "
+          f"{len(company.SAVES)} saves (C2c) proposed")
+    return problems + saves
 
 
 def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[str], list[str]]:

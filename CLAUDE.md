@@ -2122,6 +2122,82 @@ extraction records before the run that passed. Not run: the full smoke suite and
 request, and the fresh-stack loop after C2c). Not built: "Save to
 Aerugo" (C2c) and the bot answering (C2d); the same in Teams (C1); turning capture off removing what it proposed (kept
 for the curators); an emptied page's proposals replaced (F2's, found here); and a mark removed bringing a message back.
+CI on pull request 79: unit 211 passed; smoke 184 passed, 17 skipped, 0 failed; the golden set, the scenario (Recall@10
+94%, MRR 0.81), the retailer (CO201 on with both keys, the bot posting only its notice, 25 proposals with 2 from the
+captured thread; Recall@10 100%, MRR 0.83), its pointer (MRR 0.84) and live-only (MRR 0.63) runs, the Atlas, and every
+team's set at their baselines; no leak and no regression. C2a and C2b merged (pull requests 77 and 79).
+C2c, Save to Aerugo (the plan above; decided 2026-10-20: a message shortcut only, your own message anywhere the bot
+reads, someone else's only in a channel whose capture is on, kept with the channel's readers as a proposed unit for
+curators). `/aerugo save <note>` was dropped: its text could only come from the command itself, an exception to
+invariant 13, and a note has no message whose readers it could follow; `/aerugo save` now replies privately to post the
+note, then save it. The Slack app's interactivity address, `/v1/hooks/slack/<connection id>/interactions`, signed as
+its events are (the connection's webhook secret), capped, and taken once (keyed by its signature), takes only a "Save
+to Aerugo" message shortcut (callback id `aerugo_save`) and from it only the channel, message, and saver's ids
+(`hooks.save_request`, each held to Slack's id shapes), queues `slack.save`, and answers an empty 200. The worker
+(`capture.save`) refuses anything on a connection that keeps pointers only or is live only (they keep no text, F11),
+then reads again from Slack the saver (`users.info`), the channel's members, and the message (`reactions.get`), and
+holds them to `slack.may_save`: someone in this workspace and in the channel, never a guest from a shared channel's
+other side, someone who has left, or a bot; their own message, or someone else's only where capture is on; never one
+marked "don't capture" (a recorded exclusion or the reaction on it) or one the sensitive gate flags. It then finds the
+message's section in the document the connection keeps for the channel (`HELD_SQL`: the heading and text as the sync
+wrote them, in the thread or day `slack.holding` names); a message newer than the last sync, or edited since, queues a
+full sync and tries again a minute later, up to five times (`SAVE_TRIES`). A save is a proposed fact (trust observed,
+what someone said, so no answer uses it until a curator confirms it, F4; `created_by` `slack-save`, one per message by
+its topic, `saved_topic`) whose text is the message as written and whose
+evidence is that document and section, so F1 gives it exactly the channel's readers, kept current by the readers
+refresh; audited (`capture.save`, and `capture.save.refused` with why). The person who saved is told privately
+(`chat.postEphemeral`, `SlackClient.whisper`): saved for the team's curators, already saved, or why not; a reply that
+fails to send never undoes the save. A later mark removes that message's own save and no other (the drop now matches a
+save by its topic), switching the connection to pointers removes every unconfirmed save (F11a's forgetting), a re-sync that no
+longer finds the saved message's exact section in its document (deleted or edited in Slack, or dropped since) removes
+its save (`UNSAVED_SQL`), and when a sync removes a document, or a container it no longer reads, the unconfirmed saves
+and model proposals made from it go too (`ORPHANED_SQL`; a model's proposal from a deleted page had stayed stored,
+hidden, since F2); extraction's replacements never touch a save. The fake Slack answers `chat.postEphemeral` (refusing someone not in the
+channel) and records it as private. Found by C2c's proof, a bug in C2b: discovery deleted and re-inserted a
+connection's channels, so every re-sync, pause and resume, or edit silently turned capture off, telling neither the
+channel nor the team's admin (the retailer's refresh at each run's start reset it); discovery now keeps each listed
+channel's capture (`handle_connection_discover`), and a channel the bot leaves loses it. The retailer: its truth's
+`SAVES` (CO201's bike-key thread, the store manager's answer saved by the associate who asked: someone else's message,
+in the captured channel; `problems` holds each to that), saved through the shortcut by `save_messages` in
+kl.company_eval once capture is on, and counted with the proposals in F2's check, so each person must be shown exactly
+the saves whose document they open. Docs: `docs/connectors/slack.md`'s Save section (the interactivity address and the
+shortcut), the architecture, and the plan. Smoke: `save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules` (a
+forged save refused and a replay taken once; carol's own message saved with its text as written in Slack, read by
+alice in the channel and not by bob, and carol told privately; someone else's, a sensitive, and a marked message
+refused, each with its reason; `/aerugo save` only says how; with capture on, someone in the workspace but not in the
+channel saves nothing, and carol saves alice's message; a message newer than the last sync is saved once it's read; a
+second save says it's already saved; a mark on one message removes its save and not the others'; switched to pointers,
+no unconfirmed save is left and a new one is refused; the bot posted nothing in the channel but its notice and private
+replies; Ask never cites an unconfirmed save; a message deleted in Slack leaves its save's text in no table), and C2b's check now re-syncs after confirming and requires capture to stay on with no second notice. Unit:
+`tests/test_capture.py` (4 more: the saving rules, marked and sensitive messages, what's taken from a delivery, and a
+topic per message that a unit accepts). Red first: C2b's re-sync assertion failed on the old discovery ("a re-sync
+turned capture off without telling anyone"); with someone else's message allowed anywhere, the save check failed (carol saved alice's message without capture); with a saver outside the channel allowed, it failed (someone in the workspace but not the channel saved one); with the sensitive gate removed, the save still made nothing, since Aerugo never holds that message (C2a), and the check failed on the private reply, which said why only once the gate was back; with a mark dropping every save in its document, it failed (another message's save went too); and with pointers keeping saves, it failed (an unconfirmed save kept its text); each built into the worker, then restored (`cmp`) and the worker rebuilt. Proof, against the running stack (not fresh: it holds the scenario
+and the retailer): `make unit` 215 passed; C2c's and C2b's checks passed; `kl.company_eval` no leak, everyone opening
+exactly what the truth says, CO201's capture kept through the run's re-sync, 1 of 1 saves proposed, 26 proposals from 17
+documents (3 from the captured channel, the save among them) and none from other chat, each person shown exactly the
+proposals and saves whose document they open, Recall@10 100%, MRR 0.83 over 52 counted questions, Ask citing a right
+page for 27 of 27 and leading with a right unit for 15 of 26, the truth's 3 stale units and 1 gap, no regression. Not
+run: the browser tests and the lint (no web change), and the full smoke suite and the other sets (CI's run, and the
+fresh-stack loop next). Not built: the bot answering privately (C2d), the same in Teams (C1), saving a message with
+its thread's replies, and a save telling the message's author.
+**The fresh-stack loop over C2a, C2b, and C2c, 2026-10-21** (once after the three, at c2c-slack-save's b7ee10b, with CI's
+settings): `make pins` passed; `make unit` 215 passed; `make smoke` 187 passed, 15 skipped, 0 failed (every capture check
+among them); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario` Recall@10 94%, MRR 0.81
+over 43 counted cases, Ask right for 24 of 25, no leak, no regression; `make eval-company` from scratch: CO201 turned on
+with both keys and its notice posted, 1 of 1 saves proposed, 26 proposals (3 from the captured channel) and none from
+other chat, everyone opening exactly what the truth says and shown exactly their proposals and saves, Recall@10 100%,
+MRR 0.83 over 52 counted questions, Ask right for 27 of 27, the right unit first for 15 of 26, the truth's 3 stale units
+and 1 gap, no leak, no regression; `make atlas-eval` exact, no leak, no regression; `make eval-teams` no leak, no
+regression; the retailer as pointers Recall@10 99%, MRR 0.84, and live only 99%, 0.63, each at its baseline; no planted
+text in the services' logs; `make e2e` 39 passed; `make test-web` 7 passed; the lint at 0 errors and 43 warnings. No
+baseline was recorded again. Then an automated security review of the pushed branch found two problems in C2c, both
+fixed: a save went in as trust documented, which F4 answers from while still proposed, so an unconfirmed save could
+answer a question (a save is now trust observed); and a message deleted or edited in Slack kept its text in its
+unconfirmed save (a re-sync now drops a save whose section left its document, and a sync that removes a document drops
+the unconfirmed saves and model proposals made from it). Red first: the save check, run against the loop's build,
+failed ("an answer used a save no curator confirmed"); with the fixes but the removed document's cleanup left out, it
+failed (the deleted message's text still in `kl.knowledge_units`); restored (`cmp`) and green, and the extraction,
+capture, Slack, sensitive-chat, lifecycle, and unit-answer checks passed on the fixed build; `make unit` 215 passed.
 Jira comment visibility (found by F11a's review, its own item, approved 2026-10-20). `jira.issue_sections` put every
 comment in its issue's text, so a comment Jira restricts to a group or a project role (`visibility`) reached everyone
 who reads the issue: in its chunks, search, Ask, decisions, extraction, and, since F11a, a pointer's live read. That
@@ -2203,8 +2279,9 @@ F10b (the synthetic enterprise), F1 (knowledge units), F2 (extraction), F3 (cons
 units first), F8 (who is asking), and F6 (lifecycle) are done, recorded above, with the fresh-stack loop over the
 three, F5a (questions, gaps, and corrections), F7 (question sets per team), and F5b (routing to experts and kept
 answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
-loop over the two, and C2a (sensitive chat) and C2b (Slack channel capture); next, capture's C2c (Save to Aerugo), the
-fresh-stack loop over C2a to C2c, and C2d, then Teams (C1a, C1b), C3, and C4.
+loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
+fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up; next, C2d (the bot
+answers privately), then Teams (C1a, C1b), C3, and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
