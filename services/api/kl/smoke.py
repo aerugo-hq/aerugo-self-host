@@ -5020,6 +5020,123 @@ def pointer_mode_keeps_no_text_and_reads_it_live_for_who_the_source_lists():
 
 
 @check
+def a_restricted_jira_comment_reaches_no_one():
+    """Jira comments: a comment Jira shows to fewer people than its issue (restricted to a group or a project role, or a Service Management internal note) reaches no one through Aerugo, since its own readers aren't computed: it's kept in no table, no one finds the issue by its words, and it never reaches the model's prompt or the reader, indexed or as a pointer read live, while the issue's open comment reaches its readers; an issue indexed before this rule, and one whose comment is restricted later without Jira marking the issue updated, are read again at the connection's next full read"""
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    mark = {k: f"rcm{k}{tag.lower()}" for k in ("open", "group", "role", "internal")}
+    hidden = {mark["group"]: "Who is the vendor?", mark["role"]: "Which vault is it?", mark["internal"]: "Who is the customer?"}
+    atl = {u: {"accountId": f"557058:rcm{u}{tag.lower()}", "emailAddress": f"{u}@acme.test", "displayName": u.title()} for u in ("alice", "carol")}
+    project, updated = f"RCM{tag}", "2026-10-01T10:00:00.000+0000"
+    key, name = f"jira-{project}-1", f"rcm-{tag.lower()}"
+    comment = lambda text, **narrower: {"author": "Olivia", "body": text, **narrower}  # noqa: E731
+
+    def jira(**open_comment) -> None:  # the fake's site; `updated` never moves, as when Jira doesn't mark a comment's edit
+        setup = {"projects": {project: {"name": f"Comments {tag}", "company_wide": False, "browsers": list(atl.values()), "issues": [
+            {"key": f"{project}-1", "summary": f"Cutover comments {tag}", "description": f"The cutover plan {tag}.", "updated": updated,
+             "comments": [comment(f"The rehearsal took {mark['open']} minutes.", **open_comment),
+                          comment(f"The vendor is {mark['group']}.", visibility={"type": "group", "value": "leads", "identifier": "leads"}),
+                          comment(f"The vault is {mark['role']}.", visibility={"type": "role", "value": "Administrators", "identifier": "10002"}),
+                          comment(f"The customer is {mark['internal']}.", jsdPublic=False)]}]}}}
+        assert httpx.post(f"{FAKE_JIRA}/setup", json=setup, timeout=10).status_code == 200
+
+    def full_read() -> None:
+        assert api("POST", f"/v1/workspaces/payments/connections/{name}/refresh", "alice").status_code == 202
+
+    principals =[(u, f"ext:atlassian.{a['accountId'].replace(':', '.')}") for u, a in atl.items()]
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in principals}
+    conversations = []
+
+    def until(ok, seconds=150):
+        deadline = time.monotonic() + seconds
+        while not ok():
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(3)
+        return True
+
+    def stored(text: str) -> list[str]:  # every table holding it, but the audit, where the searches below record their own words
+        return [t for t in stored_anywhere(text) if t != "kl.audit_events"]
+
+    def doc() -> dict:
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            return conn.execute("SELECT d.id, d.storage, count(c.body) AS bodies FROM kl.documents d LEFT JOIN kl.chunks c "
+                                "ON c.document_id = d.id WHERE d.external_key = %s GROUP BY d.id", (key,)).fetchone() or {}
+
+    def found_by_words(user, word) -> list[dict]:  # results matching its words, never the meaning channel's nearest pages
+        hits = api("GET", "/v1/search", user, params={"q": word, "scope": "org", "limit": 50}).json()["results"]
+        return [h for h in hits if "lexical" in h["matched"] or word in (h.get("snippet") or "")]
+
+    def asked(question) -> str:  # alice asks, naming the issue; what the model read
+        reset_fake()
+        r = api("POST", "/v1/conversations", "alice", json={"question": question, "model": "payments/smoke-fake", "focus": [key]})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:300]}"
+        conversations.append(r.json()["conversation"]["id"])
+        return "\n".join(fake_prompts())
+
+    def reaches_no_one(stage: str) -> None:
+        kept = {m: stored(m) for m in hidden}
+        assert not any(kept.values()), f"{stage}: a restricted comment is stored: {kept}"
+        for user in ("alice", "bob", "carol"):
+            for m in hidden:
+                assert not found_by_words(user, m), f"{stage}: {user} found the issue by a restricted comment's words"
+        assert mark["open"] in asked("How long did the rehearsal take?"), f"{stage}: the issue's open comment never reached the model"
+        for m, question in hidden.items():  # each asked in its own words, so the old code's best passage was that comment
+            assert m not in asked(question), f"{stage}: a restricted comment reached the model's prompt"
+        read = api("GET", f"/v1/documents/{key}/content", "alice")
+        assert read.status_code == 200 and mark["open"] in read.text, f"{stage}: {read.status_code} {read.text[:300]}"
+        assert not any(m in read.text for m in hidden), f"{stage}: the reader showed a restricted comment"
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in principals:  # both have linked their Atlassian accounts: each reads the issue
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    ensure_fake_models()
+    try:
+        jira()
+        r = api("POST", "/v1/workspaces/payments/connections/jira", "alice", json={
+            "name": name, "api_base": FAKE_JIRA, "email": "jira-bot@acme.test", "api_token": "smoke-jira-token",
+            "projects": [project], "every_minutes": 60})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: doc().get("bodies")), "the issue never arrived"
+        assert stored(mark["open"]), "the open comment isn't indexed, so nothing is proven"
+        assert any(h["id"] == key for h in found_by_words("carol", mark["open"])), "a reader of the issue can't find its open comment"
+        reaches_no_one("indexed")
+
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:  # as an issue indexed before this rule: its old version, the comment in it
+            d = doc()
+            conn.execute("UPDATE kl.documents SET content_hash = %s, source_version = %s WHERE id = %s", (updated, updated, d["id"]))
+            conn.execute("UPDATE kl.chunks SET body = body || %s WHERE id = (SELECT id FROM kl.chunks WHERE document_id = %s "
+                         "ORDER BY ordinal DESC LIMIT 1)", (f" The vendor is {mark['group']}.", d["id"]))
+        assert stored(mark["group"]), "the old version wasn't planted"
+        full_read()
+        assert until(lambda: not stored(mark["group"])), \
+            f"an issue indexed before the rule kept its restricted comment past a full read: {stored(mark['group'])}"
+        jira(visibility={"type": "group", "value": "leads", "identifier": "leads"})  # the open comment restricted later
+        full_read()
+        assert until(lambda: not stored(mark["open"])), "a comment restricted later stayed past a full read, its issue's `updated` unchanged"
+        jira()  # open again
+        full_read()
+        assert until(lambda: stored(mark["open"])), "a comment opened again never came back"
+
+        r = api("PATCH", f"/v1/workspaces/payments/connections/{name}", "alice", json={"storage": "pointer"})
+        assert r.status_code == 200 and "storage" in r.json()["changed"], f"{r.status_code} {r.text[:200]}"
+        assert until(lambda: doc().get("storage") == "pointer"), "the switch to pointers never landed"
+        assert not doc()["bodies"], "a pointer kept text"
+        reaches_no_one("pointer")
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
+        for cid in conversations:
+            api("DELETE", f"/v1/conversations/{cid}", "alice")
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
+            conn.execute("DELETE FROM kl.source_identities WHERE source = 'atlassian' AND external_id LIKE %s", (f"%rcm%{tag.lower()}",))
+
+
+@check
 def credentials_can_live_in_vault_aws_or_azure_fenced_per_team():
     """G3, the company's own secret stores: a connection's credential can be a reference to HashiCorp Vault, AWS Secrets Manager, or Azure Key Vault, each read by the worker as the runner itself (Vault's JWT login, an assumed role, workload identity federation), never stored; each store is fenced per team by the secret's name, so another team's secret, a store or place the deployment doesn't allow, and a malformed reference are refused"""
     import json as jsonlib

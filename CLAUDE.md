@@ -1928,6 +1928,44 @@ taken after the check (which shows only that nothing was left behind: the check 
 exist); the lint at 0 errors and 43 warnings; the gallery's 3 browser tests passed. Not built: Terraform's `storage`
 (the provider's follow-up), pointers for other sources, attachments read live, and reading an answer's pointers at once
 (one after another today, so an Ask with six pointers waits on six sources in turn).
+Jira comment visibility (found by F11a's review, its own item, approved 2026-10-20). `jira.issue_sections` put every
+comment in its issue's text, so a comment Jira restricts to a group or a project role (`visibility`) reached everyone
+who reads the issue: in its chunks, search, Ask, decisions, extraction, and, since F11a, a pointer's live read. That
+broke invariant 12 and failed open. Now a comment narrower than its issue (`jira.narrower`: any `visibility`, or a
+Service Management internal note, `jsdPublic` false, which a customer who can browse the request doesn't see) is left
+out, so it reaches no one through Aerugo, not even the people Jira shows it to. Every reader of a Jira issue's text goes
+through `issue_sections`, so one guard covers all of them. Decided: fail closed rather than computing a restricted
+comment's own readers (the issue's readers in that group or role, as a document of its own), which would need Jira's
+group-member and role-actor lookups and the account's "Browse users and groups"; it can be built on top later. An
+issue's version is now `jira.version_of`: Jira's `updated` and a hash of which comments are left out. So a comment
+restricted later is read again at the next full read whether or not Jira marks its issue updated, which no fake can
+show, and every issue indexed before the rule is read again once (within `KL_FULL_SYNC_HOURS`, or at once on
+Re-sync), a pointer's embeddings, which were made from that text, included. The plan's first version was a fixed suffix, which re-reads old issues but misses a comment restricted later
+when Jira doesn't move `updated`; it was changed while writing the docs. The fake Jira passes a comment's
+`visibility` and `jsdPublic` through. `docs/connectors/jira.md` (new) says who reads each issue and which comments are
+left out. Smoke: `a_restricted_jira_comment_reaches_no_one`: an issue alice and carol read, with an open comment and
+one restricted to a group, one to a role, and an internal note, each with a planted word. Indexed, then as a pointer:
+no restricted word is in any table but the audit (which holds the check's own searches); none brings up the issue for
+alice, bob, or carol through its words; Ask, asked in each comment's own words, never puts one in the model's prompt
+while the open comment reaches it; and the reader never shows one. Between the two stages, an issue planted as indexed
+before the rule (the old version, the comment in its chunk) loses the comment at a full read; the open comment
+restricted later, `updated` unchanged, leaves at a full read; and opened again, it comes back. Unit:
+`tests/test_parsers.py` (2: the comments left out and kept, and the version changing when a comment is restricted later
+and never being the bare `updated`). Red first: against main's `jira.py` both unit tests failed (195 passed); the smoke
+check failed on the old code (all three restricted comments in `kl.chunks`), with the guard but the old version (the
+issue indexed before the rule kept its comment past a full read), and with a fixed suffix instead of the hash (the
+comment restricted later stayed past a full read); each mutation was made from a scratch copy and put back (`cmp`).
+Found while proving it: the check first counted the audit table,
+where its own searches record the words they look for, so two of its early red runs failed for that reason and were run
+again. Proof, on a fresh stack of its own (`kljira`, CI's settings: the example `.env`, no `.secrets/`), from main at dc26b0d:
+`make unit` 197 passed; the new check passed, and so did the other eleven that use the fake Jira (Jira's permissions,
+H6's incremental sync, Q5's decisions, Q7's attachments, connection ownership, S8's webhook and readers refresh, F11a's
+pointers, H2's throttling, pipelines, GCP secret references, and C1 and M7's worker check), each run alone. Not run:
+the full smoke suite and the evaluation sets (CI's run on the pull request; by decision the fresh-stack loop runs every
+two or three items), and the browser tests and the provider's tests (nothing they use changed). Not built: a restricted comment's own
+readers (above); worklogs (not read); and Jira's own search for live-only connections (F11b, pull request 75), which runs
+as the connection's account and so matches words in restricted comments: a reader of an issue could see it rank for a
+word only a restricted comment holds, without its text.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's

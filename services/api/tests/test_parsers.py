@@ -39,6 +39,28 @@ def test_jira_plain_text_from_an_older_server_is_kept():
     assert jira.adf_text("  plain words \n") == "plain words"
 
 
+def test_a_jira_comment_narrower_than_its_issue_is_left_out_and_an_open_one_kept():
+    comment = lambda text, **narrower: {"author": {"displayName": "Olivia"}, "created": "2026-10-01T10:00:00.000+0000", "body": text, **narrower}
+    issue = {"key": "EDP-1", "fields": {"summary": "Cutover", "comment": {"comments": [
+        comment("Open to the issue's readers."),
+        comment("Leads only.", visibility={"type": "group", "value": "leads", "identifier": "leads"}),
+        comment("Admins only.", visibility={"type": "role", "value": "Administrators", "identifier": "10002"}),
+        comment("Agents only.", jsdPublic=False),
+        comment("Shared with the customer.", jsdPublic=True)]}}}
+    text = " ".join(body for _, body in jira.issue_sections(issue)[1])
+    assert "Open to the issue's readers." in text and "Shared with the customer." in text
+    assert not any(t in text for t in ("Leads only.", "Admins only.", "Agents only.")), text
+
+
+def test_a_jira_issue_whose_comment_is_restricted_later_gets_a_new_version_though_jira_says_it_wasnt_updated():
+    issue = lambda **narrower: {"key": "EDP-1", "id": "10001", "fields": {"updated": "2026-10-01T10:00:00.000+0000", "comment": {
+        "comments": [{"id": "1", "body": "Open."}, {"id": "2", "body": "Later restricted.", **narrower}]}}}
+    before, after = jira.version_of(issue()), jira.version_of(issue(visibility={"type": "group", "value": "leads"}))
+    assert before != after, "a comment restricted later left the issue's version unchanged, so a full read would skip it"
+    assert before == jira.version_of(issue()) and before.startswith("2026-10-01T10:00:00.000+0000")
+    assert before != "2026-10-01T10:00:00.000+0000", "an issue indexed before comments were left out would never be read again"
+
+
 # ---- Confluence's storage format
 def test_confluence_storage_becomes_a_section_per_heading():
     _, sections = confluence.storage_sections("<p>Intro</p><h2>Steps</h2><p>Do this.</p>", "Page")
