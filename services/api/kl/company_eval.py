@@ -611,14 +611,13 @@ def expected_holder(world: company.World, asker: str, fact: company.Fact) -> str
 def score(world: company.World, out, unit_ids: dict[str, str]) -> tuple[dict, list[str], list[str]]:
     key = lambda names: tuple(world.doc(n).key for n in names)
     cases = [evals.Case(q.id, q.asker, q.text, q.kind, key(q.expect), key(q.forbid), q.needs) for q in world.questions]
-    rows, leaks, sensitive = [], [], []
+    rows, leaks = [], []
     for case, q in zip(cases, world.questions):
         ids = evals.ranked(case.user, case.question)
         found = [k for k in case.expect if k in ids]
         first = min((ids.index(k) + 1 for k in found), default=None)
         leaked = [k for k in case.forbid if k in ids]
         leaks += [f"{case.user} saw {k} ({case.id})" for k in leaked]
-        sensitive += [f"{case.user} was shown {k} ({case.id})" for k in key(q.withhold) if k in ids]
         rows.append((case, found, first, leaked))
     print(f"\nThe synthetic retailer: {len(cases)} questions, top {evals.K} search results each\n", file=out)
     for case, found, first, leaked in rows:
@@ -666,9 +665,37 @@ def score(world: company.World, out, unit_ids: dict[str, str]) -> tuple[dict, li
         print(f"  CONTACT: {line}, as the truth says", file=out)
     for line in wrong_units:
         print(f"  WRONG: {line}", file=out)
-    for line in sensitive:
-        print(f"  SENSITIVE (excluded once C2 lands): {line}", file=out)
     return card, leaks, wrong_units
+
+
+SENSITIVE_STORED_SQL = """
+SELECT (SELECT count(*) FROM kl.chunks WHERE body LIKE %(text)s OR heading_path LIKE %(text)s)
+     + (SELECT count(*) FROM kl.documents WHERE title LIKE %(text)s) AS n
+"""
+
+
+def sensitive_check(world: company.World, out) -> list[str]:
+    """C2a on the retailer: the chat messages the truth names as sensitive (one person's surgery, another's written
+    warning) are in no chunk and no title, in nothing their channel's own members find when they ask about them, and
+    never in a prompt Ask sends; their channel's other messages still are. Returns the leaks, as things no answer may
+    use."""
+    leaks = []
+    print("\nSensitive chat (C2a): never kept, found, or answered from\n", file=out)
+    for name, i in company.SENSITIVE_MESSAGES:
+        text, before = world.doc(name).messages[i][2], len(leaks)
+        with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:
+            stored = conn.execute(SENSITIVE_STORED_SQL, {"text": f"%{text[:60]}%"}).fetchone()["n"]
+        leaks += [f"{name}'s sensitive message is stored ({stored} rows)"] if stored else []
+        for q in (q for q in world.questions if name in q.withhold):
+            hits = api("GET", "/v1/search", q.asker, params={"q": q.text, "scope": "org", "limit": 20}).json()["results"]
+            leaks += [f"{q.asker} found {name}'s sensitive message ({q.id})" for h in hits
+                      if text[:60] in f"{h['title']} {h.get('snippet') or ''}"]
+            if q.asker in {p.username for p in world.people if p.username and p.team == ASK_TEAM}:
+                smoke.reset_fake()
+                ask_as(q.asker, q.text, ASK_MODEL)
+                leaks += [f"Ask sent {name}'s sensitive message to the model ({q.id})"] if any(text[:60] in p for p in smoke.fake_prompts()) else []
+        print(f"  {'LEAK' if len(leaks) > before else 'ok':4}  {name}: kept nowhere, found by no one, sent to no model", file=out)
+    return leaks
 
 
 def main(argv: list[str]) -> int:
@@ -696,6 +723,7 @@ def main(argv: list[str]) -> int:
     merge_leaks, merge_missing = consolidation_check(world, ids)
     leaks, missing = leaks + unit_leaks + extract_leaks + merge_leaks, missing + unit_missing + extract_missing + merge_missing
     card, retrieval_leaks, wrong_units = score(world, out, ids)
+    retrieval_leaks += sensitive_check(world, out)
     life_leaks, life_missing = lifecycle_check(world, ids, out)  # after Ask's: a stale unit ranks differently
     gap_leaks, gap_missing = gaps_check(world, out)
     leaks, missing = leaks + life_leaks + gap_leaks, missing + life_missing + gap_missing

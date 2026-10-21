@@ -17,6 +17,17 @@ import re
 
 from .okf import _CARD, _luhn
 
+# Talk about one person's health, discipline, performance, or pay (principle 4): never kept from chat (C2a), extracted,
+# kept as a gap's question, or kept from an expert's reply.
+SENSITIVE = re.compile(r"\b(surgery|diagnos\w*|illness|medical (?:condition|leave|history)|pregnan\w*|therapy|"
+                       r"disciplinary|written warning|final warning|performance (?:review|plan|improvement)|"
+                       r"terminated|fired|dismissed|salary of|lawsuit against|arrested)\b", re.I)
+
+
+def sensitive(text: str) -> bool:
+    """Whether a message speaks of one person's sensitive matters or holds personal data detection flags."""
+    return bool(SENSITIVE.search(text or "")) or detect("", [(None, text or "")])[1] is not None
+
 EMAIL = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])")
 PHONE = re.compile(r"(?<![\w+])(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?![\w-])"
                    r"|(?<![\w+])\+\d{1,3}(?:[ .-]\d{2,4}){2,4}(?![\w-])")

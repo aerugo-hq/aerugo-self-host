@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from . import config
+from . import config, privacy
 from .connectors import Container, Health
 from .principals import is_valid
 from .sync_items import Item, record_identities, storage_of, sync_container
@@ -162,12 +162,30 @@ def version(messages: list[dict]) -> str:
     return hashlib.sha256(marks.encode()).hexdigest()
 
 
+def said(m: dict, names: dict[str, str]) -> str:
+    return plain(m.get("text") or "", names)
+
+
+def sensitive(messages: list[dict], names: dict[str, str]) -> bool:
+    """Whether any of these messages speaks of one person's sensitive matters (C2a)."""
+    return any(privacy.sensitive(said(m, names)) for m in messages)
+
+
+def kept_version(messages: list[dict], names: dict[str, str]) -> str:
+    """A document's version, marked when it holds a sensitive message, so a copy kept before C2a is read again without it."""
+    return version(messages) + (":c2a" if sensitive(messages, names) else "")
+
+
 def sections_of(messages: list[dict], names: dict[str, str]) -> list[tuple[str | None, str]]:
+    """A section per message, leaving out each that speaks of one person's sensitive matters (C2a): never kept, never
+    searched, never sent to a model, though the channel's members can read it in Slack."""
     out = []
     for m in sorted(messages, key=lambda m: float(m["ts"])):
         when = datetime.fromtimestamp(float(m["ts"]), timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         who = names.get(m.get("user") or "", m.get("username") or "someone")
-        text = plain(m.get("text") or "", names)
+        text = said(m, names)
+        if privacy.sensitive(text):
+            continue
         files = [f.get("name") for f in m.get("files") or [] if f.get("name")]
         body = "\n".join(([text] if text else []) + ([f"Files: {', '.join(files)}"] if files else []))
         out.append((f"{who}, {when}{' (edited)' if m.get('edited') else ''}", body))
@@ -188,10 +206,10 @@ def items_for(client: SlackClient, channel_id: str, name: str, acl: list[str], n
             continue
         if threaded(m):
             thread = [r for r in client.replies(channel_id, m["ts"]) if kept(r)]
-            first = plain(m.get("text") or "", names).split("\n", 1)[0][:120] or "Thread"
-            if pointer:
+            first = said(m, names).split("\n", 1)[0][:120] or "Thread"
+            if pointer or privacy.sensitive(said(m, names)):  # no message text kept (F11a), or none that's sensitive (C2a)
                 first = f"thread on {datetime.fromtimestamp(float(m['ts']), timezone.utc).strftime('%Y-%m-%d')}"
-            items.append(Item(key=f"slack-{channel_id}-{m['ts']}", uri=permalink(team_url, channel_id, m["ts"]), version=version(thread),
+            items.append(Item(key=f"slack-{channel_id}-{m['ts']}", uri=permalink(team_url, channel_id, m["ts"]), version=kept_version(thread, names),
                               title=f"{name}: {first}", path=f"{name} › Threads", acl=acl,
                               sections=lambda thread=thread, first=first: (f"{name}: {first}", sections_of(thread, names))))
         else:
@@ -199,7 +217,7 @@ def items_for(client: SlackClient, channel_id: str, name: str, acl: list[str], n
             days.setdefault(day, []).append(m)
     for day, messages in days.items():
         start = min(messages, key=lambda m: float(m["ts"]))
-        items.append(Item(key=f"slack-{channel_id}-{day}", uri=permalink(team_url, channel_id, start["ts"]), version=version(messages),
+        items.append(Item(key=f"slack-{channel_id}-{day}", uri=permalink(team_url, channel_id, start["ts"]), version=kept_version(messages, names),
                           title=f"{name}, {day}", path=name, acl=acl,
                           sections=lambda messages=messages, day=day: (f"{name}, {day}", sections_of(messages, names))))
     return items

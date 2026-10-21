@@ -50,9 +50,7 @@ MAX_PROMPT_CHARS = 12000  # ponytail: a long document is cut at this; send it in
 MAX_UNITS = 10           # proposals kept per document
 MAX_DOCUMENTS = 25       # documents per pass; the worker queues another pass while there's more
 MAX_TOKENS = 1500
-SENSITIVE = re.compile(r"\b(surgery|diagnos\w*|illness|medical (?:condition|leave|history)|pregnan\w*|therapy|"
-                       r"disciplinary|written warning|final warning|performance (?:review|plan|improvement)|"
-                       r"terminated|fired|dismissed|salary of|lawsuit against|arrested)\b", re.I)
+SENSITIVE = privacy.SENSITIVE  # one person's health, discipline, performance, or pay (C2a moved it to kl.privacy)
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 _ROLE = re.compile(r"^.{1,120}$")
 
