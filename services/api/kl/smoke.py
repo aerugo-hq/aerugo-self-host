@@ -5151,6 +5151,148 @@ def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
             conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"USV%{tag}",))
 
 
+@check
+def slack_asks_are_answered_privately_as_the_asker():
+    """C2d, the bot answers: /aerugo ask and a mention are answered only to the asker, privately, with Ask's own answer for them (their sources, never another's), once the team's admin chose a model; someone Slack names but Aerugo can't link, someone whose last sign-in is over a week old, and someone a pilot leaves out are told why and answered nothing; a mention is answered only for its own author; what may reach Slack is capped (public and internal unless allowed more); a forged command is refused; and the answers lane refuses to run as any role but the API's"""
+    import hashlib
+    import hmac
+    import subprocess
+    import sys
+    from urllib.parse import urlencode
+    from .authz import fga
+    tag = secrets.token_hex(3).upper()
+    uid = {u: f"UAK{u.upper()}{tag}" for u in ("alice", "carol", "nora", "bob")}
+    channel, ts = f"CASK{tag}", lambda n: f"17600{n:05d}.000{n:03d}"
+    question = f"How do we respond to a payments incident {tag.lower()}?"
+    person = lambda u: {"id": uid[u], "team_id": "T0SMOKE", "name": u, "profile": {"real_name": u.title(), "email": f"{u}@acme.test"}}
+    state = {"users": [person(u) for u in uid], "channels": {channel: {
+        "name": f"ask-{tag.lower()}", "private": True, "creator": uid["alice"], "members": list(uid.values()), "messages": [
+            {"ts": ts(1), "user": uid["alice"], "text": f"<@UAERUGOBOT> {question}"},
+            {"ts": ts(2), "user": uid["carol"], "text": f"<@UAERUGOBOT> carol's own question {tag}"}]}}}
+    name, signing = f"ask-slack-{tag.lower()}", secrets.token_hex(16)
+    path = f"/v1/workspaces/payments/connections/{name}"
+    linked = [(u, f"ext:slack.{uid[u]}") for u in ("alice", "carol", "nora")]  # bob's Slack account is linked to no one
+    links = {(f"user:{u}", "owner", f"identity:{p[4:]}") for u, p in linked}
+
+    def signed(hook, raw: bytes, content_type: str, secret=signing):
+        stamp = str(int(time.time()))
+        signature = "v0=" + hmac.new(secret.encode(), b"v0:" + stamp.encode() + b":" + raw, hashlib.sha256).hexdigest()
+        return httpx.post(f"{API}{hook}", content=raw, timeout=10, headers={
+            "Content-Type": content_type, "X-Slack-Request-Timestamp": stamp, "X-Slack-Signature": signature})
+
+    def command(user, text, **kw):
+        raw = urlencode({"command": "/aerugo", "text": text, "channel_id": channel, "user_id": uid[user], "team_id": "T0SMOKE"}).encode()
+        return signed(f"/v1/hooks/slack/{cid}/commands", raw, "application/x-www-form-urlencoded", **kw)
+
+    def mention(n, user, mts):
+        return signed(f"/v1/hooks/slack/{cid}", json.dumps({"type": "event_callback", "event_id": f"Ev{tag}{n}", "event": {
+            "type": "app_mention", "user": uid[user], "channel": channel, "ts": mts, "text": "never read from the event"}}).encode(),
+            "application/json")
+
+    def told(user):
+        return [p["text"] for p in httpx.get(f"{FAKE_SLACK}/posted", timeout=10).json()
+                if p["channel"] == channel and p.get("ephemeral") and p.get("user") == uid[user]]
+
+    def until(ok, seconds=120):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(2)
+        return ok()
+
+    def answer(user, text):  # asks, then the private reply that came back for it
+        before = len(told(user))
+        assert command(user, text).json()["response_type"] == "ephemeral"
+        assert until(lambda: len(told(user)) > before), f"{user} got no private reply"
+        return told(user)[-1]
+
+    def linked_ids(reply):
+        return set(re.findall(r"#/documents/([^|>]+)\|", reply))
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u, p in linked:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, p, f"user:{u}"))
+    fga.write(writes=links)
+    ensure_fake_models()
+    for u in ("alice", "carol", "nora"):  # each signs in, so their last sign-in is recent
+        assert api("GET", "/v1/search", u, params={"q": "incident"}).status_code == 200
+    with psycopg.connect(OWNER_DB) as conn:
+        signed_in = {r[0] for r in conn.execute("SELECT username FROM kl.person_sign_ins WHERE signed_in_at > now() - interval '7 days'")}
+    assert {"alice", "carol", "nora"} <= signed_in, f"a sign-in wasn't recorded: {signed_in}"
+    cid = None
+    try:
+        assert httpx.post(f"{FAKE_SLACK}/setup", json=state, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/slack", "alice", json={
+            "name": name, "api_base": f"{FAKE_SLACK}/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel],
+            "history_days": 3650, "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        assert api("POST", path + "/webhook", "alice", json={"signing_secret": signing}).status_code == 201
+        assert until(lambda: channel in {c["channel"] for c in api("GET", path + "/capture", "alice").json()["channels"]}), \
+            "the channel never arrived"
+
+        assert command("alice", question, secret="not-the-signing-secret").status_code == 401, "a forged command was taken"
+        assert "isn't set up" in answer("alice", f"ask {question}"), "an ask was answered before its team chose a model"
+        assert api("PUT", path + "/answers", "carol", json={"model": "payments/smoke-fake"}).status_code in (403, 404)
+        assert api("PUT", path + "/answers", "alice", json={"model": "finance/smoke-fake"}).status_code == 422, \
+            "another team's model answers this team's Slack"
+        assert api("PUT", path + "/answers", "alice", json={"model": "payments/smoke-fake"}).json() == {
+            "model": "payments/smoke-fake", "classifications": ["internal", "public"]}
+
+        reply = answer("alice", f"ask {question}")
+        mine = {c["id"] for c in ask_as("alice", question, "payments/smoke-fake").json()["citations"]}
+        assert linked_ids(reply) and linked_ids(reply) <= mine, f"alice's Slack answer isn't her own Ask's: {reply[:300]}"
+        assert not linked_ids(reply) & {"fin-close", "legal-hold"}, "a Slack answer named a page its asker can't read"
+        assert all(api("GET", f"/v1/documents/{d}/content", "alice").status_code == 200 for d in linked_ids(reply))
+        assert "Sources:" in reply and "Confidence:" in reply
+
+        assert "doesn't know who you are" in answer("bob", f"ask {question}"), "someone Aerugo can't link was answered"
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("UPDATE kl.person_sign_ins SET signed_in_at = now() - interval '8 days' WHERE username = 'alice'")
+        try:
+            assert "been a while" in answer("alice", f"ask {question}"), "an ask was answered on a sign-in over a week old"
+        finally:
+            with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+                conn.execute("UPDATE kl.person_sign_ins SET signed_in_at = now() WHERE username = 'alice'")
+        assert api("PUT", "/v1/admin/admission", "olivia", json={"mode": "teams"}).status_code == 200
+        try:
+            from .admission import MODE_SECONDS
+            time.sleep(MODE_SECONDS + 2)  # every process trusts the mode it read for this long (G4), the answers lane too
+            assert "isn't onboarded" in answer("nora", f"ask {question}"), "a pilot's outsider was answered from Slack"
+        finally:
+            assert api("PUT", "/v1/admin/admission", "olivia", json={"mode": "org"}).status_code == 200
+
+        before = len(told("alice"))
+        assert mention(1, "alice", ts(1)).status_code == 202
+        assert until(lambda: len(told("alice")) > before), "a mention wasn't answered"
+        assert linked_ids(told("alice")[-1]) <= mine, "a mention's answer isn't its asker's"
+        before = len(told("alice"))
+        assert mention(2, "alice", ts(2)).status_code == 202  # carol's message, claimed as alice's
+        with psycopg.connect(OWNER_DB) as conn:
+            assert until(lambda: conn.execute("SELECT count(*) FROM kl.jobs WHERE kind = 'slack.ask' AND status NOT IN "
+                                              "('done', 'failed') AND payload->>'connection_id' = %s", (cid,)).fetchone()[0] == 0)
+        assert len(told("alice")) == before, "a mention was answered for someone who didn't write it"
+
+        assert api("PUT", path + "/answers", "alice", json={"model": "payments/smoke-fake", "classifications": ["public"]}).status_code == 200
+        capped = answer("alice", f"ask {question}")
+        assert not linked_ids(capped) and "aren't shown in Slack" in capped, f"an internal page reached a public-only Slack: {capped[:300]}"
+        assert all(p.get("ephemeral") for p in httpx.get(f"{FAKE_SLACK}/posted", timeout=10).json() if p["channel"] == channel), \
+            "the bot posted an answer in the channel"
+
+        lane = subprocess.run([sys.executable, "-m", "kl.answers_lane"], env={**os.environ, "KL_DATABASE_URL": INGEST_DB},
+                              capture_output=True, text=True, timeout=120)
+        assert lane.returncode != 0 and "runs only as the API's role" in lane.stderr, \
+            f"the answers lane ran as the worker's role: {lane.returncode} {lane.stderr[-300:]}"
+    finally:
+        api("DELETE", path, "alice")
+        api("PUT", "/v1/admin/admission", "olivia", json={"mode": "org"})
+        fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in linked],))
+            conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"UAK%{tag}",))
+
+
 POINTER_MARK = "ptr-marker"  # F11a: in every source text the pointer check plants, so CI can grep the API's and worker's logs
 
 

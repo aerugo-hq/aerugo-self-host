@@ -2232,10 +2232,11 @@ def with_history(history: str, prompt: str) -> str:
 def answer_question(caller: Caller, question: str, model: str, scope: str = "org", max_sources: int = 6,
                     include_passages: bool = False, earlier: list[dict] | None = None,
                     focus: list[str] | None = None, mode: str = "smart", sources_only: list[str] | None = None,
-                    containers_only: list[str] | None = None) -> dict:
+                    containers_only: list[str] | None = None, reach: frozenset[str] | None = None) -> dict:
     """Answer from the caller's visible sources only, with numbered citations. Sources the chosen model
     may not receive (egress policy) are withheld before the prompt is built; with no sources left, the
-    model is never called."""
+    model is never called. `reach` narrows that further to what the answer's destination may carry (C2d: a Slack reply
+    carries public and internal content unless its team's admin allows more)."""
     ref = MODEL_REF.fullmatch(model)
     if not ref:
         raise HTTPException(422, "model must look like '<workspace>/<name>'")
@@ -2262,7 +2263,7 @@ def answer_question(caller: Caller, question: str, model: str, scope: str = "org
     narrow = [s for s in sources_only or [] if SOURCE_FILTER.fullmatch(s)], [c for c in containers_only or [] if 0 < len(c) <= 300]
     _, visible, dropped = retrieve(org_id, caller, f"{last_question} {question}".strip(), targets,  # its own transactions (H5)
                                    max(max_sources, FACET_POOL) if any(narrow) else max_sources, mode=mode, focus=focus)
-    allowed = set(endpoint["allowed_classifications"])
+    allowed = set(endpoint["allowed_classifications"]) & (set(reach) if reach is not None else set(endpoint["allowed_classifications"]))
     with scoped(org_id, caller.principals) as conn:  # what the model may receive, and whether the budget allows it
         if any(narrow):  # E1: only the chosen sources and containers
             visible = narrowed(conn, visible, *narrow)[0][:max_sources]

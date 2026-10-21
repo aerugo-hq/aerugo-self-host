@@ -580,6 +580,46 @@ def saved_unit(topic: str) -> bool:
         return bool(conn.execute("SELECT 1 FROM kl.knowledge_units WHERE created_by = 'slack-save' AND topic = %s", (topic,)).fetchone())
 
 
+SLACK_ASKER = "ana"  # C2d: a store associate, asking in her own store's channel
+
+
+def slack_ask_check(world: company.World, out) -> tuple[list[str], list[str]]:
+    """C2d on the retailer: a store person asks through Slack, in her own store's channel, as Slack sends it (a signed
+    command); she's answered privately, with her own Ask's sources, never a page the truth says she may not see.
+    Returns (leaks, missing)."""
+    q = next(q for q in world.questions if q.asker == SLACK_ASKER and q.facts and not q.needs)
+    me = world.person(SLACK_ASKER)
+    channel, path = f"CRTS{me.place}", "/v1/workspaces/stores/connections/retail-slack-stores"
+    if api("PUT", path + "/answers", ADMIN, json={"model": ASK_MODEL}).status_code != 200:
+        raise SystemExit(f"{path}: Slack answers couldn't be set up")
+    signing = secrets.token_hex(16)
+    hook = api("POST", path + "/webhook", ADMIN, json={"signing_secret": signing}).json()["url"]
+    replies = lambda: [x["text"] for x in httpx.get(f"{SITES['slack']}/posted", timeout=10).json()
+                       if x.get("ephemeral") and x.get("user") == me.slack and x["channel"] == channel]
+    before = len(replies())
+    raw = urlencode({"command": "/aerugo", "text": f"ask {q.text}", "channel_id": channel, "team_id": company.SLACK_TEAM,
+                     "user_id": me.slack}).encode()
+    if signed_post(hook + "/commands", raw, signing).status_code != 200:
+        raise SystemExit("the ask command was refused")
+    deadline = time.monotonic() + 180
+    while len(replies()) == before and time.monotonic() < deadline:
+        time.sleep(2)
+    if len(replies()) == before:
+        return [], [f"{SLACK_ASKER}'s Slack ask ({q.id}) got no private reply"]
+    reply = replies()[-1]
+    linked = set(re.findall(r"#/documents/([^|>]+)[|]", reply))
+    own = {c["id"] for c in ask_as(SLACK_ASKER, q.text, ASK_MODEL).json()["citations"]}
+    by_key, seen = {d.key: d for d in world.docs}, world.visible(SLACK_ASKER)
+    forbidden = {by_key[k].key for k in by_key if by_key[k].name in q.forbid}
+    leaks = [f"{SLACK_ASKER}'s Slack answer named {k}, which she may not see" for k in sorted(linked)
+             if k in forbidden or (k in by_key and by_key[k].name not in seen)]
+    leaks += [f"{SLACK_ASKER}'s Slack answer named {k}, which her own Ask didn't" for k in sorted(linked - own)]
+    missing = [] if linked or not own else [f"{SLACK_ASKER}'s Slack answer named none of her Ask's sources"]
+    print(f"\nSlack ask (C2d): {SLACK_ASKER} asked {q.id} in {channel}, answered privately with {len(linked)} of her "
+          f"Ask's {len(own)} sources linked, {len(leaks)} she may not see or her Ask didn't cite", file=out)
+    return leaks, missing
+
+
 def capture_on(world: company.World) -> list[str]:
     """C2b on the retailer: each channel the truth captures is turned on as a company would: its creator runs `/aerugo
     capture on` in it (a command signed with the app's signing secret, as Slack sends it), then its team's admin
@@ -814,6 +854,9 @@ def main(argv: list[str]) -> int:
     leaks, missing = leaks + unit_leaks + extract_leaks + merge_leaks, missing + unit_missing + extract_missing + merge_missing
     card, retrieval_leaks, wrong_units = score(world, out, ids)
     retrieval_leaks += sensitive_check(world, out)
+    if not pointer:  # C2d: a Slack ask, answered as its asker
+        ask_leaks, ask_missing = slack_ask_check(world, out)
+        retrieval_leaks, missing = retrieval_leaks + ask_leaks, missing + ask_missing
     life_leaks, life_missing = lifecycle_check(world, ids, out)  # after Ask's: a stale unit ranks differently
     gap_leaks, gap_missing = gaps_check(world, out)
     leaks, missing = leaks + life_leaks + gap_leaks, missing + life_missing + gap_missing

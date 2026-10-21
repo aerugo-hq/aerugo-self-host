@@ -104,7 +104,7 @@ class SlackClient:
     def team(self) -> dict:
         """This workspace: its id (who's a member of it, not a guest from a shared channel's other side) and address."""
         me = self._call("auth.test")
-        return {"id": me.get("team_id"), "url": str(me.get("url") or "").rstrip("/")}
+        return {"id": me.get("team_id"), "url": str(me.get("url") or "").rstrip("/"), "bot": me.get("user_id")}
 
     def discover(self) -> list[Container]:
         """The channels the bot is in: those are the ones it may read, so those are what's indexed."""
@@ -157,12 +157,13 @@ class SlackClient:
             raise SlackError(str(body.get("error") or "not ok")[:100])
         return str(body.get("ts") or "")
 
-    def whisper(self, channel: str, user: str, text: str) -> None:
-        """A reply only `user` sees, in a channel (C2c: what became of their save). The bot's other write."""
-        if not CHANNEL.fullmatch(channel) or not USER.fullmatch(user):
-            raise ValueError("unexpected channel or user")
-        r = source_http.post(f"{self.base}/chat.postEphemeral", data={"channel": channel, "user": user, "text": text},
-                             headers=self.headers, timeout=30)
+    def whisper(self, channel: str, user: str, text: str, thread: str | None = None) -> None:
+        """A reply only `user` sees, in a channel or one of its threads (C2c: what became of their save; C2d: their
+        answer). The bot's other write."""
+        if not CHANNEL.fullmatch(channel) or not USER.fullmatch(user) or (thread is not None and not TS.fullmatch(thread)):
+            raise ValueError("unexpected channel, user, or thread")
+        r = source_http.post(f"{self.base}/chat.postEphemeral", headers=self.headers, timeout=30,
+                             data={"channel": channel, "user": user, "text": text, **({"thread_ts": thread} if thread else {})})
         r.raise_for_status()
         if not r.json().get("ok"):
             raise SlackError(str(r.json().get("error") or "not ok")[:100])
@@ -179,6 +180,7 @@ NOTICE_ON = ("Aerugo now proposes knowledge from this channel's threads, for {te
 NOTICE_OFF = "Aerugo no longer proposes knowledge from this channel."
 SAVE_SHORTCUT = "aerugo_save"  # the message shortcut's callback id (C2c)
 SAVE_COMMAND = re.compile(r"^\s*save\b", re.I)
+ASK_COMMAND = re.compile(r"^\s*ask\b\s*(.*)$", re.I | re.S)  # C2d: `/aerugo ask <question>`
 SAVED = "Saved for {team}'s curators to review. Only this channel's members can read it."
 NOT_SAVED = {  # what the person who saved is told, privately
     "saver": "Only someone in this workspace and in this channel can save its messages.",
@@ -200,6 +202,12 @@ def holding(channel: str, message: dict) -> list[str]:
     day = datetime.fromtimestamp(float(ts), timezone.utc).strftime("%Y-%m-%d")
     threads = {t for t in (ts, str(message.get("thread_ts") or "")) if TS.fullmatch(t)}
     return sorted({f"slack-{channel}-{t}" for t in threads} | {f"slack-{channel}-{day}"})
+
+
+def question_of(text: str, bot: str | None) -> str:
+    """A mention's question: its text without the mentions of the bot itself (C2d)."""
+    mention = re.compile(rf"<@{re.escape(bot)}(\|[^>]*)?>") if bot and USER.fullmatch(bot) else None
+    return re.sub(r"\s+", " ", mention.sub(" ", text or "") if mention else text or "").strip()
 
 
 def capture_action(text: str) -> str | None:

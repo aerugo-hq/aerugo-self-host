@@ -196,6 +196,43 @@ def test_a_team_admin_confirms_capture_only_once_the_channel_asked_for_it(page):
         page.request.delete(f"{base}/{name}", headers={"Origin": WEB})
 
 
+def test_a_team_admin_chooses_how_slack_asks_are_answered(page):
+    """C2d: a Slack connection's Answers panel starts off; the team admin picks one of the team's models and what may
+    reach Slack, and the choice is kept; with nothing allowed to reach Slack, there's nothing to save."""
+    sign_in(page, "alice")
+    tag = uuid.uuid4().hex[:6].upper()
+    name, channel = f"e2e-answers-{tag.lower()}", f"CE2A{tag}"
+    write, base = {"Origin": WEB, "Content-Type": "application/json"}, f"{WEB}/api/workspaces/payments"
+    page.request.post(f"{base}/models", headers=write, data=json.dumps({  # 201, or 409 when smoke already registered it
+        "name": "smoke-fake", "provider": "openai_compatible", "model": "fake", "base_url": "http://fake-llm:8080/v1", "api_key": "unused"}))
+    made = page.request.post(f"{base}/connections/slack", headers=write, data=json.dumps({
+        "name": name, "api_base": "http://fake-llm:8080/slack/api", "bot_token": "xoxb-smoke-slack-token", "channels": [channel],
+        "history_days": 3650, "every_minutes": 10080}))
+    assert made.status == 201, made.text()
+    try:
+        page.goto(f"{WEB}/#/admin/sources")
+        row = panel(page, "Connections").get_by_role("row").filter(has_text=name)
+        row.get_by_role("button", name="Answers", exact=True).click()
+        group = page.get_by_role("group", name=f"Answers for {name}")
+        model = group.get_by_label("Model")
+        expect(model).to_have_value("", timeout=30_000)  # off until the team's admin chooses
+        expect(group.get_by_label("public")).to_be_checked()
+        expect(group.get_by_label("internal")).to_be_checked()
+        expect(group.get_by_label("confidential")).not_to_be_checked()
+        model.select_option("smoke-fake")
+        group.get_by_role("button", name="Save").click()
+        expect(page.get_by_text("Slack asks are answered through smoke-fake")).to_be_visible(timeout=30_000)
+        row.get_by_role("button", name="Answers", exact=True).click()
+        expect(group.get_by_label("Model")).to_have_value("smoke-fake", timeout=30_000)
+        group.get_by_label("public").uncheck()
+        group.get_by_label("internal").uncheck()
+        expect(group.get_by_role("button", name="Save")).to_be_disabled()
+        kept = page.request.get(f"{base}/connections/{name}/answers").json()
+        assert kept == {"model": "payments/smoke-fake", "classifications": ["internal", "public"]}, kept
+    finally:
+        page.request.delete(f"{base}/connections/{name}", headers={"Origin": WEB})
+
+
 def test_a_team_admin_opens_the_microsoft_365_form(page):
     sign_in(page, "alice")
     open_connector(page, "Microsoft 365")

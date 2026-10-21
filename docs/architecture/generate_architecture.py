@@ -122,7 +122,8 @@ p = Page("2. Components", "Inside Aerugo: the parts, layer by layer",
          "it with its permissions, services reason over it, and surfaces put it in front of people. The column on the "
          "right runs through every layer.")
 layers = [
-    ("Surfaces: where people meet it", 130, [("Web app (Next.js)", S_BUILT), ("Teams and Slack bots", S_NEW),
+    ("Surfaces: where people meet it", 130, [("Web app (Next.js)", S_BUILT), ("Slack bot: asks, capture, saves", S_BUILT),
+                                              ("Teams bot", S_NEW),
                                               ("Frontline mobile view", S_NEW), ("IDE extension, pull-request bot", S_NEW),
                                               ("MCP server, APIs, SDKs", S_BUILT)]),
     ("Services: what it does", 290, [("Answers (search, Ask)", S_BUILT), ("Architect agent, playbooks", S_NEW),

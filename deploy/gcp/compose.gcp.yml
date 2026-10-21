@@ -113,6 +113,11 @@ services:
     restart: unless-stopped
     environment: *prod-env
 
+  answers:   # C2d: Slack asks, apart from the worker, as the API's own database role
+    image: ${KL_REGISTRY}/api:${KL_IMAGE_TAG}
+    restart: unless-stopped
+    environment: *prod-env
+
   mcp:
     image: ${KL_REGISTRY}/api:${KL_IMAGE_TAG}
     restart: unless-stopped

@@ -54,14 +54,20 @@ OVERRAN_EXIT = 3  # the worker's exit status when a job ran past its limit
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("kl.worker")
 
+# C2d: jobs someone is waiting on run in their own lane (kl.answers_lane), as the API's role, so row-level security
+# applies to them as to the API, and a long sync never holds them up. This worker never claims them: it runs as
+# kl_ingest, which row-level security doesn't narrow to a person.
+LANE_KINDS = ("slack.ask",)
 CLAIM_SQL = """
 UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_at = now(),
                 lease_until = now() + %s * interval '1 second', updated_at = now()
 WHERE id = (SELECT id FROM jobs
-            WHERE status = 'queued' AND run_after <= now()
+            WHERE status = 'queued' AND run_after <= now() AND {kinds}
             ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
 RETURNING id, org_id, kind, payload, attempts, max_attempts
 """
+WORKER_CLAIM_SQL = CLAIM_SQL.format(kinds="NOT (kind = ANY(%s))")
+LANE_CLAIM_SQL = CLAIM_SQL.format(kinds="kind = ANY(%s)")
 
 # C1: a running job's lease. The claim's attempt number fences each run: a worker whose lease ran out and whose job was
 # taken over can neither renew it nor settle it, so a run that comes back late changes nothing.
@@ -786,8 +792,8 @@ class Lease:
     listing that never ends), and a stuck call can't be stopped from another thread: the lease settles the job as a
     failed attempt and ends the worker's process, which every deployment starts again."""
 
-    def __init__(self, job: dict) -> None:
-        self.job, self.done = job, threading.Event()
+    def __init__(self, job: dict, dsn: str = INGEST_DB) -> None:
+        self.job, self.dsn, self.done = job, dsn, threading.Event()
         self.limit = LIMITS.get(job["kind"], DEFAULT_LIMIT_MINUTES)
         self.thread = threading.Thread(target=self._renew, name=f"lease-{job['id']}", daemon=True)
 
@@ -800,7 +806,7 @@ class Lease:
         self.thread.join(timeout=5)
 
     def _connect(self) -> psycopg.Connection:
-        conn = psycopg.connect(INGEST_DB, autocommit=True)
+        conn = psycopg.connect(self.dsn, autocommit=True)
         conn.execute("SELECT set_config('kl.org_id', %s, false)", (str(self.job["org_id"]),))
         conn.execute("SET lock_timeout = '10s'")  # never wait long on a row the stuck job holds
         return conn
@@ -840,10 +846,10 @@ class Lease:
             os._exit(OVERRAN_EXIT)
 
 
-def run(conn, job) -> None:
-    handler = HANDLERS.get(job["kind"])
+def run(conn, job, handlers: dict | None = None, dsn: str = INGEST_DB) -> None:
+    handler = (HANDLERS if handlers is None else handlers).get(job["kind"])
     started = time.monotonic()
-    with Lease(job):
+    with Lease(job, dsn):
         try:
             with telemetry.span("job", kind=job["kind"], attempt=job["attempts"]):
                 if handler is None:
@@ -944,7 +950,7 @@ def main() -> None:
                             log.warning("originals not encrypted: %s", type(e).__name__)
                         next_schedule = time.monotonic() + SCHEDULER_SECONDS
                     with conn.transaction():
-                        job = conn.execute(CLAIM_SQL, (LEASE_SECONDS,)).fetchone()
+                        job = conn.execute(WORKER_CLAIM_SQL, (LEASE_SECONDS, list(LANE_KINDS))).fetchone()
                     if job is None:
                         time.sleep(POLL_SECONDS)
                         continue
