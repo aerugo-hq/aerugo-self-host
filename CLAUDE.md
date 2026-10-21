@@ -2338,10 +2338,71 @@ CI on pull request 81: unit 227 passed; smoke 187 passed, 17 skipped, 0 failed; 
 94%, MRR 0.81), the retailer (ana's Slack ask answered privately with only sources her own Ask cites; Recall@10 100%, MRR
 0.83), its pointer (MRR 0.84) and live-only (MRR 0.63) runs, the Atlas, and every team's set at their baselines; no leak
 and no regression. C2d merged (pull request 81).
+F6's evidence by its text (found by C2d's proof on a long-lived stack, its own item, 2026-10-21). F6 snapshotted each
+evidence document's `content_hash` at confirmation and sent a unit back for review when it moved, but a synced
+document's `content_hash` is its source's version, so a version that moved with the same text counted as a change: the
+Jira comment visibility item (pull request 76) made Jira's version `jira.version_of`, every issue was read once more
+under it, and every confirmed unit citing a Jira issue went stale, its text unchanged (eight on C2d's stack:
+recall-decision, recall-reports, flash-sale-lesson, and others). Migration 0070: beside the versions a confirmation
+snapshots (`evidence_hashes`, unchanged), it keeps the hash of each document's text (`evidence_texts`, from
+`kl.evidence_texts(ids)`: per document in the evidence's order, the SHA-256 of each section's heading and body, in
+order, as a JSON array, for an indexed document; NULL for one that keeps no text, a pointer or live only, F11, or none
+at all, or one that's gone). The pass (`lifecycle.evidence_changed`) compares a document's text where there's text both
+then and now, and its version otherwise: a version that moves with the same text changes nothing; a pointer, which keeps
+no text, still goes back when its version moves; a document that's gone has neither (its version is ''); and switching a
+connection between indexed and pointers or live only reads the same version and sends nothing back. A confirmed unit
+whose evidence didn't change but whose snapshot is behind it (a version that moved with the same text, or text a
+document keeps now at the same version) has its snapshot moved forward, with no event (`lifecycle.snapshot_behind`,
+guarded so a confirmation meanwhile wins), so a later comparison by version alone, once its connection keeps pointers,
+starts from the evidence as it is. `kl.evidence_texts` runs as its caller, so a confirmation reads it under the
+curator's row-level security (who reads every piece of the unit's evidence, F1) and the worker within its org. The whole
+document, not the cited section: F6's meaning stays "a piece of its evidence changed", and the retailer's truth has a
+page change send back every unit citing it, whatever section each cites. The same migration gives existing confirmed
+units a fair snapshot: one whose versions still match its documents' (unchanged since it was confirmed, as far as
+versions tell) takes their texts, so an upgrade that reads every document again under a new version sends none back (and
+the pass then moves its versions forward); one whose versions already moved gets none and goes stale at the next pass,
+as it would have; a unit already stale stays stale (a recorded change, for its owners to confirm). Decided: a pointer
+Jira issue's units still go back once for pull request 76's version on an upgrade (a pointer has only its version), and
+a unit confirmed before F6's snapshots still has none (its cadence decides, as before). Found by CI and the proof, on
+this pull request's earlier versions: the first kept one fingerprint per document (the text hash, or the version for a
+pointer), so switching the retailer's connections to pointers (`make eval-company-pointer`) changed every fingerprint's
+kind and sent 47 of its 48 units back, the text and versions unchanged; the second kept both snapshots but never moved
+them forward, so on the upgraded stack the pointer run sent the 10 upgraded units back (13 of 48 stale), their texts
+having matched through the upgrade while a pointer compares the pre-upgrade versions. Smoke:
+`a_unit_goes_back_for_review_only_when_its_evidences_text_changes` (two Jira issues, a confirmed unit on each: Jira
+marks both updated with the same text, a full read reads both again, and both stay confirmed through a lifecycle pass
+begun after it; one issue's text changes and goes stale, saying its evidence changed, while the other's version moves
+again with the same text and stays confirmed; with the first confirmed again, the connection switches to pointers and
+both stay confirmed through a pass, the second only because its snapshot moved forward twice; then, as pointers, one
+issue's version alone moving and the other leaving Jira send both back). Unit: `tests/test_lifecycle.py` gains 3 (a
+version moving with the same text and a changed text; without text then and now, the version decides: a switch to
+pointers, a pointer's move, a document gone, a unit confirmed before text snapshots; and which snapshots move forward).
+Red first: against main's lifecycle the check failed ("a version that moved with the same text sent a unit back for
+review: stale, stale"); with the rule comparing texts whenever either side has one (the first version's), the switch's
+unit test failed (5 passed) and, built into the worker, so did the check ("switching to pointers, the version unchanged,
+sent a unit back for review"); with no snapshot moving forward, built into the worker, it failed ("switching to
+pointers, the versions unchanged, sent a unit back for review: confirmed, stale"); each restored (`cmp`) and green. The
+upgrade, by hand, on a fresh stack built from main (a7823f8) with the retailer loaded: every Jira issue made to look
+read, and every confirmed unit citing one confirmed, under an older version (a prefix on each version, the text
+unchanged); on main, a full read of the five Jira connections sent all 10 of those units back for review; planted again,
+the worker stopped, the stack upgraded to this branch (provision applied 0070, giving all 10 their texts), the same read
+sent none back, and a pass moved all 10 versions forward (the units set again to that state after the earlier versions'
+runs). Proof, on that stack of its own (`klf6t`, CI's settings: the example `.env`, an empty `.secrets/`): `make unit`
+230 passed; the new check and F6's own check passed; `make eval-company`, `make eval-company-pointer`, and `make
+eval-company-live` on the branch: everyone opening exactly what the truth says, no leak, exactly the truth's 3 of 48
+units stale in each mode, the right unit first for 15 of 26 in each, no regression (indexed and pointers Recall@10 100%,
+Ask citing a right page for 27 of 27; live only Recall@10 99%, MRR 0.64, Ask right for 25 of 27, at its baseline; the
+indexed and pointer MRR read 0.93, above their baselines' 0.83 and 0.84, since this stack never ran the full smoke suite
+or the scenario, whose pages compete; not recorded); and main's retailer run before the upgrade, exactly 3 stale, no
+leak. Not run: the full smoke suite, the other evaluation sets, the browser tests, and the provider's tests (CI's run on
+the pull request; nothing the web app or the provider use changed). Not built: comparing only the cited section; each
+document's text hash kept at its sync, so the pass reads a column instead of hashing every confirmed unit's evidence
+each minute (the ponytail note in `lifecycle.py`, once an org holds hundreds of thousands of units); and bringing back
+units that already went stale this way on a long-lived stack (their owners confirm them again).
 C1a, Teams channels as a source, with capture (the plan approved 2026-10-21 with three decisions: Microsoft's signed
 Bot Framework token stands in for invariant 13's HMAC, repeats refused and everything acted on read back; a question
 asked of the bot directly is the recorded exception, C1b's; and the team owner's consent to the app is capture's first
-key). A `teams` connection (migration 0070 adds the kind; `POST .../connections/teams`): the tenant, the company's own
+key). A `teams` connection (migration 0071 adds the kind; `POST .../connections/teams`): the tenant, the company's own
 Teams app (one Entra app registration with a certificate, never a client secret, which is also its Azure Bot's id), the
 teams it may read by id (`team_ids`, never `teams`: that's GitHub's routing map, `team_for`), optional channels and a
 history window, and the Bot Framework address its bot posts through (`bot_service`, allowlisted). `kl/teams.py`
@@ -2424,8 +2485,8 @@ three, F5a (questions, gaps, and corrections), F7 (question sets per team), and 
 answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
 loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
 fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and C2d (the bot
-answers privately, as the asker), which completes C2, and C1a (Teams channels as a source, with capture); next, C1b
-(the Teams bot's private answers and Save to Aerugo), C3, and C4.
+answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
+source, with capture); next, C1b (the Teams bot's private answers and Save to Aerugo), C3, and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

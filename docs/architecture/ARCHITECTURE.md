@@ -216,7 +216,8 @@ extraction (F2), a team's own model proposing units from its pages and tickets, 
 consolidation (F3), copies linked and contradictions sent to their owners, never overwritten; and answers from units
 (F4), the units that answer a question leading Ask's sources with their steps and other views; and who is asking
 (F8), each answer fitted to the asker's role and place from the directory, contacts resolved to a role's current
-holder; and lifecycle (F6), units going stale when their review comes due or their evidence changes, retired at
+holder; and lifecycle (F6), units going stale when their review comes due or the text of their evidence changes
+(a version that moves alone changes nothing, but for a pointer, which keeps no text), retired at
 their end date, each change recorded, and their owners told in the app; and the learning loop's first half (F5a),
 what people ask kept for a month, what several of them weren't answered well shown to their teams' curators as gaps,
 never who asked, and corrections sent to a unit's owners; and question sets per team (F7), each team's questions in its
