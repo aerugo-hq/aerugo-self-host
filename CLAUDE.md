@@ -2339,43 +2339,62 @@ evidence document's `content_hash` at confirmation and sent a unit back for revi
 document's `content_hash` is its source's version, so a version that moved with the same text counted as a change: the
 Jira comment visibility item (pull request 76) made Jira's version `jira.version_of`, every issue was read once more
 under it, and every confirmed unit citing a Jira issue went stale, its text unchanged (eight on C2d's stack:
-recall-decision, recall-reports, flash-sale-lesson, and others). Migration 0069: `kl.evidence_fingerprints(ids)`, one
-definition of what a unit's evidence snapshot holds, a fingerprint per document in the evidence's order: the SHA-256 of
-the text it keeps (each section's heading and body, in order, as a JSON array) when it's indexed; its version when it
-keeps no text (a pointer or live only, F11, or an indexed document with no sections); '' for one that's gone, as
-before. It runs as its caller, so a confirmation reads it under the curator's row-level security (who reads every piece
-of the unit's evidence, F1) and the worker within its org. Confirming (`lifecycle.SNAPSHOT`) and the pass
-(`ACTIVE_SQL`, for confirmed units only) both call it; `transition` is unchanged. The whole document, not the cited
-section: F6's meaning stays "a piece of its evidence changed", and the retailer's truth has a page change send back
-every unit citing it, whatever section each cites. The same migration gives existing confirmed units a fair snapshot:
-one whose snapshot still equals its documents' versions (unchanged since it was confirmed, as far as versions tell)
-takes their fingerprints, so an upgrade that reads every document again under a new version sends none back; one whose
-versions already moved keeps them and goes stale at the next pass, as it would have; a unit already stale stays stale
-(a recorded change, for its owners to confirm). Decided: a pointer keeps the version comparison (it has nothing else),
-so a pointer Jira issue's units still go back once for pull request 76's version on an upgrade, and whenever Jira marks
-the issue updated; a unit confirmed before F6's snapshots still has none (its cadence decides, as before). Smoke:
+recall-decision, recall-reports, flash-sale-lesson, and others). Migration 0070: beside the versions a confirmation
+snapshots (`evidence_hashes`, unchanged), it keeps the hash of each document's text (`evidence_texts`, from
+`kl.evidence_texts(ids)`: per document in the evidence's order, the SHA-256 of each section's heading and body, in
+order, as a JSON array, for an indexed document; NULL for one that keeps no text, a pointer or live only, F11, or none
+at all, or one that's gone). The pass (`lifecycle.evidence_changed`) compares a document's text where there's text both
+then and now, and its version otherwise: a version that moves with the same text changes nothing; a pointer, which keeps
+no text, still goes back when its version moves; a document that's gone has neither (its version is ''); and switching a
+connection between indexed and pointers or live only reads the same version and sends nothing back. A confirmed unit
+whose evidence didn't change but whose snapshot is behind it (a version that moved with the same text, or text a
+document keeps now at the same version) has its snapshot moved forward, with no event (`lifecycle.snapshot_behind`,
+guarded so a confirmation meanwhile wins), so a later comparison by version alone, once its connection keeps pointers,
+starts from the evidence as it is. `kl.evidence_texts` runs as its caller, so a confirmation reads it under the
+curator's row-level security (who reads every piece of the unit's evidence, F1) and the worker within its org. The whole
+document, not the cited section: F6's meaning stays "a piece of its evidence changed", and the retailer's truth has a
+page change send back every unit citing it, whatever section each cites. The same migration gives existing confirmed
+units a fair snapshot: one whose versions still match its documents' (unchanged since it was confirmed, as far as
+versions tell) takes their texts, so an upgrade that reads every document again under a new version sends none back (and
+the pass then moves its versions forward); one whose versions already moved gets none and goes stale at the next pass,
+as it would have; a unit already stale stays stale (a recorded change, for its owners to confirm). Decided: a pointer
+Jira issue's units still go back once for pull request 76's version on an upgrade (a pointer has only its version), and
+a unit confirmed before F6's snapshots still has none (its cadence decides, as before). Found by CI and the proof, on
+this pull request's earlier versions: the first kept one fingerprint per document (the text hash, or the version for a
+pointer), so switching the retailer's connections to pointers (`make eval-company-pointer`) changed every fingerprint's
+kind and sent 47 of its 48 units back, the text and versions unchanged; the second kept both snapshots but never moved
+them forward, so on the upgraded stack the pointer run sent the 10 upgraded units back (13 of 48 stale), their texts
+having matched through the upgrade while a pointer compares the pre-upgrade versions. Smoke:
 `a_unit_goes_back_for_review_only_when_its_evidences_text_changes` (two Jira issues, a confirmed unit on each: Jira
 marks both updated with the same text, a full read reads both again, and both stay confirmed through a lifecycle pass
-begun after it; one issue's text changes and the other leaves Jira, and both go stale, saying their evidence changed;
-as pointers, the version alone moving sends the unit back). Red first: against main's lifecycle the check failed ("a
-version that moved with the same text sent a unit back for review: stale, stale"); with the function replaced as owner
-to hash a pointer's empty sections too, it failed ("a pointer's version moved and its unit stayed confirmed"), the
-function then restored exactly (`pg_get_functiondef` compared) and the check green. The upgrade, by hand, on a stack
-built from main with the retailer loaded: every Jira issue made to look read, and every confirmed unit citing one
-confirmed, under an older version (a prefix on each version, the text unchanged); on main, a full read of the five
-Jira connections sent all 10 of those units back for review; planted again, the worker stopped, the stack upgraded to
-this branch (provision applied 0069, which re-snapshotted all 10 to text fingerprints), and the same read sent none
-back. Proof, on that stack of its own (`klf6t`, CI's settings: the example `.env`, an empty `.secrets/`), from main at
-1f98464: `make unit` 218 passed; the new check and F6's own check passed; `make eval-company` on main and again on the
-branch after the upgrade: everyone opening exactly what the truth says, no leak, Recall@10 100% over 52 counted
-questions, Ask citing a right page for 27 of 27 and leading with a right unit for 15 of 26, exactly the truth's 3 of 48
-units stale, the truth's 1 gap, no regression (its MRR read 0.92, ten cases better than the baseline's 0.83, since this
-stack never ran the full smoke suite or the scenario, whose pages compete; not recorded). Not run: the full smoke
-suite, the other evaluation sets, the browser tests, and the provider's tests (CI's run on the pull request; nothing
-the web app or the provider use changed). Not built: comparing only the cited section; each document's text hash kept
-at its sync, so the pass reads a column instead of hashing every confirmed unit's evidence each minute (the ponytail
-note in `lifecycle.py`, once an org holds hundreds of thousands of units); and bringing back units that already went
-stale this way on a long-lived stack (their owners confirm them again).
+begun after it; one issue's text changes and goes stale, saying its evidence changed, while the other's version moves
+again with the same text and stays confirmed; with the first confirmed again, the connection switches to pointers and
+both stay confirmed through a pass, the second only because its snapshot moved forward twice; then, as pointers, one
+issue's version alone moving and the other leaving Jira send both back). Unit: `tests/test_lifecycle.py` gains 3 (a
+version moving with the same text and a changed text; without text then and now, the version decides: a switch to
+pointers, a pointer's move, a document gone, a unit confirmed before text snapshots; and which snapshots move forward).
+Red first: against main's lifecycle the check failed ("a version that moved with the same text sent a unit back for
+review: stale, stale"); with the rule comparing texts whenever either side has one (the first version's), the switch's
+unit test failed (5 passed) and, built into the worker, so did the check ("switching to pointers, the version unchanged,
+sent a unit back for review"); with no snapshot moving forward, built into the worker, it failed ("switching to
+pointers, the versions unchanged, sent a unit back for review: confirmed, stale"); each restored (`cmp`) and green. The
+upgrade, by hand, on a fresh stack built from main (a7823f8) with the retailer loaded: every Jira issue made to look
+read, and every confirmed unit citing one confirmed, under an older version (a prefix on each version, the text
+unchanged); on main, a full read of the five Jira connections sent all 10 of those units back for review; planted again,
+the worker stopped, the stack upgraded to this branch (provision applied 0070, giving all 10 their texts), the same read
+sent none back, and a pass moved all 10 versions forward (the units set again to that state after the earlier versions'
+runs). Proof, on that stack of its own (`klf6t`, CI's settings: the example `.env`, an empty `.secrets/`): `make unit`
+230 passed; the new check and F6's own check passed; `make eval-company`, `make eval-company-pointer`, and `make
+eval-company-live` on the branch: everyone opening exactly what the truth says, no leak, exactly the truth's 3 of 48
+units stale in each mode, the right unit first for 15 of 26 in each, no regression (indexed and pointers Recall@10 100%,
+Ask citing a right page for 27 of 27; live only Recall@10 99%, MRR 0.64, Ask right for 25 of 27, at its baseline; the
+indexed and pointer MRR read 0.93, above their baselines' 0.83 and 0.84, since this stack never ran the full smoke suite
+or the scenario, whose pages compete; not recorded); and main's retailer run before the upgrade, exactly 3 stale, no
+leak. Not run: the full smoke suite, the other evaluation sets, the browser tests, and the provider's tests (CI's run on
+the pull request; nothing the web app or the provider use changed). Not built: comparing only the cited section; each
+document's text hash kept at its sync, so the pass reads a column instead of hashing every confirmed unit's evidence
+each minute (the ponytail note in `lifecycle.py`, once an org holds hundreds of thousands of units); and bringing back
+units that already went stale this way on a long-lived stack (their owners confirm them again).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's

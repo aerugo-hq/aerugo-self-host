@@ -7479,7 +7479,7 @@ def knowledge_units_age_and_their_owners_are_told():
 
 @check
 def a_unit_goes_back_for_review_only_when_its_evidences_text_changes():
-    """F6, evidence by its text: a confirmed unit goes back for review when the text Aerugo keeps from a piece of its evidence changes, or the piece is gone, never when only the source's version moves (Jira marking an issue updated with the same text, or a new version format reading every issue again); a pointer keeps no text, so there its version is all there is to compare, and a version that moves sends its unit back"""
+    """F6, evidence by its text: a confirmed unit goes back for review when the text Aerugo keeps from a piece of its evidence changes, or the piece is gone, never when only the source's version moves (Jira marking an issue updated with the same text, or a new version format reading every issue again); switching the connection to pointers, the version unchanged, sends nothing back; and a pointer keeps no text, so there its version is all there is to compare, and a version that moves sends its unit back"""
     from .authz import fga
     tag = secrets.token_hex(3).upper()
     project, name, topic = f"FTX{tag}", f"ftx-{tag.lower()}", f"smoke-f6-text-{tag.lower()}"
@@ -7521,6 +7521,11 @@ def a_unit_goes_back_for_review_only_when_its_evidences_text_changes():
     def full_read() -> None:
         assert api("POST", f"/v1/workspaces/payments/connections/{name}/refresh", "alice").status_code == 202
 
+    def lifecycle_ran() -> None:  # a lifecycle pass that began after now has finished
+        since = owner("SELECT now() AS at")[0]["at"]
+        assert until(lambda: owner("SELECT 1 FROM kl.jobs WHERE kind = 'units.lifecycle' AND status = 'done' AND created_at > %s", since)), \
+            "no lifecycle pass ran"
+
     def unit(n: int, text: str) -> str:
         r = api("POST", "/v1/workspaces/payments/units", "alice", json={
             "kind": "fact", "topic": f"{topic}-{n}", "title": f"Cutover {n} {tag}", "text": text, "evidence": [{"document": keys[n - 1]}]})
@@ -7546,27 +7551,33 @@ def a_unit_goes_back_for_review_only_when_its_evidences_text_changes():
         jira(2)  # Jira marks both issues updated; the text Aerugo keeps is the same
         full_read()
         assert until(lambda: all(v[0] != before[k][0] for k, v in versions().items())), "the full read never read the issues again"
-        since = owner("SELECT now() AS at")[0]["at"]
-        assert until(lambda: owner("SELECT 1 FROM kl.jobs WHERE kind = 'units.lifecycle' AND status = 'done' AND created_at > %s", since)), \
-            "no lifecycle pass ran after the issues were read again"
+        lifecycle_ran()
         assert (status(cutover), status(rollback)) == ("confirmed", "confirmed"), \
             f"a version that moved with the same text sent a unit back for review: {status(cutover)}, {status(rollback)}"
 
-        jira(3, cutover="Sunday", both=False)  # one issue's text changes; the other is gone from Jira
+        before = versions()
+        jira(3, cutover="Sunday")  # one issue's text changes; the other's version moves again, its text the same
         full_read()
-        assert until(lambda: (status(cutover), status(rollback)) == ("stale", "stale")), \
-            f"a changed or deleted issue left its unit confirmed: {status(cutover)}, {status(rollback)}"
-        assert why(cutover) == why(rollback) == "its evidence changed since it was confirmed", (why(cutover), why(rollback))
+        assert until(lambda: status(cutover) == "stale"), "a changed issue left its unit confirmed"
+        assert why(cutover) == "its evidence changed since it was confirmed", why(cutover)
+        assert until(lambda: versions()[keys[1]][0] != before[keys[1]][0]), "the full read never read the other issue again"
+        lifecycle_ran()
+        assert status(rollback) == "confirmed", "a version that moved again with the same text sent a unit back for review"
 
+        assert api("POST", f"/v1/units/{cutover}/confirm", "alice").status_code == 200  # confirmed on its new text
         r = api("PATCH", f"/v1/workspaces/payments/connections/{name}", "alice", json={"storage": "pointer"})
         assert r.status_code == 200 and "storage" in r.json()["changed"], f"{r.status_code} {r.text[:200]}"
-        assert until(lambda: versions().get(keys[0], (None, None))[1] == "pointer"), "the switch to pointers never landed"
-        assert api("POST", f"/v1/units/{cutover}/confirm", "alice").status_code == 200
-        jira(4, cutover="Sunday", both=False)  # the same text again, a new version: a pointer has only its version to compare
+        assert until(lambda: all(storage == "pointer" for _, storage in versions().values())), "the switch to pointers never landed"
+        lifecycle_ran()  # rollback was confirmed two versions ago: only a snapshot moved forward with its text matches now
+        assert (status(cutover), status(rollback)) == ("confirmed", "confirmed"), \
+            f"switching to pointers, the versions unchanged, sent a unit back for review: {status(cutover)}, {status(rollback)}"
+
+        jira(4, cutover="Sunday", both=False)  # as pointers: one issue's version moves with the same text; the other is gone
         full_read()
-        assert until(lambda: status(cutover) == "stale"), "a pointer's version moved and its unit stayed confirmed"
-        assert why(cutover) == "its evidence changed since it was confirmed", why(cutover)
-        print("      evidence by its text: a version alone moved nothing; a changed, a deleted, and a pointer's moved version went back for review")
+        assert until(lambda: (status(cutover), status(rollback)) == ("stale", "stale")), \
+            f"a pointer's moved version or a deleted issue left its unit confirmed: {status(cutover)}, {status(rollback)}"
+        assert why(cutover) == why(rollback) == "its evidence changed since it was confirmed", (why(cutover), why(rollback))
+        print("      evidence by its text: versions alone and a switch to pointers moved nothing; a changed text, a pointer's moved version, and a deleted issue went back for review")
     finally:
         api("DELETE", f"/v1/workspaces/payments/connections/{name}", "alice")
         owner("DELETE FROM kl.knowledge_units WHERE topic LIKE %s RETURNING id", f"{topic}%")
