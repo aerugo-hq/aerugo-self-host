@@ -72,7 +72,9 @@ came from.
   removes any proposal not yet confirmed that came from it. A proposal a curator already confirmed stays, and goes back
   to them for review once its evidence changes. Removing the reaction later doesn't bring the message back.
 - **Turning it off.** `/aerugo capture off` in the channel (by its creator or a workspace admin), or Turn off in the
-  Capture panel. Nothing more is proposed from it; what was proposed earlier stays for the curators.
+  Capture panel. Nothing more is proposed from it; what was proposed earlier stays for the curators. A re-sync or an
+  edit of the connection keeps each channel's capture as it was; a channel the bot leaves loses it, and needs both keys
+  again if the bot comes back.
 - **Sensitive messages are never proposed from,** captured or not: they're never kept at all (above).
 - **Set up in the Slack app:**
 

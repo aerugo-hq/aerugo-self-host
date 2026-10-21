@@ -4959,6 +4959,9 @@ def a_slack_channel_is_captured_only_with_both_keys_and_its_marks_honored():
         assert api("POST", f"{path}/capture/{channel}", "alice", json={"action": "confirm"}).json()["capture"] == "on"
         assert until(lambda: len(posted()) == 1), "the channel wasn't told capture started"
         assert "Payments" in posted()[0]["text"] and ":no_entry_sign:" in posted()[0]["text"], posted()
+        assert api("POST", path + "/refresh", "alice").status_code in (200, 202)  # a re-sync discovers the channels again
+        assert until(lambda: jobs_done("connection.discover")[0] == 0 and jobs_done("connection.discover")[1] >= 2)
+        assert capture() == "on" and len(posted()) == 1, "a re-sync turned capture off without telling anyone"
 
         assert until(lambda: proposals(thread) > 0 and proposals(day) > 0, 240), "nothing was proposed from the captured channel"
         assert proposals(other) == 0, "a channel no one captured was extracted from"
