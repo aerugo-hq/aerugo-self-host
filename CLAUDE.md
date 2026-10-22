@@ -2472,6 +2472,10 @@ the fake's Bot Connector keeps every app's posts, so the retailer counts only it
 answering privately and Save to Aerugo (C1b); pointer and live-only modes for Teams; private and shared channels;
 incremental reads (each sync reads the window in full, as Slack's first did: simpler, and it follows deletions exactly);
 Graph's change notifications (the readers refresh carries membership changes); and the package's icons (the company's own).
+CI on pull request 83 first failed the team sets' gate: distribution's MRR fell from 1.00 to 0.83, its new question (eli's
+forklift, which waited on C1) found at #2; smoke 189 passed, 17 skipped, 0 failed, and the golden set, the scenario, the
+retailer (the forklift question new, `registers-down-leader` better), and the Atlas held their baselines. Distribution's
+entry was recorded from that run, a fresh stack in CI's order: the forklift question at #2, MRR 0.8333.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
