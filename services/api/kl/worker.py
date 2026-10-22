@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, capture, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, teams, teams_bot, telemetry, unity
+from . import alerting, capture, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, meetings, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, teams, teams_bot, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -39,6 +39,11 @@ CATALOG_IDENTITIES = {"dataplex": "google", "unity": "databricks", "glue": "aws"
 def source_kind_of(c: dict) -> str:
     """What a connection's documents are: a catalog's are its provider's (dataplex, unity, ...), every other its kind."""
     return (c["config"] or {})["provider"] if c["kind"] == "catalog" else c["kind"]
+
+
+def kinds_of(c: dict) -> list[str]:
+    """Every kind of document a connection writes: a Teams connection's meetings' transcripts too (C3a)."""
+    return [source_kind_of(c)] + ([meetings.SOURCE] if c["kind"] == "teams" else [])
 SCHEDULER_SECONDS = float(os.environ.get("KL_SCHEDULER_SECONDS", "60"))  # how often to look for stale ones
 FULL_SYNC_HOURS = float(os.environ.get("KL_FULL_SYNC_HOURS", "24"))  # how often a sync reads everything again (H6)
 
@@ -315,7 +320,8 @@ def handle_connection_discover(conn, job) -> dict:
         # A Teams channel is listed only once its team's owner consented to the app: that consent is capture's first key
         # (C1a, decided 2026-10-21), so a channel new to the connection arrives as requested, for the team's admin.
         first = "requested" if c["kind"] == "teams" else "off"
-        conn.execute("DELETE FROM connection_containers WHERE connection_id = %s", (cid,))
+        # A captured meeting (C3a) isn't discovered: its organizer opted it in, so it stays until capture ends
+        conn.execute("DELETE FROM connection_containers WHERE connection_id = %s AND container_kind <> 'meeting'", (cid,))
         for ct in found:
             was = captured.get(ct.external_id) or {}
             conn.execute(
@@ -351,7 +357,7 @@ def handle_connection_sync(conn, job) -> dict:
     # its allowed classifications include, decided where the classification is.
     media = lambda classification, team=c["workspace_id"]: media_for(conn, team, classification)
     results = sync_containers(conn, {**c, "media": media}, containers)
-    retired = retire_unlisted(conn, c, source_kind_of(c), [ct["external_id"] for ct in containers]) \
+    retired = sum(retire_unlisted(conn, c, kind, [ct["external_id"] for ct in containers]) for kind in kinds_of(c)) \
         if c["kind"] in OWNED_KINDS else 0  # a container it no longer reads keeps nothing (migration 0040)
     embedded = embed_missing(conn)
     bronze = materialize_bronze(conn)
@@ -379,7 +385,8 @@ def handle_connection_refresh_readers(conn, job) -> dict:
     containers = conn.execute("SELECT external_id, default_ref FROM connection_containers "
                               "WHERE connection_id = %s AND selected ORDER BY external_id", (cid,)).fetchall()
     results = sync_containers(conn, {**c, "readers_only": True}, containers)
-    retired = retire_unlisted(conn, c, source_kind_of(c), [ct["external_id"] for ct in containers]) if c["kind"] in OWNED_KINDS else 0
+    retired = sum(retire_unlisted(conn, c, kind, [ct["external_id"] for ct in containers]) for kind in kinds_of(c)) \
+        if c["kind"] in OWNED_KINDS else 0
     with conn.transaction():
         conn.execute("UPDATE connections SET readers_refreshed_at = now(), updated_at = now() WHERE id = %s", (cid,))
         audit(conn, c["org_id"], "connection.refresh_readers", {"connection_id": str(cid), "reason": job["payload"].get("reason"),
@@ -411,9 +418,11 @@ def sync_containers(conn, c: dict, containers: list) -> list[dict]:
     elif c["kind"] == "microsoft":
         client = microsoft365.client_for(c)
         results = [microsoft365.sync_library(conn, c, client, ct["external_id"], since=ct.get("since")) for ct in containers]
-    elif c["kind"] == "teams":  # each channel through its team, kept as its container's default_ref
+    elif c["kind"] == "teams":  # each channel through its team (its default_ref); a meeting through its organizer (C3a)
         client = teams.client_for(c)
-        results = [teams.sync_channel(conn, c, client, ct["external_id"], ct.get("default_ref")) for ct in containers]
+        results = [meetings.sync_meeting(conn, c, client, ct["external_id"], ct.get("default_ref"))
+                   if teams.MEETING_CHAT.fullmatch(ct["external_id"]) else
+                   teams.sync_channel(conn, c, client, ct["external_id"], ct.get("default_ref")) for ct in containers]
     elif c["kind"] == "directory":
         results = [directory.sync_directory(conn, c, directory.client_for(c))]
     elif c["kind"] == "catalog":
@@ -684,7 +693,7 @@ def handle_import_retire(conn, job) -> dict:
 
 
 SOURCE_KINDS = {"github": ["github", "okf"], "google": ["gdrive"], "jira": ["jira"], "confluence": ["confluence"],
-                "slack": ["slack"], "microsoft": ["microsoft"], "notion": ["notion"], "teams": ["teams"],
+                "slack": ["slack"], "microsoft": ["microsoft"], "notion": ["notion"], "teams": ["teams", "meeting"],
                 "catalog": sorted(CATALOGS)}  # what each kind of connection's documents are
 
 
@@ -700,7 +709,7 @@ def handle_connection_retire(conn, job) -> dict:
     result = {"unlinked": 0, "documents": 0, "tuples": 0, "secrets": 0}
     for ct in p["containers"]:
         rows = conn.execute(
-            """SELECT d.id, d.external_key,
+            """SELECT d.id, d.external_key, d.source_kind,
                       EXISTS (SELECT 1 FROM workspace_documents o WHERE o.document_id = d.id AND o.workspace_id <> %s) AS elsewhere
                FROM documents d JOIN workspace_documents wd ON wd.document_id = d.id AND wd.workspace_id = %s
                WHERE d.container_ref = %s AND d.source_kind = ANY(%s) AND d.connection_id IS NULL""",
@@ -717,6 +726,10 @@ def handle_connection_retire(conn, job) -> dict:
         with conn.transaction():
             result["unlinked"] += conn.execute("DELETE FROM workspace_documents WHERE workspace_id = %s AND document_id = ANY(%s)",
                                                (ct["workspace_id"], [r["id"] for r in rows])).rowcount
+            transcripts = [r["id"] for r in only_here if r["source_kind"] == meetings.SOURCE]
+            if transcripts:  # a meeting's units, confirmed or not, never outlive its transcripts (C3a)
+                conn.execute("DELETE FROM unit_perspectives WHERE evidence && %s::uuid[]", (transcripts,))
+                conn.execute("DELETE FROM knowledge_units WHERE evidence && %s::uuid[]", (transcripts,))
             result["documents"] += conn.execute("DELETE FROM documents WHERE id = ANY(%s)", ([r["id"] for r in only_here],)).rowcount
         result["tuples"] += len(doomed)
     if p["kind"] == "catalog":  # the owners it said its assets have (S7); the assets stay, as pushed lineage's do
@@ -739,6 +752,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "slack.save": capture.save,  # C2c
             "teams.notice": teams_bot.notice, "teams.exclude": teams_bot.exclude,  # C1a
             "teams.save": teams_bot.save,  # C1b
+            "meetings.command": meetings.command, "meetings.notice": meetings.notice, "meetings.stop": meetings.stop,  # C3a
             "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,

@@ -10,7 +10,9 @@ never stores (`checked`): a reply that isn't the units F1 accepts, a sentence or
 doesn't state (the claim checker, H4's numbers and negations included), and anything about one person's health,
 performance, discipline, or pay (the sensitive gate). The reply is untrusted: readers, owner, trust, and status are the
 platform's, and a person confirms each unit before anything relies on it. A changed document's unconfirmed proposals
-are replaced; a unit someone confirmed stays, for F6's review.
+are replaced; a unit someone confirmed stays, for F6's review. A long document is sent in parts (C3a: a meeting's
+transcript runs long), each its own call within the budget; a meeting's transcript proposes decisions, lessons, and
+facts alone.
 """
 from __future__ import annotations
 
@@ -45,8 +47,11 @@ SYSTEM_PROMPT = (
     '"scope": {"places": [], "roles": []}}]}. A procedure\'s structure is {"steps": [{"text": "..."}]}; a contact\'s '
     '{"role": "...", "reach": "..."}; a definition\'s {"term": "..."}; other kinds leave it empty.')
 CHAT_SOURCES = ("slack", "teams", "meeting")  # never sent until their channels opt in (C1, C2)
-MAX_SECTIONS = 40        # sections sent per document: the claim checker's marks go to [99]
-MAX_PROMPT_CHARS = 12000  # ponytail: a long document is cut at this; send it in parts if long documents matter
+MAX_SECTIONS = 40        # sections sent per call: the claim checker's marks go to [99]
+MAX_PROMPT_CHARS = 12000  # characters sent per call; a longer document is sent in parts
+MAX_PARTS = 6            # ponytail: a document past six parts (about 90 minutes of a meeting) is cut there
+MEETING_KINDS = ("decision", "lesson", "fact")  # what a meeting's transcript proposes (C3a: no action items)
+MEETING_NOTE = "This document is a meeting's transcript: propose only decisions, lessons, and facts, never action items."
 MAX_UNITS = 10           # proposals kept per document
 MAX_DOCUMENTS = 25       # documents per pass; the worker queues another pass while there's more
 MAX_TOKENS = 1500
@@ -80,9 +85,10 @@ def extractable(source_kind: str, captured: bool = False) -> bool:
     return source_kind not in CHAT_SOURCES or captured
 
 
-def sections_of(title: str, chunks: list[tuple[str | None, str]]) -> dict[int, tuple[str, str]]:
-    """A document's chunks as numbered sections, consecutive chunks under one heading joined, at most MAX_SECTIONS and
-    MAX_PROMPT_CHARS in all: {number: (heading, text)}."""
+def parts_of(title: str, chunks: list[tuple[str | None, str]]) -> list[dict[int, tuple[str, str]]]:
+    """A document's chunks as numbered sections, consecutive chunks under one heading joined, in parts of at most
+    MAX_SECTIONS and MAX_PROMPT_CHARS each (a section longer than that is a part alone), at most MAX_PARTS of them:
+    [{number: (heading, text)}], numbered from 1 in each part, as each call's citations are."""
     merged: list[list[str]] = []
     for heading, body in chunks:
         name = (heading or title or "").strip()
@@ -90,17 +96,28 @@ def sections_of(title: str, chunks: list[tuple[str | None, str]]) -> dict[int, t
             merged[-1][1] += "\n" + (body or "")
         else:
             merged.append([name, body or ""])
-    out, size = {}, 0
-    for n, (name, body) in enumerate(merged[:MAX_SECTIONS], start=1):
+    parts: list[dict[int, tuple[str, str]]] = []
+    size = 0
+    for name, body in merged:
+        if not parts or len(parts[-1]) == MAX_SECTIONS or size + len(name) + len(body) > MAX_PROMPT_CHARS:
+            if len(parts) == MAX_PARTS:
+                break
+            parts.append({})
+            size = 0
         size += len(name) + len(body)
-        if size > MAX_PROMPT_CHARS and out:
-            break
-        out[n] = (name, body.strip())
-    return out
+        parts[-1][len(parts[-1]) + 1] = (name, body.strip())
+    return parts
 
 
-def prompt_for(title: str, sections: dict[int, tuple[str, str]]) -> str:
-    return f"Document: {title}\n\n" + "\n\n".join(f"[{n}] {heading}\n{body}" for n, (heading, body) in sections.items())
+def sections_of(title: str, chunks: list[tuple[str | None, str]]) -> dict[int, tuple[str, str]]:
+    """A document's first part: its sections up to MAX_SECTIONS and MAX_PROMPT_CHARS."""
+    parts = parts_of(title, chunks)
+    return parts[0] if parts else {}
+
+
+def prompt_for(title: str, sections: dict[int, tuple[str, str]], note: str = "") -> str:
+    return f"Document: {title}\n" + (f"{note}\n" if note else "") + "\n" + \
+        "\n\n".join(f"[{n}] {heading}\n{body}" for n, (heading, body) in sections.items())
 
 
 def topic_of(raw, title: str) -> str:
@@ -183,10 +200,18 @@ def checked(reply: str, title: str, sections: dict[int, tuple[str, str]], thresh
     return out
 
 
+def for_meeting(outcome: Outcome) -> Outcome:
+    """A meeting's transcript proposes decisions, lessons, and facts alone (C3a): anything else is dropped as invalid."""
+    kept = [p for p in outcome.kept if p.kind in MEETING_KINDS]
+    outcome.dropped["invalid"] += len(outcome.kept) - len(kept)
+    outcome.kept = kept
+    return outcome
+
+
 # ------------------------------------------------------------------ the worker's pass (kl_ingest, in one org)
 DUE_SQL = """
 SELECT t.workspace_id, w.slug, m.id AS model_id, m.name AS model_name, m.provider, m.model, m.base_url, m.credential_ref,
-       m.allowed_classifications, m.monthly_token_budget, d.id AS document_id, d.title, d.classification, d.content_hash,
+       m.allowed_classifications, m.monthly_token_budget, d.id AS document_id, d.title, d.classification, d.content_hash, d.source_kind,
        coalesce(f.suggested IS NOT NULL AND f.status IN ('open', 'reclassified'), false) AS personal
 FROM team_extraction t
 JOIN workspaces w            ON w.id = t.workspace_id
@@ -243,20 +268,35 @@ def run(conn, limit: int = MAX_DOCUMENTS) -> dict:
             spent.add(d["model_id"])
             alerting.signal(conn, "budget_exhausted", d["slug"])
             continue
-        sections = sections_of(d["title"], [(r["heading_path"], r["body"]) for r in conn.execute(CHUNKS_SQL, (d["document_id"],))])
-        if not sections:
+        parts = parts_of(d["title"], [(r["heading_path"], r["body"]) for r in conn.execute(CHUNKS_SQL, (d["document_id"],))])
+        if not parts:
             conn.execute(STATE_SQL, (d["workspace_id"], d["document_id"], d["content_hash"], d["model_id"], "done", 0, 0, 0, 0, 0))
             continue
-        try:  # no transaction is open: the model call holds no database lock (H5)
-            key = vault.get(d["credential_ref"]).get("api_key") if d["credential_ref"] else None
-            reply, usage = chat(d["provider"], d["model"], d["base_url"], key, SYSTEM_PROMPT, prompt_for(d["title"], sections), MAX_TOKENS)
-        except GatewayError as e:
-            log.warning("extraction for %s: %s", d["slug"], e)
+        meeting = d["source_kind"] == "meeting"
+        result, usage, failed = Outcome(), Counter(), False
+        for n, sections in enumerate(parts):  # each part its own call, the budget checked before each after the first
+            if n and d["monthly_token_budget"] and month_usage(conn, d["model_id"]) + usage["prompt_tokens"] + \
+                    usage["completion_tokens"] >= d["monthly_token_budget"]:
+                break
+            try:  # no transaction is open: the model call holds no database lock (H5)
+                key = vault.get(d["credential_ref"]).get("api_key") if d["credential_ref"] else None
+                reply, used = chat(d["provider"], d["model"], d["base_url"], key, SYSTEM_PROMPT,
+                                   prompt_for(d["title"], sections, MEETING_NOTE if meeting else ""), MAX_TOKENS)
+            except GatewayError as e:
+                log.warning("extraction for %s: %s", d["slug"], e)
+                failed = True
+                break
+            usage.update({k: used.get(k) or 0 for k in ("prompt_tokens", "completion_tokens")})
+            got = for_meeting(checked(reply, d["title"], sections)) if meeting else checked(reply, d["title"], sections)
+            result.kept += got.kept[:MAX_UNITS - len(result.kept)]
+            result.dropped.update(got.dropped)
+        if failed:
             conn.execute(STATE_SQL, (d["workspace_id"], d["document_id"], None, d["model_id"], "failed", 0, 0, 0, 0, 0))
+            if usage:
+                conn.execute(USAGE_SQL, (d["workspace_id"], d["model_id"], usage["prompt_tokens"], usage["completion_tokens"]))
             totals["failed"] += 1
             continue
-        result = checked(reply, d["title"], sections)
-        tokens = (usage.get("prompt_tokens") or 0) + (usage.get("completion_tokens") or 0)
+        tokens = usage["prompt_tokens"] + usage["completion_tokens"]
         with conn.transaction():
             conn.execute(REPLACE_SQL, (d["workspace_id"], d["document_id"]))
             for p in result.kept:
@@ -264,7 +304,7 @@ def run(conn, limit: int = MAX_DOCUMENTS) -> dict:
                                           p.roles, p.confidence, d["document_id"], p.section))
             conn.execute(STATE_SQL, (d["workspace_id"], d["document_id"], d["content_hash"], d["model_id"], "done", len(result.kept),
                                      result.dropped["unsupported"], result.dropped["sensitive"], result.dropped["invalid"], tokens))
-            conn.execute(USAGE_SQL, (d["workspace_id"], d["model_id"], usage.get("prompt_tokens"), usage.get("completion_tokens")))
+            conn.execute(USAGE_SQL, (d["workspace_id"], d["model_id"], usage["prompt_tokens"], usage["completion_tokens"]))
         totals.update({"documents": 1, "proposed": len(result.kept), **result.dropped})
     return {**totals, "more": len(rows) == limit}
 

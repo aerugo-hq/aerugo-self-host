@@ -142,7 +142,7 @@ layers = [
                                      ("Permissions (OpenFGA)", S_DB_BUILT), ("Credentials (OpenBao, Secret Manager)", S_DB_BUILT)]),
     ("Connectors and capture: how it reads", 770, [("Docs: Confluence, Drive, SharePoint, Notion", S_BUILT),
                                                     ("Tickets and chat: Jira, Slack, Slack capture", S_BUILT),
-                                                    ("Teams channels and capture", S_BUILT), ("Meetings, handovers", S_NEW),
+                                                    ("Teams channels and capture", S_BUILT), ("Teams meetings", S_BUILT), ("Handovers", S_NEW),
                                                     ("Code: GitHub (thousands of repos)", S_BUILT),
                                                     ("Warehouses, catalogs, usage logs", S_NEW),
                                                     ("Schedulers and ETL: Control-M, Airflow", S_NEW)]),
@@ -256,14 +256,14 @@ p = Page("6. Capture", "Capturing what isn't written down",
          "Much of what seniors know lives in conversations. It's captured only where people choose, filtered for "
          "privacy, and confirmed by an owner before anyone relies on it.")
 caps = ["<b>Teams channel</b>, opted in by its owners", "<b>\"Save to Aerugo\"</b> on any message",
-        "<b>Slack channel</b>, opted in", "<b>Meeting transcripts</b>, opted in by the organizer",
+        "<b>Slack channel</b>, opted in", "<b>Teams meeting transcripts</b>, opted in by the organizer",
         "<b>Handover interview</b> when someone leaves", "<b>Ask an expert</b> when an answer is missing"]
 cc = [p.box(t, 60, 150 + i * 100, 320, 70, S_PEOPLE) for i, t in enumerate(caps)]
 filt = p.box("<b>Privacy filters</b><br>only opted-in places<br>\"don't capture\" marks honored<br>direct messages never, by default<br>"
              "HR, medical, and legal matters excluded<br>personal data excluded", 520, 300, 320, 220, S_SEC)
 prop = p.box("<b>Proposed knowledge</b><br>a procedure, an answer, a decision, a contact, with the messages it came from",
              940, 330, 300, 140, S_BUILT)
-own = p.box("<b>The owner confirms or corrects</b>", 1300, 300, 270, 90, S_PEOPLE)
+own = p.box("<b>The owner confirms or corrects</b><br>(a meeting's: its people)", 1300, 300, 270, 90, S_PEOPLE)
 core = p.box("<b>Knowledge core</b>", 1300, 450, 270, 90, S_BUILT)
 for c in cc:
     p.edge(c, filt)

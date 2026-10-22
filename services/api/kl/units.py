@@ -11,6 +11,8 @@ to someone who sees both sides. A hidden unit is a 404, and nothing counts what 
 Only the owner team's curators (and admins) write: they create units citing only documents they can read (proposed,
 documented), confirm, retire, and supersede them with a new version on the same topic, add perspectives, and resolve
 conflicts; a curator of either side may open one. F2's extraction writes as the worker; F3 merges; F4 answers from them.
+A unit whose evidence is meeting transcripts alone (C3a) is readable only by the people in those meetings, so they, not
+the owner team's curators, confirm or retire it: anyone who reads it in full (`GET /v1/meetings/review` lists theirs).
 """
 from __future__ import annotations
 
@@ -172,7 +174,7 @@ class ResolveIn(BaseModel):
 
 # ------------------------------------------------------------------ reading
 READABLE_SQL = """
-SELECT d.id::text AS id, d.external_key, d.title, d.audience FROM documents d
+SELECT d.id::text AS id, d.external_key, d.title, d.audience, d.source_kind FROM documents d
 WHERE d.id = ANY(%(ids)s::uuid[])
   AND EXISTS (SELECT 1 FROM workspace_documents wd JOIN workspaces w ON w.id = wd.workspace_id
               WHERE wd.document_id = d.id AND w.slug = ANY(%(targets)s))
@@ -276,6 +278,28 @@ def _visible_unit(conn, caller: Caller, unit_id: str) -> tuple[dict | None, dict
         return None, {}
     docs = readable(conn, caller, row["evidence"])
     return (row, docs) if shown(row["evidence"], set(docs)) else (None, {})
+
+
+MEETINGS_REVIEW_SQL = f"""
+SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team
+WHERE u.status = 'proposed' AND cardinality(u.evidence) > 0
+  AND NOT EXISTS (SELECT 1 FROM unnest(u.evidence) e WHERE NOT EXISTS (
+        SELECT 1 FROM documents d WHERE d.id = e AND d.source_kind = 'meeting'))
+ORDER BY u.created_at DESC, u.id LIMIT %(limit)s
+"""
+
+
+@router.get("/meetings/review")
+def meetings_review(limit: int = Query(50, ge=1, le=LIMIT), caller: Caller = Depends(authenticate)):
+    """What the caller's meetings proposed and no one has confirmed or dismissed yet (C3a): units from meetings alone that
+    they read in full, which is to say meetings they were in, each with the transcript it came from."""
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(MEETINGS_REVIEW_SQL, {"limit": limit}).fetchall()
+        docs = readable(conn, caller, [d for r in rows for d in r["evidence"]])
+        mine = [r for r in rows if shown(r["evidence"], set(docs)) and from_meetings(r, docs)]
+        audit(conn, org_id, caller.username, "meetings.review", [], {"shown": len(mine)})
+    return {"units": [{**_summary(r), "evidence": _evidence(r, docs)} for r in mine]}
 
 
 @router.get("/units")
@@ -393,6 +417,24 @@ def _owned(conn, caller: Caller, unit_id: str) -> dict:
     return row
 
 
+def from_meetings(row: dict, docs: dict[str, dict]) -> bool:
+    """Whether a unit's evidence is meeting transcripts alone (C3a), every one of them readable by the caller."""
+    return bool(row["evidence"]) and all(docs.get(e, {}).get("source_kind") == "meeting" for e in row["evidence"])
+
+
+def _settled_by(conn, caller: Caller, unit_id: str) -> tuple[dict, bool]:
+    """A unit the caller may confirm or retire, and whether they do it as one of its meetings' people (C3a): its owner
+    team's curator, or, for a unit from meetings alone, anyone who reads it in full. 404 when it's hidden, 403 otherwise."""
+    row, docs = _visible_unit(conn, caller, unit_id)
+    if not row:
+        raise HTTPException(404, "unit not found")
+    if fga.check(caller.fga_user, "curator", f"workspace:{row['owner']}"):
+        return row, False
+    if from_meetings(row, docs):
+        return row, True
+    raise HTTPException(403, "a curator of the team required")
+
+
 @router.post("/workspaces/{ws}/units", status_code=201)
 def create_unit(ws: str, body: UnitIn, caller: Caller = Depends(authenticate)):
     """A unit owned by a team, written by one of its curators from documents they can read: proposed, and documented
@@ -437,13 +479,15 @@ def create_unit(ws: str, body: UnitIn, caller: Caller = Depends(authenticate)):
 
 @router.post("/units/{unit_id}/confirm")
 def confirm_unit(unit_id: str, caller: Caller = Depends(authenticate)):
-    """The owner team's curator confirms a unit: trust confirmed, reviewed now."""
+    """The owner team's curator confirms a unit: trust confirmed, reviewed now. A unit from meetings alone (C3a) is
+    confirmed by anyone in them who reads it."""
     return _set_status(unit_id, caller, "confirmed", "unit.confirm")
 
 
 @router.post("/units/{unit_id}/retire")
 def retire_unit(unit_id: str, caller: Caller = Depends(authenticate)):
-    """The owner team's curator retires a unit: kept, with its history, but no longer in use."""
+    """The owner team's curator retires a unit: kept, with its history, but no longer in use. A unit from meetings alone
+    (C3a) is retired, or dismissed, by anyone in them who reads it."""
     return _set_status(unit_id, caller, "retired", "unit.retire")
 
 
@@ -451,10 +495,11 @@ def _set_status(unit_id: str, caller: Caller, status: str, action: str) -> dict:
     uid = _unit_id(unit_id)
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
-        row = _owned(conn, caller, uid)
+        row, attendee = _settled_by(conn, caller, uid)
     if row["status"] in ("superseded", "retired"):
         raise HTTPException(409, f"the unit is {row['status']}")
-    with scoped(org_id, caller.principals, teams=[row["owner"]]) as conn:
+    # One of a meeting's people names no team: the database lets them change a unit only from meetings they were in
+    with scoped(org_id, caller.principals, teams=[] if attendee else [row["owner"]]) as conn:
         trust = "confirmed" if status == "confirmed" else row["trust"]
         # F6: confirming restarts its review and snapshots its evidence, so a change underneath it can be told
         conn.execute("UPDATE knowledge_units SET status = %s, trust = %s, updated_at = now(), "
@@ -462,8 +507,8 @@ def _set_status(unit_id: str, caller: Caller, status: str, action: str) -> dict:
                      f"evidence_hashes = CASE WHEN %s = 'confirmed' THEN {SNAPSHOT} ELSE evidence_hashes END, "
                      f"evidence_texts = CASE WHEN %s = 'confirmed' THEN {TEXT_SNAPSHOT} ELSE evidence_texts END WHERE id = %s",
                      (status, trust, status, status, status, uid))
-        conn.execute(EVENT_SQL, (uid, row["status"], status, "confirmed by its owner" if status == "confirmed" else "retired by its owner",
-                                 caller.username))
+        who = "someone in its meeting" if attendee else "its owner"
+        conn.execute(EVENT_SQL, (uid, row["status"], status, f"{'confirmed' if status == 'confirmed' else 'retired'} by {who}", caller.username))
         audit(conn, org_id, caller.username, action, [row["owner"]], {"unit": uid})
     return {"id": uid, "status": status, "trust": trust}
 

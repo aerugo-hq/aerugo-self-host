@@ -177,6 +177,18 @@ taken from a Teams delivery, invariant 13's recorded exception. The answer goes 
 the bot, as plain text. "Save to Aerugo" is a message action with C2c's rules, read back from Graph, its unit a
 proposal for the team's curators with exactly the team's readers, the saver told privately.
 
+Meeting transcripts (C3a): a Teams connection's team admin turns its Meetings setting on, and a meeting's organizer, with
+the company's app added to the meeting (resource-specific consent for that meeting's chat), writes "@Aerugo capture on"
+in its chat. The delivery only queues `meetings.command`, which reads back from Graph that the chat is a meeting's, what
+the message says, that its author is the meeting's organizer, and that no guest or other tenant's member is in the chat.
+A captured meeting becomes a container of its Teams connection (`kl.meetings`), so the sync reads its transcripts (each a
+document of kind `meeting`, a section a minute, each line with its speaker, sensitive lines dropped), readable by exactly
+the chat's members, and the readers refresh and retiring carry it. Extraction proposes decisions, lessons, and facts from
+a transcript, reading long documents in parts; only the meeting's people can read those proposals, so they, not the
+owner team's curators, confirm or retire them (migration 0072 lets the API do it for them, naming no team). Anyone in the
+chat writing "@Aerugo don't capture", or the admin turning Meetings off, removes the meeting's transcripts and every unit
+citing them, confirmed or not; the bot posts only the on and off notices in the meeting's chat.
+
 ## 7. The engineering and data pack
 
 Sources: GitHub (repos, Terraform, conventions), the EDW (metadata, query logs), Control-M (jobs, order, scripts),

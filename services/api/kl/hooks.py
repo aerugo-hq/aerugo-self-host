@@ -229,8 +229,8 @@ async def teams_activity(connection_id: str, request: Request, authorization: st
     (invariant 13 for Teams, decided 2026-10-21: it takes the HMAC's place), checked before anything is acted on; anything
     wrong, an unknown connection included, is the same 401. It's taken once, by its activity's id, and only queues a job,
     which reads back from Graph or the Bot Connector whatever it acts on: "Don't capture" and "Save to Aerugo" (each
-    answered privately in Teams at once), and an ask, by a message to the bot in its 1:1 chat or a mention in a channel
-    (answered later, privately, in the asker's 1:1 chat)."""
+    answered privately in Teams at once), an ask, by a message to the bot in its 1:1 chat or a mention in a channel
+    (answered later, privately, in the asker's 1:1 chat), and, in a meeting's chat, "capture on" or "don't capture" (C3a)."""
     body = await capped_body(request, MAX_BODY)
     if body is None:
         telemetry.webhook_rejected("too_large")
@@ -262,6 +262,10 @@ async def teams_activity(connection_id: str, request: Request, authorization: st
     if asked:
         result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"ask-{activity['id']}", "teams.ask", asked, 1)
         log.info("teams ask for %s: %s", connection_id, result)
+    meeting = teams_bot.meeting_request(activity, tenant, app)  # C3a: capture on, or don't capture, in a meeting's chat
+    if meeting:
+        result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"meet-{activity['id']}", "meetings.command", meeting)
+        log.info("teams meeting command for %s: %s", connection_id, result)
     return Response(status_code=200)
 
 

@@ -11,8 +11,9 @@ that whoever marked or saved it is in its team, who's asking); a question asked 
 text taken from a delivery (invariant 13's recorded exception, C1b), never kept.
 
 The bot writes to Teams only capture's notice, posted in a channel when capture starts and stops (decided 2026-10-20),
-and private replies, each in the 1:1 chat of the person who asked or saved, which it opens by their id: through the Bot
-Connector, as the app, to the service address the connection names (on the allowlist), never one a delivery names."""
+or in a meeting's chat (C3a, decided 2026-10-22), and private replies, each in the 1:1 chat of the person who asked or
+saved, which it opens by their id: through the Bot Connector, as the app, to the service address the connection names
+(on the allowlist), never one a delivery names."""
 import hashlib
 import logging
 import threading
@@ -169,6 +170,22 @@ def ask_request(activity: dict, tenant: str, app: str, chars: int = 1000) -> dic
     return None
 
 
+def meeting_request(activity: dict, tenant: str, app: str) -> dict | None:
+    """A mention of the bot in a meeting's chat (C3a), or None: only the chat, the message, and who wrote it are taken
+    from a delivery; the worker reads back from Graph that the chat is a meeting's, what the message says, and who wrote
+    it. Any other group chat is never read."""
+    data, conversation, who = _part(activity, "channelData"), _part(activity, "conversation"), _part(activity, "from")
+    chat, message = str(conversation.get("id") or ""), str(activity.get("id") or "")
+    user, user_id = str(who.get("aadObjectId") or "").lower(), str(who.get("id") or "")
+    mentioned = any(isinstance(e, dict) and e.get("type") == "mention" and _part(e, "mentioned").get("id") == f"28:{app}"
+                    for e in activity.get("entities") or [])
+    if activity.get("type") != "message" or conversation.get("conversationType") != "groupChat" or not mentioned \
+            or str(_part(data, "tenant").get("id") or "").lower() != tenant.lower() or not teams.MEETING_CHAT.fullmatch(chat) \
+            or not teams.MESSAGE.fullmatch(message) or not GUID.fullmatch(user) or not teams.USER_ID.fullmatch(user_id):
+        return None
+    return {"chat": chat, "message": message, "user": user, "user_id": user_id}
+
+
 class BotConnector(GraphClient):
     """The Bot Connector, as the app (its token from Entra, for Bot Framework): posts capture's notice in a channel."""
     scope = BOT_SCOPE
@@ -204,6 +221,13 @@ class BotConnector(GraphClient):
             "channelData": {"tenant": {"id": self.tenant}}}).get("id") or "")
         if not teams.CONVERSATION.fullmatch(chat) or not chat.startswith("a:"):
             raise ValueError("Teams opened no 1:1 chat")
+        self._call("POST", f"{self.base}/v3/conversations/{quote(chat, safe='')}/activities", None,
+                   body={"type": "message", "text": text, "textFormat": "plain"})
+
+    def say(self, chat: str, text: str) -> None:
+        """A message in a meeting's chat (C3a): only capture's notice, ever. Plain text."""
+        if not teams.MEETING_CHAT.fullmatch(chat):
+            raise ValueError("not a meeting's chat")
         self._call("POST", f"{self.base}/v3/conversations/{quote(chat, safe='')}/activities", None,
                    body={"type": "message", "text": text, "textFormat": "plain"})
 

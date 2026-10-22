@@ -60,7 +60,7 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 
-from . import company, evals, slack, smoke, teams_bot
+from . import company, evals, meetings, slack, smoke, teams_bot
 from .smoke import API, BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, OWNER_DB, TOKEN_URL, api, api_ready, ask_as
 
 ADMIN = "olivia"  # the org admin makes the teams and connections
@@ -74,7 +74,7 @@ CREDENTIALS = {  # the fakes' own dev credentials, as the migration scenario's c
 }
 DIRECTORY = "retail-directory"
 TEAMS_BOT = f"{FAKE_LLM}/teams-bot"  # the fake Bot Connector, where the Teams bot posts capture's notice (C1a)
-CHATS = ("slack", "teams")  # the sources whose documents are conversations: proposed from only where captured
+CHATS = ("slack", "teams", "meeting")  # the sources whose documents are conversations: proposed from only where captured
 ASK_TEAM = "stores"
 ASK_MODEL = f"{ASK_TEAM}/smoke-fake"
 DEFAULT = (7, 6)  # seed and stores: the baseline is recorded for these
@@ -136,6 +136,8 @@ def serve(world: company.World) -> dict:
         raise SystemExit("the fake Entra didn't take the company's directory")
     if httpx.post(f"{FAKE_MICROSOFT}/teams", json=company.teams_tenant(world), timeout=30).status_code != 200:
         raise SystemExit("the fake Graph didn't take the company's Teams")
+    if httpx.post(f"{FAKE_MICROSOFT}/chats", json=company.meeting_chats(world), timeout=30).status_code != 200:
+        raise SystemExit("the fake Graph didn't take the company's meetings")
     return {"directory": httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT}, timeout=30).json(),
             "teams": httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT, "client_id": company.TEAMS_APP}, timeout=30).json()}
 
@@ -153,12 +155,12 @@ def plan(world: company.World, storage: str = "index") -> list[tuple[str, str, d
                     scope: held, "every_minutes": 10080, "storage": kept, **CREDENTIALS[source]}
             body |= {"company_site": True} if source in ("confluence", "jira") else {"company_workspace": True, "history_days": 3650}
             out.append((slug, source, body))
-    for slug, _, _ in company.TEAMS:  # C1a: Teams is always indexed, whatever this run keeps the others as
+    for slug, _, _ in company.TEAMS:  # C1a: Teams is always indexed, whatever this run keeps the others as; C3a: its meetings
         held = [c.id for c in world.containers if c.source == "teams" and c.team == slug]
-        if held:
+        if held or any(c.source == "meeting" and c.team == slug for c in world.containers):
             out.append((slug, "teams", {"name": f"retail-teams-{slug}", "api_base": FAKE_MICROSOFT, "tenant_id": company.TENANT,
                                         "client_id": company.TEAMS_APP, "team_ids": sorted({company.teams_team(c) for c in held}),
-                                        "channels": held, "history_days": 3650, "bot_service": TEAMS_BOT, "every_minutes": 10080}))
+                                        "channels": held or None, "history_days": 3650, "bot_service": TEAMS_BOT, "every_minutes": 10080}))
     return out
 
 
@@ -316,6 +318,8 @@ def load(world: company.World, storage: str = "index") -> dict[str, str]:
         r = api("GET", "/v1/whoami", p.username)
         if r.status_code != 200 or not r.json().get("admitted"):
             raise SystemExit(f"{p.username} couldn't sign in: {r.status_code} {r.text[:200]}")
+    for c in (c for c in world.containers if c.source == "meeting"):  # C3a: kept only once its organizer opts in
+        meeting_capture_on(world, c)
     return load_units(world)
 
 
@@ -553,7 +557,7 @@ TEAM_DOCUMENTS_SQL = """
 SELECT count(*) FILTER (WHERE s.content_hash = d.content_hash) AS read, count(*) AS of
 FROM kl.workspace_documents wd JOIN kl.workspaces w ON w.id = wd.workspace_id JOIN kl.documents d ON d.id = wd.document_id
 LEFT JOIN kl.extraction_state s ON s.workspace_id = w.id AND s.document_id = d.id
-WHERE w.slug = %s AND (d.source_kind = ANY(%s) OR (d.source_kind IN ('slack', 'teams') AND d.container_ref = ANY(%s)))
+WHERE w.slug = %s AND (d.source_kind = ANY(%s) OR (d.source_kind IN ('slack', 'teams', 'meeting') AND d.container_ref = ANY(%s)))
 """
 PROPOSALS_SQL = """
 SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team, u.duplicate_of::text AS duplicate_of FROM kl.knowledge_units u
@@ -648,6 +652,8 @@ def capture_on(world: company.World) -> list[str]:
         if c.source == "teams":
             problems += teams_capture_on(c, names[c.team])
             continue
+        if c.source == "meeting":  # its organizer turned it on as the company was loaded
+            continue
         path = f"/v1/workspaces/{c.team}/connections/retail-slack-{c.team}"
         state = lambda: next((x["capture"] for x in api("GET", path + "/capture", ADMIN).json()["channels"] if x["channel"] == channel), None)
         signing = secrets.token_hex(16)  # the app's signing secret, set on the connection's webhook each run
@@ -678,13 +684,16 @@ def capture_on(world: company.World) -> list[str]:
     teams_notices = [p for p in ours if p["channel"] in company.CAPTURED]
     problems += [f"the Teams bot posted in {p['channel']}: {p['text'][:80]}" for p in ours if p["channel"] not in company.CAPTURED
                  or p["text"] != teams_bot.NOTICE_ON.format(team=names[world.container("teams", p["channel"]).team])]
+    in_meetings = [p for p in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json() if p.get("app") == company.TEAMS_APP and p.get("meeting")]
+    problems += [f"the Teams bot posted in the meeting {p['chat']}: {p['text'][:80]}" for p in in_meetings  # C3a: only capture's notice
+                 if p["chat"] not in company.CAPTURED or p["text"] != meetings.NOTICE_ON]
     posted = [p for p in httpx.get(f"{SITES['slack']}/posted", timeout=10).json() if not p.get("ephemeral")]  # C2c's replies aside
     for p in posted:
         team = next((c.team for c in world.containers if c.id == p["channel"] and c.id in company.CAPTURED), None)
         if not team or p["text"] != slack.NOTICE_ON.format(team=names[team]):
             problems.append(f"the bot posted in {p['channel']}: {p['text'][:80]}")
-    print(f"\nCapture (C2b, C1a): {', '.join(company.CAPTURED)} on, with both keys; the Slack bot posted {len(posted)} message(s) and "
-          f"the Teams bot {len(teams_notices)}, {len(problems)} of them anything but a captured channel's notice; "
+    print(f"\nCapture (C2b, C1a, C3a): {', '.join(company.CAPTURED)} on, with both keys; the Slack bot posted {len(posted)} message(s) "
+          f"and the Teams bot {len(teams_notices) + len(in_meetings)}, {len(problems)} of them anything but a captured channel's or meeting's notice; "
           f"{len(company.SAVES) - len(saves)} of {len(company.SAVES)} saves (C2c) proposed")
     return problems + saves
 
@@ -736,6 +745,36 @@ def teams_ask_check(world: company.World, out) -> tuple[list[str], list[str]]:
     return leaks, missing
 
 
+def meeting_capture_on(world: company.World, c: company.Container) -> None:
+    """C3a on the retailer: the team's admin turns its Teams connection's meetings on, and the meeting's organizer writes
+    "@Aerugo capture on" in its chat (a mention on Microsoft's signed token, as Teams sends it); its transcript is then
+    kept, readable by the meeting chat's members. A run again finds it captured and asks nothing."""
+    path = f"/v1/workspaces/{c.team}/connections/retail-teams-{c.team}"
+    if api("PUT", path + "/meetings", ADMIN, json={"meetings": True}).status_code != 200:
+        raise SystemExit(f"{path}: meetings couldn't be turned on")
+    with psycopg.connect(OWNER_DB) as conn:
+        cid = conn.execute("SELECT id FROM kl.connections WHERE name = %s", (f"retail-teams-{c.team}",)).fetchone()[0]
+        kept = lambda: conn.execute("SELECT count(*) FROM kl.documents WHERE connection_id = %s AND container_ref = %s",
+                                    (cid, c.id)).fetchone()[0]
+        if kept():
+            return
+        organizer = company.creator_of(world, c)
+        teams_id = "29:rt" + hashlib.sha256(organizer.email.encode()).hexdigest()[:16]
+        token = httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": company.TEAMS_APP, "serviceurl": TEAMS_BOT + "/"}, timeout=10).json()["token"]
+        r = httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", headers={"Authorization": f"Bearer {token}"}, timeout=15, json={
+            "type": "message", "id": company.capture_message(c.id), "text": "Aerugo capture on", "serviceUrl": TEAMS_BOT + "/",
+            "from": {"id": teams_id, "aadObjectId": organizer.entra}, "conversation": {"id": c.id, "conversationType": "groupChat"},
+            "channelData": {"tenant": {"id": company.TENANT}}, "entities": [{"type": "mention", "mentioned": {"id": f"28:{company.TEAMS_APP}"}}]})
+        if r.status_code != 200:
+            raise SystemExit(f"the organizer's capture on for {c.id} was refused: {r.status_code}")
+        deadline = time.monotonic() + 240
+        while not kept() and time.monotonic() < deadline:
+            conn.commit()
+            time.sleep(3)
+        if not kept():
+            raise SystemExit(f"the meeting {c.id} was never kept, though its organizer turned capture on")
+
+
 def teams_capture_on(c: company.Container, team_name: str) -> list[str]:
     """C1a on the retailer: the Teams channel arrives requested, its team's owner having consented to the company's app
     (the first key); its team's admin confirms, and the bot posts its one notice there. Returns what went wrong."""
@@ -774,7 +813,7 @@ def extraction_check(world: company.World, pointer: bool = False) -> tuple[list[
     if pointer:
         time.sleep(90)  # a pass a minute: long enough for one to run, had it anything to read
         with psycopg.connect(OWNER_DB, row_factory=dict_row) as conn:  # Teams keeps its text whatever the others keep (C1a)
-            found = [p for p in conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall() if p["source_kind"] != "teams"]
+            found = [p for p in conn.execute(PROPOSALS_SQL, (list(EXTRACT_TEAMS),)).fetchall() if p["source_kind"] not in ("teams", "meeting")]
         print(f"\nExtraction (F2) with no text kept: {len(found)} proposals (none expected)\n")
         return [f"a proposal ({p['id']}) was extracted from {p['external_key']}, a pointer" for p in found], []
     leaks = capture_on(world)

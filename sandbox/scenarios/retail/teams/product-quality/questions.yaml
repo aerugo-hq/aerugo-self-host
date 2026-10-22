@@ -25,10 +25,10 @@ cases:
   question: When do the replacement poles for the TrailLite 2 ship?
   kind: capture
   expect:
-  - meeting-recall-standups-2026-05-14
-  units: []
+  - meeting-9dd3bf5e50-f8b343275f73dae8
+  units:
+  - Poles ship
   forbid: []
-  needs: C3
 - id: recall-lesson
   asker: kai
   question: What did we learn from the last recall?

@@ -431,6 +431,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [hook, setHook] = useState(null); // the webhook panel open under a row (S8): { name, signing, made }
   const [capture, setCapture] = useState(null); // the capture panel open under a Slack row (C2b): { name, channels, error }
   const [answering, setAnswering] = useState(null); // the answers panel under a Slack or Teams row (C2d, C1b): { name, chat, models, model, classes, error }
+  const [meeting, setMeeting] = useState(null); // the meetings panel under a Teams row (C3a): { name, on, captured, want, error }
   const [declared, setDeclared] = useState([]); // each connection as the API reads it back, for Terraform (G2)
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => {
     setItems(r.connections);
@@ -546,6 +547,49 @@ function Connections({ ws, teams, orgAdmin }) {
       h("button", { type: "button", className: "btn btn-sm btn-primary", onClick: saveAnswers,
         disabled: !answering.models || !answering.classes.length }, "Save"),
       h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setAnswering(null) }, "Close")));
+  async function openMeetings(name) {
+    if (meeting?.name === name) {
+      setMeeting(null);
+      return;
+    }
+    setMeeting({ name, on: null, captured: 0, want: false, error: null });
+    try {
+      const m = await kl(`workspaces/${enc(ws)}/connections/${enc(name)}/meetings`);
+      setMeeting({ name, on: m.meetings, captured: m.captured, want: m.meetings, error: null });
+    } catch (e) {
+      setMeeting({ name, on: null, captured: 0, want: false, error: e.message });
+    }
+  }
+  async function saveMeetings() {
+    const { name, want } = meeting;
+    say(name, "idle", "Saving…");
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/${enc(name)}/meetings`, { method: "PUT", body: { meetings: want } });
+      say(name, "ok", want ? "Meetings can be captured" : "Meeting capture off: each meeting's chat is told");
+      setMeeting(null);
+    } catch (e) {
+      say(name, "bad", e.message);
+    }
+  }
+  const meetingsPanel = (c) => h("div", { className: "connector-form", role: "group", "aria-label": `Meetings for ${c.name}` },
+    h("p", { className: "connector-lede connector-wide" },
+      "Keeps the transcripts of Teams meetings whose organizers opt in, and proposes decisions, lessons, and facts from them for the people in each meeting to confirm. Only the people in a meeting's chat can read what it kept. It needs two keys: you allow it here, then a meeting's organizer adds your Teams app to the meeting and writes \"@Aerugo capture on\" in its chat. The bot tells the chat when capture starts and stops, anyone in the meeting can write \"@Aerugo don't capture\" to end it and remove what it kept, and a meeting with a guest or someone from another organization is never captured."),
+    meeting.error ? h("div", { className: "connector-wide" }, h(Alert, { onRetry: () => { setMeeting(null); openMeetings(c.name); } }, meeting.error))
+      : meeting.on === null ? h("div", { className: "connector-wide" }, h(SkeletonRows, { rows: 2, widths: [40, 24] }))
+      : [
+        h("p", { key: "now", className: "muted connector-wide" }, !meeting.on ? "Off: no meeting is captured."
+          : meeting.captured ? `On: ${meeting.captured} meeting${meeting.captured === 1 ? " is" : "s are"} captured now.`
+          : "On: no organizer has turned capture on in a meeting yet."),
+        h("label", { key: "want", className: "check connector-wide" },
+          h("input", { type: "checkbox", checked: meeting.want, onChange: (e) => setMeeting({ ...meeting, want: e.target.checked }) }),
+          "Let organizers capture their meetings"),
+        meeting.on && !meeting.want && meeting.captured ? h("p", { key: "warn", className: "connector-wide", role: "note" },
+          "Saving this ends every meeting captured now: their transcripts and everything proposed from them are removed, and each meeting's chat is told.") : null,
+      ],
+    h("div", { className: "actions connector-wide" },
+      h("button", { type: "button", className: "btn btn-sm btn-primary", onClick: saveMeetings,
+        disabled: meeting.on === null || meeting.want === meeting.on }, "Save"),
+      h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setMeeting(null) }, "Close")));
   async function removeHook(name) {
     say(name, "idle", "Removing the webhook…");
     try {
@@ -1174,6 +1218,8 @@ function Connections({ ws, teams, orgAdmin }) {
                 onClick: () => openCapture(c.name) }, "Capture") : null,
               c.kind === "slack" || c.kind === "teams" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": answering?.name === c.name,
                 onClick: () => openAnswers(c.name, c.kind) }, "Answers") : null,
+              c.kind === "teams" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": meeting?.name === c.name,
+                onClick: () => openMeetings(c.name) }, "Meetings") : null,
               h("button", { type: "button", className: "btn btn-sm", onClick: () => resync(c.name), disabled: c.status === "disabled" },
                 h(Icon, { name: "refresh", size: 14 }), "Re-sync"),
               c.managed_by ? null : [ // what Terraform manages changes there, not here
@@ -1184,7 +1230,8 @@ function Connections({ ws, teams, orgAdmin }) {
             editing === c.name ? h("tr", { key: `${c.name}-edit` }, h("td", { colSpan: 5 }, editForm(c))) : null,
             hook?.name === c.name ? h("tr", { key: `${c.name}-hook` }, h("td", { colSpan: 5 }, hookPanel(c))) : null,
             capture?.name === c.name ? h("tr", { key: `${c.name}-capture` }, h("td", { colSpan: 5 }, capturePanel(c))) : null,
-            answering?.name === c.name ? h("tr", { key: `${c.name}-answers` }, h("td", { colSpan: 5 }, answersPanel(c))) : null])))
+            answering?.name === c.name ? h("tr", { key: `${c.name}-answers` }, h("td", { colSpan: 5 }, answersPanel(c))) : null,
+            meeting?.name === c.name ? h("tr", { key: `${c.name}-meetings` }, h("td", { colSpan: 5 }, meetingsPanel(c))) : null])))
         : items ? h(Empty, null, "No sources connected to this team yet. Connect one above.") : null,
     declared.length ? h("div", { className: "panel-body" }, h(TerraformDetails, { items: declared.map((c) => connectionItem(ws, c)) })) : null,
     confirming ? h(Confirm, { title: `Remove the connection “${confirming}”?`, action: "Remove connection", onCancel: () => setConfirming(null),

@@ -284,6 +284,12 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
       C2d, the bot answering `/aerugo ask` and mentions privately as the asker (its question the one recorded exception to
       invariant 13): built.)
 - [ ] **C3.** Meeting transcripts, opt-in by organizer, confirmed by attendees.
+      (Decided 2026-10-22: Teams scheduled meetings first; the organizer's "@Aerugo capture on" in the meeting's chat,
+      read back from Graph, and the connection's team admin's Meetings setting are the two keys; anyone in the meeting
+      ending it removes everything kept from it, confirmed or not; a meeting with a guest or another organization's
+      member is never captured; it proposes decisions, lessons, and facts, never action items, which its people confirm;
+      the bot posts only the on and off notices in the meeting's chat, and, in C3b, one private review card. C3a,
+      the capture and the attendees' confirmation in Aerugo: built.)
 - [ ] **C4.** Handover interviews.
 - [ ] **C5.** Announcement mailboxes as policy versions (optional).
 

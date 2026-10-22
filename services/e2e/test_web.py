@@ -268,6 +268,46 @@ def test_a_team_admin_chooses_how_teams_asks_are_answered(page):
         page.request.delete(f"{base}/connections/{name}", headers={"Origin": WEB})
 
 
+def test_a_team_admin_lets_organizers_capture_their_meetings(page):
+    """C3a: a Teams connection's Meetings panel says what its two keys are, starts off, saves only a change, and keeps
+    the team admin's choice; turning it back off ends what it captured."""
+    sign_in(page, "alice")
+    tag, tenant = uuid.uuid4().hex[:6], str(uuid.uuid4())
+    name = f"e2e-meetings-{tag}"
+    json_post = lambda url, body, headers=None: page.request.post(url, data=json.dumps(body), headers=headers or {"Content-Type": "application/json"})
+    app = json_post("http://fake-llm:8080/microsoft/app", {"tenant_id": tenant})
+    assert app.ok, "the fake Graph (fake-llm, from make smoke) isn't up"
+    app = app.json()
+    write, base = {"Origin": WEB, "Content-Type": "application/json"}, f"{WEB}/api/workspaces/payments"
+    made = json_post(f"{base}/connections/teams", {"name": name, "api_base": "http://fake-llm:8080/microsoft", "tenant_id": tenant,
+                                                   "client_id": app["client_id"], "certificate": app["certificate"], "team_ids": [],
+                                                   "bot_service": "http://fake-llm:8080/teams-bot", "every_minutes": 10080}, write)
+    assert made.status == 201, made.text()
+    try:
+        page.goto(f"{WEB}/#/admin/sources")
+        row = panel(page, "Connections").get_by_role("row").filter(has_text=name)
+        row.get_by_role("button", name="Meetings", exact=True).click()
+        group = page.get_by_role("group", name=f"Meetings for {name}")
+        expect(group.get_by_text("Off: no meeting is captured.")).to_be_visible(timeout=30_000)
+        expect(group).to_contain_text("@Aerugo capture on")
+        expect(group).to_contain_text("never captured")
+        save, allow = group.get_by_role("button", name="Save"), group.get_by_label("Let organizers capture their meetings")
+        expect(save).to_be_disabled()  # nothing changed yet
+        allow.check()
+        expect(save).to_be_enabled()
+        save.click()
+        expect(page.get_by_text("Meetings can be captured")).to_be_visible(timeout=30_000)
+        assert page.request.get(f"{base}/connections/{name}/meetings").json() == {"meetings": True, "captured": 0}
+        row.get_by_role("button", name="Meetings", exact=True).click()
+        expect(group.get_by_text("On: no organizer has turned capture on in a meeting yet.")).to_be_visible(timeout=30_000)
+        group.get_by_label("Let organizers capture their meetings").uncheck()
+        group.get_by_role("button", name="Save").click()
+        expect(page.get_by_text("Meeting capture off")).to_be_visible(timeout=30_000)
+        assert page.request.get(f"{base}/connections/{name}/meetings").json()["meetings"] is False
+    finally:
+        page.request.delete(f"{base}/connections/{name}", headers={"Origin": WEB})
+
+
 def test_a_team_admin_opens_the_microsoft_365_form(page):
     sign_in(page, "alice")
     open_connector(page, "Microsoft 365")
