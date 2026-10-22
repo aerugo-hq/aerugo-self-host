@@ -312,6 +312,14 @@ def save(conn, job) -> dict:
     message, post, user, user_id = str(p.get("message") or ""), p.get("post"), str(p.get("user") or ""), str(p.get("user_id") or "")
     if c is None or not teams.MESSAGE.fullmatch(message) or not GUID.fullmatch(str(c["ms_team"] or "")) or not teams.USER_ID.fullmatch(user_id):
         return {"skipped": "not a message this connection reads"}
+    person = bot_for(c).member(p["channel"], user_id)  # who's saving, as Teams says now, never the delivery's word
+    if str(person.get("aadObjectId") or "").lower() != user.lower() or str(person.get("tenantId") or "").lower() != c["config"]["tenant_id"] \
+            or str(person.get("userRole") or "user").lower() == "guest":
+        tell(c, user_id, NOT_SAVED["saver"])
+        with conn.transaction():
+            audit(conn, c["org_id"], "capture.save.refused", {"connection_id": str(c["id"]), "channel": p["channel"],
+                                                              "message": message, "user": user, "why": "saver"})
+        return {"refused": "saver"}
     client = teams.client_for(c)
     found = client.message(c["ms_team"], p["channel"], message, post if isinstance(post, str) else None)
     excluded = frozenset(r["message"] for r in conn.execute(

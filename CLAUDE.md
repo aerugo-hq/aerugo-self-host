@@ -2508,7 +2508,7 @@ bob; another app's token a 401; alice's mention answered privately, a mention cl
 only public allowed, no link and the note; carol's own post saved for Payments, read by alice and not bob; someone else's
 reply refused until capture is on, then saved; a second save already saved; someone outside the team and a guest
 refused; a sensitive and a marked message refused; the bot posting in the channel only capture's notice; a saved post
-deleted in Teams leaving its text nowhere). Unit: six more in `tests/test_teams.py` (13), and the Slack tests now against
+deleted in Teams leaving its text nowhere). Unit: seven more in `tests/test_teams.py` (14), and the Slack tests now against
 `chat_ask`. Browser: `test_a_team_admin_chooses_how_teams_asks_are_answered`. Red first: five unit mutations, each put
 back (`cmp`): an ask from another tenant taken, a mention's question keeping the app's own mention, someone else's message
 saving anywhere, the asker not compared with whom Teams reads back, and a mention answered whoever wrote it, each failing
@@ -2521,7 +2521,12 @@ out of the orphaned cleanup (failed: "a saved post deleted in Teams kept its sav
 Found while proving it: the check first sent alice an ask it didn't wait for, whose late reply could land while it
 counted her replies around carol's mention, so two mutations first failed at another assertion; the ask is gone, and both
 were run again, each failing for its own reason; C1a's check read every bot post's channel, which a private reply has
-none of. Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 244 passed;
+none of. An automated security review of the pushed branch found that a save took its saver's two ids from the
+delivery's unsigned body and checked only that the Entra id was in the team, so someone holding a leaked token could
+claim to be a message's author and save it where capture is off; the saver is now read back from the Bot Connector, as
+an asker is (the Entra id, tenant, and role of the person with that Teams id in the channel), and refused otherwise.
+Red first: its unit test failed with the saver taken from the delivery, then passed (`make unit` 245); the smoke check
+passed on the fixed build. Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 244 passed;
 the new check passed, and so did C1a's, C2d's ask, and C2c's save; `kl.company_eval`: eli's Teams ask answered privately
 with one of his Ask's six sources linked and none he may not see, ana's Slack ask likewise, everyone opening exactly what
 the truth says, no leak, Recall@10 100% and MRR 0.83 over 53 counted questions; its only failure F6's eight Jira-cited

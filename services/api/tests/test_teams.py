@@ -209,6 +209,10 @@ class Lane:
     def __init__(self, audits):
         self.audits = audits
 
+    def transaction(self):
+        import contextlib
+        return contextlib.nullcontext()
+
     def execute(self, sql, params=()):
         if sql.startswith("INSERT INTO audit_events"):
             self.audits.append(params)
@@ -260,3 +264,28 @@ def test_only_the_asker_teams_reads_back_is_answered_and_only_for_their_own_ment
     monkeypatch.setattr(teams, "client_for", lambda c: Graph(eli))
     assert teams_ask.ask(Lane(audits), {"payload": {**mention["payload"], "question": "never from here"}}) == {"answered": True}
     assert asked[-1] == ("ext:microsoft.eli@acme.test", "Which forklift?")  # read back from Graph, not the delivery
+
+
+def test_a_save_is_refused_unless_teams_says_the_saver_is_who_the_delivery_names(monkeypatch):
+    eli, told = str(uuid.uuid4()), []
+
+    class Bot:
+        def __init__(self, found):
+            self.found = found
+
+        def member(self, conversation, user_id):
+            return self.found
+
+    class Graph:
+        def message(self, team, channel, message, post=None):
+            raise AssertionError("a save went on to Graph before its saver was confirmed")
+    monkeypatch.setattr(teams_bot, "tell", lambda c, user_id, text: told.append(text))
+    monkeypatch.setattr(teams, "client_for", lambda c: Graph())
+    monkeypatch.setattr(teams_bot, "channel_of", lambda conn, p: {"id": "c1", "org_id": "o1", "ms_team": str(uuid.UUID(int=7)),
+                                                                  "config": {"tenant_id": TENANT}, "capture": "on"})
+    job = {"payload": {"connection_id": "c1", "channel": CHANNEL, "message": "1760364000000", "user": eli, "user_id": APP_USER}}
+    person = {"aadObjectId": eli, "tenantId": TENANT, "userRole": "user"}
+    for found in ({**person, "aadObjectId": str(uuid.uuid4())}, {**person, "userRole": "guest"}, {**person, "tenantId": str(uuid.uuid4())}, {}):
+        monkeypatch.setattr(teams_bot, "bot_for", lambda c, found=found: Bot(found))
+        assert teams_bot.save(Lane([]), job) == {"refused": "saver"}
+    assert told == [teams_bot.NOT_SAVED["saver"]] * 4
