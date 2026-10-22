@@ -34,7 +34,7 @@ jobs:
           - name: postgres
             context: deploy/postgres-image
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_PROVIDER }}
@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production # add required reviewers in the repository's settings to approve each deploy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_PROVIDER }}
