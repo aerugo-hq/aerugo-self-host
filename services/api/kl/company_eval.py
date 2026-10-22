@@ -61,7 +61,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import company, evals, slack, smoke, teams_bot
-from .smoke import BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, OWNER_DB, TOKEN_URL, api, api_ready, ask_as
+from .smoke import API, BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, OWNER_DB, TOKEN_URL, api, api_ready, ask_as
 
 ADMIN = "olivia"  # the org admin makes the teams and connections
 KEYCLOAK = TOKEN_URL.split("/realms/")[0]
@@ -558,7 +558,7 @@ WHERE w.slug = %s AND (d.source_kind = ANY(%s) OR (d.source_kind IN ('slack', 't
 PROPOSALS_SQL = """
 SELECT u.id::text AS id, d.external_key, d.source_kind, w.slug AS team, u.duplicate_of::text AS duplicate_of FROM kl.knowledge_units u
 JOIN kl.documents d ON d.id = u.evidence[1] JOIN kl.workspaces w ON w.id = u.owner_team
-WHERE u.created_by IN ('extraction', 'slack-save') AND u.status = 'proposed' AND w.slug = ANY(%s)
+WHERE u.created_by IN ('extraction', 'slack-save', 'teams-save') AND u.status = 'proposed' AND w.slug = ANY(%s)
 """
 
 
@@ -673,7 +673,8 @@ def capture_on(world: company.World) -> list[str]:
                 and time.monotonic() < deadline + 120:
             time.sleep(2)
         saves += save_messages(world, channel, hook.json()["url"], signing)  # someone else's message: only once capture is on
-    ours = [p for p in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json() if p.get("app") == company.TEAMS_APP]  # not smoke's
+    ours = [p for p in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json()  # not smoke's, nor a private reply (C1b)
+            if p.get("app") == company.TEAMS_APP and p.get("channel")]
     teams_notices = [p for p in ours if p["channel"] in company.CAPTURED]
     problems += [f"the Teams bot posted in {p['channel']}: {p['text'][:80]}" for p in ours if p["channel"] not in company.CAPTURED
                  or p["text"] != teams_bot.NOTICE_ON.format(team=names[world.container("teams", p["channel"]).team])]
@@ -686,6 +687,53 @@ def capture_on(world: company.World) -> list[str]:
           f"the Teams bot {len(teams_notices)}, {len(problems)} of them anything but a captured channel's notice; "
           f"{len(company.SAVES) - len(saves)} of {len(company.SAVES)} saves (C2c) proposed")
     return problems + saves
+
+
+TEAMS_ASKER = "eli"
+
+
+def teams_ask_check(world: company.World, out) -> tuple[list[str], list[str]]:
+    """C1b on the retailer: someone asks the Teams bot in his 1:1 chat, as Teams sends it (a message on Microsoft's
+    signed token); he's answered there, privately, with his own Ask's sources, never a page the truth says he may not
+    see. Returns (leaks, missing)."""
+    q = next(q for q in world.questions if q.asker == TEAMS_ASKER and q.facts and not q.needs)
+    me = world.person(TEAMS_ASKER)
+    path, model = f"/v1/workspaces/{me.team}/connections/retail-teams-{me.team}", f"{me.team}/smoke-fake"
+    model_for_stores(me.team)
+    if api("PUT", path + "/answers", ADMIN, json={"model": model}).status_code != 200:
+        raise SystemExit(f"{path}: Teams answers couldn't be set up")
+    with psycopg.connect(OWNER_DB) as conn:
+        cid = conn.execute("SELECT id FROM kl.connections WHERE name = %s", (f"retail-teams-{me.team}",)).fetchone()[0]
+    teams_id = "29:rt" + hashlib.sha256(me.email.encode()).hexdigest()[:16]
+    person = {"id": teams_id, "aadObjectId": me.entra, "email": me.email, "userPrincipalName": me.email, "name": me.name,
+              "tenantId": company.TENANT, "userRole": "user"}
+    httpx.post(f"{TEAMS_BOT}/setup", json={"people": {teams_id: person}}, timeout=10).raise_for_status()
+    token = httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": company.TEAMS_APP, "serviceurl": TEAMS_BOT + "/"}, timeout=10).json()["token"]
+    replies = lambda: [x["text"] for x in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json() if x.get("private") and x.get("user") == teams_id]
+    before = len(replies())
+    r = httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", headers={"Authorization": f"Bearer {token}"}, timeout=15, json={
+        "type": "message", "id": f"retail-{secrets.token_hex(4)}", "text": q.text, "serviceUrl": TEAMS_BOT + "/",
+        "from": {"id": teams_id, "aadObjectId": me.entra}, "conversation": {"id": "a:" + teams_id[3:], "conversationType": "personal"},
+        "channelData": {"tenant": {"id": company.TENANT}}})
+    if r.status_code != 200:
+        raise SystemExit(f"the Teams ask was refused: {r.status_code}")
+    deadline = time.monotonic() + 180
+    while len(replies()) == before and time.monotonic() < deadline:
+        time.sleep(2)
+    if len(replies()) == before:
+        return [], [f"{TEAMS_ASKER}'s Teams ask ({q.id}) got no private reply"]
+    reply = replies()[-1]
+    linked = set(re.findall(r"#/documents/(\S+)", reply))
+    own = {c["id"] for c in ask_as(TEAMS_ASKER, q.text, model).json()["citations"]}
+    by_key, seen = {d.key: d for d in world.docs}, world.visible(TEAMS_ASKER)
+    forbidden = {by_key[k].key for k in by_key if by_key[k].name in q.forbid}
+    leaks = [f"{TEAMS_ASKER}'s Teams answer named {k}, which he may not see" for k in sorted(linked)
+             if k in forbidden or (k in by_key and by_key[k].name not in seen)]
+    leaks += [f"{TEAMS_ASKER}'s Teams answer named {k}, which his own Ask didn't" for k in sorted(linked - own)]
+    missing = [] if linked or not own else [f"{TEAMS_ASKER}'s Teams answer named none of his Ask's sources"]
+    print(f"\nTeams ask (C1b): {TEAMS_ASKER} asked {q.id} in his 1:1 chat with the bot, answered privately with {len(linked)} of "
+          f"his Ask's {len(own)} sources linked, {len(leaks)} he may not see or his Ask didn't cite", file=out)
+    return leaks, missing
 
 
 def teams_capture_on(c: company.Container, team_name: str) -> list[str]:
@@ -903,7 +951,8 @@ def main(argv: list[str]) -> int:
     retrieval_leaks += sensitive_check(world, out)
     if not pointer:  # C2d: a Slack ask, answered as its asker
         ask_leaks, ask_missing = slack_ask_check(world, out)
-        retrieval_leaks, missing = retrieval_leaks + ask_leaks, missing + ask_missing
+        teams_leaks, teams_missing = teams_ask_check(world, out)  # C1b
+        retrieval_leaks, missing = retrieval_leaks + ask_leaks + teams_leaks, missing + ask_missing + teams_missing
     life_leaks, life_missing = lifecycle_check(world, ids, out)  # after Ask's: a stale unit ranks differently
     gap_leaks, gap_missing = gaps_check(world, out)
     leaks, missing = leaks + life_leaks + gap_leaks, missing + life_missing + gap_missing

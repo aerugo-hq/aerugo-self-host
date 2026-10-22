@@ -169,6 +169,14 @@ and the job it queues reads back from Graph whatever it acts on. "Don't capture"
 shows the message and its marker in the team. Removing the app from a team ends it all: Graph refuses, and the team's
 documents and proposals go.
 
+The Teams bot answers and saves (C1b): a question to the bot in its 1:1 chat, or a channel post mentioning it, is
+answered in the answers lane through `kl.chat_ask`, the path both bots now share (the linked account, a recent sign-in,
+admission, the directory's leavers, and the API's own Ask, narrowed to what may reach the chat). Who's asking is read
+back from the Bot Connector, a mention's question from Graph (only for its own author); a 1:1 question is the one text
+taken from a Teams delivery, invariant 13's recorded exception. The answer goes only to the asker's own 1:1 chat with
+the bot, as plain text. "Save to Aerugo" is a message action with C2c's rules, read back from Graph, its unit a
+proposal for the team's curators with exactly the team's readers, the saver told privately.
+
 ## 7. The engineering and data pack
 
 Sources: GitHub (repos, Terraform, conventions), the EDW (metadata, query logs), Control-M (jobs, order, scripts),

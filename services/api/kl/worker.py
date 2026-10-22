@@ -57,7 +57,7 @@ log = logging.getLogger("kl.worker")
 # C2d: jobs someone is waiting on run in their own lane (kl.answers_lane), as the API's role, so row-level security
 # applies to them as to the API, and a long sync never holds them up. This worker never claims them: it runs as
 # kl_ingest, which row-level security doesn't narrow to a person.
-LANE_KINDS = ("slack.ask",)
+LANE_KINDS = ("slack.ask", "teams.ask")
 CLAIM_SQL = """
 UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_at = now(),
                 lease_until = now() + %s * interval '1 second', updated_at = now()
@@ -738,6 +738,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "slack.capture": capture.request, "slack.notice": capture.notice, "slack.exclude": capture.exclude,  # C2b
             "slack.save": capture.save,  # C2c
             "teams.notice": teams_bot.notice, "teams.exclude": teams_bot.exclude,  # C1a
+            "teams.save": teams_bot.save,  # C1b
             "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,

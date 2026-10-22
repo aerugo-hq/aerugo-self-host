@@ -46,16 +46,16 @@ FORGET_SQL = (
     "DELETE FROM entity_scans WHERE document_id = %(doc)s",
     "DELETE FROM reference_links WHERE source_id = %(doc)s",
     "DELETE FROM reference_scans WHERE document_id = %(doc)s",
-    "DELETE FROM knowledge_units WHERE created_by IN ('extraction', 'slack-save') AND status = 'proposed' AND evidence = ARRAY[%(doc)s]::uuid[]",
+    "DELETE FROM knowledge_units WHERE created_by IN ('extraction', 'slack-save', 'teams-save') AND status = 'proposed' AND evidence = ARRAY[%(doc)s]::uuid[]",
     "DELETE FROM extraction_state WHERE document_id = %(doc)s",
 )
 # A save whose message left its document (deleted or edited in the source, or now dropped) goes with it, unless a curator
-# confirmed it (C2c); its exact section is what was saved.
-UNSAVED_SQL = """DELETE FROM knowledge_units u WHERE u.created_by = 'slack-save' AND u.status = 'proposed'
+# confirmed it (C2c, C1b); its exact section is what was saved.
+UNSAVED_SQL = """DELETE FROM knowledge_units u WHERE u.created_by IN ('slack-save', 'teams-save') AND u.status = 'proposed'
 AND u.evidence = ARRAY[%(doc)s]::uuid[] AND NOT EXISTS (
   SELECT 1 FROM chunks k WHERE k.document_id = %(doc)s AND k.heading_path = u.sections[1] AND k.body = u.body)"""
 # What no one confirmed, made from documents the source no longer has, goes with them: a save, and a model's proposal.
-ORPHANED_SQL = """DELETE FROM knowledge_units WHERE created_by IN ('extraction', 'slack-save') AND status = 'proposed'
+ORPHANED_SQL = """DELETE FROM knowledge_units WHERE created_by IN ('extraction', 'slack-save', 'teams-save') AND status = 'proposed'
 AND evidence && %s::uuid[]"""
 
 

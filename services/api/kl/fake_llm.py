@@ -120,7 +120,7 @@ GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsew
 BOTFRAMEWORK = os.environ.get("KL_FAKE_BOTFRAMEWORK", "http://fake-llm:8080/botframework")
 BOT_SCOPE = "https://api.botframework.com/.default"
 BOT_TOKEN = "fake-bot-token"
-TEAMS_BOT: dict = {"posted": []}
+TEAMS_BOT: dict = {"posted": [], "people": {}}  # C1b: people by their Teams id, set through POST /teams-bot/setup
 _BOT_KEYS: dict = {}
 # SharePoint, for Microsoft 365 (S5): sites, each granted to the apps an admin chose (Sites.Selected), with document
 # libraries holding folders and files, each file with its permissions and text; set through POST /microsoft/sites. A
@@ -286,6 +286,21 @@ def bot_token(request: dict) -> str:
     return jwt.encode(claims, bot_key(request.get("kid", "fake-bot")), algorithm="RS256", headers={"kid": request.get("kid", "fake-bot")})
 
 
+def bot_app(auth: str) -> str | None:
+    """The app a Bot Connector call's token was minted for, or None."""
+    app = auth[len(f"Bearer {BOT_TOKEN}."):] if auth.startswith(f"Bearer {BOT_TOKEN}.") else None
+    return app if app in GRAPH["apps"] else None
+
+
+def in_conversation(conversation: str, person: dict) -> bool:
+    """Whether someone is in a bot conversation: their own 1:1 chat with the bot, or a channel whose team they're in."""
+    if conversation.startswith("a:"):
+        return conversation == "a:" + person["id"][3:]
+    channel = conversation.split(";")[0]
+    return any(channel in t["channels"] and any(m.get("userId") == person.get("aadObjectId") for m in t.get("members", []))
+               for t in GRAPH["teams"].values())
+
+
 def graph_transitive(group: str, seen: frozenset = frozenset()) -> list[dict]:
     """A group's users, nested groups flattened, as Graph's transitiveMembers lists them."""
     users = []
@@ -410,8 +425,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"issuer": "https://api.botframework.com", "jwks_uri": f"{BOTFRAMEWORK}/v1/.well-known/keys"})
         if self.path == "/botframework/v1/.well-known/keys":
             return self._json(200, bot_jwks())
-        if self.path == "/teams-bot/posted":  # what the bot posted, for smoke to read (C1a)
+        if self.path == "/teams-bot/posted":  # what the bot posted, for smoke to read (C1a), its private replies too (C1b)
             return self._json(200, TEAMS_BOT["posted"])
+        if self.path.startswith("/teams-bot/v3/conversations/") and "/members/" in self.path:  # someone in a conversation (C1b)
+            from urllib.parse import unquote
+            if not bot_app(self.headers.get("Authorization") or ""):
+                return self._json(401, {"error": {"code": "Unauthorized"}})
+            conversation, _, user = self.path[len("/teams-bot/v3/conversations/"):].partition("/members/")
+            person = TEAMS_BOT["people"].get(unquote(user))
+            if person is None or not in_conversation(unquote(conversation), person):
+                return self._json(404, {"error": {"code": "MemberNotFoundInConversation"}})
+            return self._json(200, person)
         if self.path.startswith("/microsoft/v1.0/"):
             return self._graph(urlparse(self.path))
         if self.path.startswith("/microsoft/download/"):  # a pre-authenticated download address: no Graph token
@@ -1238,12 +1262,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if path == "/botframework/sign":  # smoke makes a token as Bot Framework signs one for a bot (C1a)
             return self._json(200, {"token": bot_token(self._body())})
-        if path == "/teams-bot/v3/conversations":  # the bot starts a post in a channel: capture's notice (C1a)
-            auth = self.headers.get("Authorization") or ""
-            app = auth[len(f"Bearer {BOT_TOKEN}."):] if auth.startswith(f"Bearer {BOT_TOKEN}.") else None
+        if path == "/teams-bot/setup":  # smoke sets who Teams knows, by their Teams id (C1b)
+            TEAMS_BOT["people"] = self._body().get("people", {})
+            return self._json(200, {})
+        if path.startswith("/teams-bot/v3/conversations/") and path.endswith("/activities"):  # a reply in a 1:1 chat (C1b)
+            from urllib.parse import unquote
+            app, body = bot_app(self.headers.get("Authorization") or ""), self._body()
+            chat = unquote(path[len("/teams-bot/v3/conversations/"):-len("/activities")])
+            person = next((p for p in TEAMS_BOT["people"].values() if chat == "a:" + p["id"][3:]), None)
+            if not app or person is None:
+                return self._json(404 if app else 401, {"error": {"code": "ConversationNotFound"}})
+            TEAMS_BOT["posted"].append({"chat": chat, "user": person["id"], "text": body.get("text", ""), "private": True,
+                                        "format": body.get("textFormat"), "app": app})
+            return self._json(201, {"id": str(len(TEAMS_BOT["posted"]))})
+        if path == "/teams-bot/v3/conversations":  # the bot starts a post in a channel (C1a's notice), or a 1:1 chat (C1b)
+            app = bot_app(self.headers.get("Authorization") or "")
             body = self._body()
-            if app not in GRAPH["apps"]:
+            if not app:
                 return self._json(401, {"error": {"code": "Unauthorized", "message": "Authorization has been denied"}})
+            if not body.get("isGroup"):  # a 1:1 chat with someone Teams knows, by their id
+                user = ((body.get("members") or [{}])[0] or {}).get("id")
+                if user not in TEAMS_BOT["people"]:
+                    return self._json(403, {"error": {"code": "BotNotInConversationRoster"}})
+                return self._json(201, {"id": "a:" + user[3:]})
             channel = ((body.get("channelData") or {}).get("channel") or {}).get("id")
             if not body.get("isGroup") or not any(channel in t["channels"] and app in t.get("consented", []) for t in GRAPH["teams"].values()):
                 return self._json(403, {"error": {"code": "BotNotInConversationRoster"}})

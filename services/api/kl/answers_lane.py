@@ -14,10 +14,10 @@ import time
 import psycopg
 from psycopg.rows import dict_row
 
-from . import config, shutdown, slack_ask, telemetry, worker
+from . import chat_ask, config, shutdown, slack_ask, teams_ask, telemetry, worker
 
 POLL_SECONDS = float(os.environ.get("KL_ANSWERS_POLL_SECONDS", "1"))
-HANDLERS = {"slack.ask": slack_ask.ask}
+HANDLERS = {"slack.ask": slack_ask.ask, "teams.ask": teams_ask.ask}
 assert set(HANDLERS) == set(worker.LANE_KINDS)
 
 log = logging.getLogger("kl.answers_lane")
@@ -43,7 +43,7 @@ def main() -> None:
                     raise SystemExit(f"answers lane: org {config.ORG_SLUG!r} not found")
                 conn.execute("SELECT set_config('kl.org_id', %s, false)", (str(org_id),))
                 if not warmed:
-                    slack_ask.warm()
+                    chat_ask.warm()
                     warmed = True
                 log.info("answers lane ready (org %s)", config.ORG_SLUG)
                 while not shutdown.requested.is_set():

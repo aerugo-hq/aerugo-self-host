@@ -2,7 +2,8 @@
 
 What the identity team creates for Aerugo to read Microsoft Teams, and exactly the access it needs. Aerugo reads the
 standard channels of the teams whose owners add your company's Teams app, and nothing else: each post keeps its team's
-own readers. Its one write is capture's notice, in a channel whose capture is on (below).
+own readers. Its writes are few: capture's notice in a channel whose capture is on, and private replies, each in the 1:1
+chat of the person who asked or saved something (below).
 
 ## The app
 
@@ -61,6 +62,35 @@ shows that message in a channel the connection reads and the person who chose it
 message again and drops what was proposed from its post (a unit a curator already confirmed goes back to them for
 review). Turning a channel off is the team admin's, in Aerugo; removing the app ends everything for the team.
 
+## Asking
+
+Once the connection's team admin chooses one of the team's models in its Answers panel (and what may reach Teams:
+public and internal unless they allow more), people ask the bot in its 1:1 chat, or by mentioning it in a channel of a
+team whose owner added the app. Each is answered privately, in the asker's own 1:1 chat with the bot, never in a channel:
+
+- **Who's asking** is read back from Teams (the person in that conversation: their Entra id, tenant, role, and email),
+  never taken from the delivery. A guest, or someone in another tenant, isn't answered.
+- **They're answered as themselves:** their Microsoft account must be linked to them in Aerugo (signing in does that,
+  by their verified company email), their last sign-in under a week old, the org's admission must let them in, and the
+  directory mustn't list them as having left. Asking uses the team's model, so only its members can ask.
+- **A mention's question is read back from Graph**, and answered only for its own author. A question in the 1:1 chat is
+  the one text Aerugo takes from a delivery (invariant 13's recorded exception): the asker's own words to the bot, run
+  as them and never kept.
+- **The reply is plain text:** the answer, the sources it cites by title with their address in Aerugo's reader, its
+  confidence, and, when some sources weren't sent to Teams, where to ask for the full answer. Nothing in it becomes a
+  link with a hidden address, or a mention.
+
+The app's bot needs the personal scope (it's in `deploy/teams/manifest.json`) for its 1:1 chats.
+
+## Save to Aerugo
+
+Anyone in a team can choose **Save to Aerugo** from a message's More actions menu: their own message anywhere the app
+reads, someone else's only in a channel whose capture is on. Aerugo reads the message back from Graph, and never saves
+one marked don't capture or one speaking of someone's personal matters, nor anything a guest or someone outside the team
+asks for. What's saved becomes a proposed unit for the connection's team's curators, readable only by the team, and
+answers nothing until a curator confirms it. The person who saved is told privately, in their 1:1 chat with the bot.
+A saved message deleted or edited in Teams takes its unconfirmed save with it on the next sync.
+
 ## How the bot's deliveries are checked
 
 Bot Framework signs no HMAC over a delivery. It sends a token Microsoft signs, which Aerugo checks before anything else:
@@ -73,5 +103,4 @@ it acts on. The bot posts only to the service address the connection names, neve
 
 ## Not built yet
 
-The bot answering questions and Save to Aerugo (C1b), pointer and live-only modes, private and shared channels, and
-meeting transcripts (C3).
+Follow-up questions in a thread, pointer and live-only modes, private and shared channels, and meeting transcripts (C3).

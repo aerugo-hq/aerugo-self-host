@@ -5055,7 +5055,7 @@ def a_teams_channel_reaches_only_its_team_and_is_captured_with_both_keys():
         return {c["channel"]: c["capture"] for c in api("GET", path + "/capture", "alice").json()["channels"]}
 
     def posted():
-        return [p for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json() if p["channel"] == channel]
+        return [p for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json() if p.get("channel") == channel]
 
     def proposals(key):
         with psycopg.connect(OWNER_DB) as conn:
@@ -5188,6 +5188,193 @@ def a_teams_channel_reaches_only_its_team_and_is_captured_with_both_keys():
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
         stale = {(t["user"], t["relation"], t["object"]) for u in people for t in fga.read({"object": f"identity:{principal(u)[4:]}"})
+                 if t["user"] == f"user:{u}"}
+        if stale:  # a link sign-in matching made from the team's members, as the Entra check leaves none
+            fga.write(deletes=stale)
+
+
+@check
+def teams_asks_are_answered_privately_and_saves_kept_for_the_team():
+    """C1b, the Teams bot: a question to the bot in its 1:1 chat and a channel mention are answered only to the asker, in their own 1:1 chat with the bot, with Ask's own answer for them, once the team's admin chose a model; who's asking is read back from Teams, so a guest, someone Aerugo can't link, and a delivery naming one person from another's chat get no answer; a mention is answered only for its own author, read back from Graph; what may reach Teams is capped; the bot never answers in a channel; "Save to Aerugo" keeps your own post anywhere the app reads and someone else's only where capture is on, for the team's curators and readable by the team alone, never a marked or sensitive message, never by someone outside the team, and tells the saver privately; a saved post deleted in Teams leaves its save's text nowhere"""
+    from .authz import fga
+    from .teams import key_of
+    from .teams_bot import saved_topic
+    tag = secrets.token_hex(3).upper()
+    tenant = str(uuid.uuid4())
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    someone_else = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    people = ("alice", "bob", "carol", "vendor")
+    aad = {u: str(uuid.uuid4()) for u in people}
+    tid = {u: f"29:{u}{tag}" for u in people}
+    email = lambda u: f"{u}@{'else.test' if u == 'vendor' else 'acme.test'}"
+    principal = lambda u: f"ext:microsoft.{email(u)}"
+    team, channel = str(uuid.uuid4()), f"19:asks{tag.lower()}@thread.tacv2"
+    question = f"How do we respond to a payments incident {tag.lower()}?"
+    float_text, sam = f"Count the float at close and log it in the drawer book {tag}.", f"Sam is having surgery on Tuesday ({tag})"
+    mid = lambda n: f"17603650{n:05d}"
+    at = lambda: f'<at id="0">Aerugo</at> '
+    ours = [{"id": 0, "mentionText": "Aerugo", "mentioned": {"application": {"id": app["client_id"], "displayName": "Aerugo"}}}]
+    post = lambda n, who, html, **more: {"id": mid(n), "messageType": "message", "createdDateTime": "2026-10-13T14:00:00Z",
+                                        "lastModifiedDateTime": "2026-10-13T14:00:00Z", "replyToId": None,
+                                        "from": {"user": {"id": aad[who], "displayName": who.title()}},
+                                        "body": {"contentType": "html", "content": f"<p>{html}</p>"}, **more}
+
+    def state(deleted=()):
+        posts = [post(1, "carol", f"How do we reset the till float {tag}?", replies=[{**post(2, "alice", float_text), "replyToId": mid(1)}]),
+                 post(3, "alice", at() + question, mentions=ours), post(4, "carol", at() + f"carol's own question {tag}", mentions=ours),
+                 post(5, "carol", f"Reminder: the side gate code for {tag.lower()} is 4412."), post(6, "alice", sam)]
+        return {"teams": {team: {"name": "Payments floor", "consented": [app["client_id"]],
+                                 "members": [{"userId": aad["alice"], "email": email("alice"), "displayName": "Alice", "roles": ["owner"]},
+                                             {"userId": aad["carol"], "email": email("carol"), "displayName": "Carol", "roles": []},
+                                             {"userId": aad["vendor"], "email": email("vendor"), "displayName": "Vendor", "roles": ["guest"]}],
+                                 "channels": {channel: {"name": "Asks", "membershipType": "standard",
+                                                        "messages": [p for p in posts if p["id"] not in deleted]}}}}}
+    who = {tid[u]: {"id": tid[u], "aadObjectId": aad[u], "email": email(u), "userPrincipalName": email(u), "name": u.title(),
+                    "tenantId": tenant, "userRole": "guest" if u == "vendor" else "user"} for u in people}
+    name, service = f"teams-bot-{tag.lower()}", f"{FAKE_LLM}/teams-bot"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    linked = ("alice", "carol")  # bob's Microsoft account is linked to no one
+    links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in linked}
+    links -= {(t["user"], t["relation"], t["object"]) for _, _, o in links for t in fga.read({"object": o})}  # only what isn't there
+
+    def token(aud=None):
+        return "Bearer " + httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": aud or app["client_id"], "serviceurl": service + "/"},
+                                      timeout=10).json()["token"]
+
+    def deliver(activity, auth=None):
+        return httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", json={**activity, "serviceUrl": service + "/"}, timeout=15,
+                          headers={"Authorization": auth or token()})
+
+    def personal(n, sender, text, chat=None):
+        return deliver({"type": "message", "id": f"m{tag}{n}", "text": text, "from": {"id": tid[sender], "aadObjectId": aad[sender]},
+                        "conversation": {"id": "a:" + (chat or tid[sender])[3:], "conversationType": "personal"},
+                        "channelData": {"tenant": {"id": tenant}}})
+
+    def mention(n, sender, message):
+        return deliver({"type": "message", "id": message, "text": "never read from here", "from": {"id": tid[sender], "aadObjectId": aad[sender]},
+                        "entities": [{"type": "mention", "mentioned": {"id": f"28:{app['client_id']}"}}],
+                        "conversation": {"id": f"{channel};messageid={message}", "conversationType": "channel"},
+                        "channelData": {"tenant": {"id": tenant}, "channel": {"id": channel}}})
+
+    def act(n, sender, command, message, reply_to=None):
+        return deliver({"type": "invoke", "name": "composeExtension/submitAction", "id": f"a{tag}{n}",
+                        "from": {"id": tid[sender], "aadObjectId": aad[sender]},
+                        "channelData": {"channel": {"id": channel}, "tenant": {"id": tenant}},
+                        "value": {"commandId": command, "messagePayload": {"id": message, "replyToId": reply_to}}})
+
+    def told(u):
+        return [p["text"] for p in httpx.get(f"{service}/posted", timeout=10).json() if p.get("private") and p["user"] == tid[u]]
+
+    def until(ok, seconds=150):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(2)
+        return ok()
+
+    def reply(u, send):  # sends, then the private reply that came back for it
+        before = len(told(u))
+        assert send().status_code == 200
+        assert until(lambda: len(told(u)) > before), f"{u} got no private reply"
+        return told(u)[-1]
+
+    def jobs_idle(kind):
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.jobs WHERE kind = %s AND status NOT IN ('done', 'failed') "
+                                "AND payload->>'connection_id' = %s", (kind, cid)).fetchone()[0] == 0
+
+    def saved(message):
+        with psycopg.connect(OWNER_DB) as conn:
+            row = conn.execute("SELECT id FROM kl.knowledge_units WHERE created_by = 'teams-save' AND topic = %s",
+                               (saved_topic(channel, message),)).fetchone()
+        return str(row[0]) if row else None
+
+    linked_ids = lambda text: set(re.findall(r"#/documents/(\S+)", text))
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u in linked:
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
+    if links:
+        fga.write(writes=links)
+    ensure_fake_models()
+    for u in linked:  # each signs in, so their last sign-in is recent
+        assert api("GET", "/v1/search", u, params={"q": "incident"}).status_code == 200
+    cid = None
+    try:
+        assert httpx.post(f"{FAKE_MICROSOFT}/teams", json=state(), timeout=10).status_code == 200
+        assert httpx.post(f"{service}/setup", json={"people": who}, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/teams", "alice", json={
+            "name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "team_ids": [team], "history_days": 3650, "bot_service": service, "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        thread = key_of(channel, mid(1))
+        assert until(lambda: thread in {h["id"] for h in api("GET", "/v1/search", "alice", params={"q": tag, "scope": "org"}).json()["results"]}), \
+            "Teams' posts never arrived"
+
+        assert "isn't set up" in reply("alice", lambda: personal(1, "alice", question)), "an ask was answered before its team chose a model"
+        assert api("PUT", path + "/answers", "carol", json={"model": "payments/smoke-fake"}).status_code in (403, 404)
+        assert api("PUT", path + "/answers", "alice", json={"model": "payments/smoke-fake"}).status_code == 200
+        answer = reply("alice", lambda: personal(2, "alice", question))
+        mine = {c["id"] for c in ask_as("alice", question, "payments/smoke-fake").json()["citations"]}
+        assert linked_ids(answer) and linked_ids(answer) <= mine, f"alice's Teams answer isn't her own Ask's: {answer[:300]}"
+        assert not linked_ids(answer) & {"fin-close", "legal-hold"}, "a Teams answer named a page its asker can't read"
+        assert "Sources:" in answer and "Confidence:" in answer
+        assert "doesn't know who you are" in reply("bob", lambda: personal(3, "bob", question)), "someone Aerugo can't link was answered"
+        assert "not guests" in reply("vendor", lambda: personal(4, "vendor", question)), "a guest was answered"
+        before = len(told("alice"))
+        assert "not guests" in reply("bob", lambda: deliver({  # alice's id, from bob's chat: Teams says that's bob
+            "type": "message", "id": f"m{tag}5", "text": question, "from": {"id": tid["bob"], "aadObjectId": aad["alice"]},
+            "conversation": {"id": "a:" + tid["bob"][3:], "conversationType": "personal"}, "channelData": {"tenant": {"id": tenant}}}))
+        assert len(told("alice")) == before, "a delivery naming alice from someone else's chat was answered to her"
+        assert deliver({"type": "message", "id": f"m{tag}7", "text": question},  # another app's token
+                       auth=token(someone_else["client_id"])).status_code == 401
+
+        before = len(told("alice"))
+        assert mention(1, "alice", mid(3)).status_code == 200
+        assert until(lambda: len(told("alice")) > before), "a mention wasn't answered"
+        assert linked_ids(told("alice")[-1]) <= mine, "a mention's answer isn't its asker's"
+        before = len(told("alice"))
+        assert mention(2, "alice", mid(4)).status_code == 200  # carol's post, claimed as alice's
+        assert until(lambda: jobs_idle("teams.ask"))
+        assert len(told("alice")) == before, "a mention was answered for someone who didn't write it"
+        assert api("PUT", path + "/answers", "alice", json={"model": "payments/smoke-fake", "classifications": ["public"]}).status_code == 200
+        capped = reply("alice", lambda: personal(8, "alice", question))
+        assert not linked_ids(capped) and "aren't shown in Teams" in capped, f"an internal page reached a public-only Teams: {capped[:300]}"
+
+        assert "Saved for Payments" in reply("carol", lambda: act(1, "carol", "aerugoSave", mid(1))), "carol couldn't save her own post"
+        unit = saved(mid(1))
+        assert unit and api("GET", f"/v1/units/{unit}", "alice").status_code == 200, "a member of the team can't read a save"
+        assert api("GET", f"/v1/units/{unit}", "bob").status_code == 404, "someone outside the team read a save"
+        assert "Someone else's" in reply("carol", lambda: act(2, "carol", "aerugoSave", mid(2), mid(1))), \
+            "someone else's message was saved without capture"
+        assert "Only someone in this team" in reply("bob", lambda: act(3, "bob", "aerugoSave", mid(1))), "someone outside the team saved"
+        assert "Only someone in this team" in reply("vendor", lambda: act(4, "vendor", "aerugoSave", mid(1))), "a guest saved"
+        assert api("POST", f"{path}/capture/{channel}", "alice", json={"action": "confirm"}).json()["capture"] == "on"
+        assert "Saved for Payments" in reply("carol", lambda: act(5, "carol", "aerugoSave", mid(2), mid(1))), \
+            "someone else's reply couldn't be saved once capture was on"
+        assert "already saved" in reply("carol", lambda: act(6, "carol", "aerugoSave", mid(1)))
+        assert "personal matters" in reply("carol", lambda: act(7, "carol", "aerugoSave", mid(6))), "a sensitive message was saved"
+        assert act(8, "alice", "dontCapture", mid(5)).status_code == 200
+        assert until(lambda: jobs_idle("teams.exclude"))
+        assert "marked don't capture" in reply("carol", lambda: act(9, "carol", "aerugoSave", mid(5))), "a marked message was saved"
+        assert not saved(mid(5)) and not saved(mid(6))
+        notices = [p for p in httpx.get(f"{service}/posted", timeout=10).json() if p.get("channel") == channel]
+        assert all(p["text"].startswith("Aerugo now proposes") for p in notices) and len(notices) <= 1, \
+            f"the bot posted in the channel beyond capture's notice: {notices}"
+
+        assert httpx.post(f"{FAKE_MICROSOFT}/teams", json=state(deleted=(mid(1),)), timeout=10).status_code == 200
+        assert api("POST", path + "/refresh", "alice").status_code in (200, 202)
+        assert until(lambda: not saved(mid(1)) and not stored_anywhere(f"How do we reset the till float {tag}?"), 240), \
+            "a saved post deleted in Teams kept its save"
+    finally:
+        if cid:
+            api("DELETE", path, "alice")
+        if links:
+            fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
+        stale = {(t["user"], t["relation"], t["object"]) for u in linked for t in fga.read({"object": f"identity:{principal(u)[4:]}"})
                  if t["user"] == f"user:{u}"}
         if stale:  # a link sign-in matching made from the team's members, as the Entra check leaves none
             fga.write(deletes=stale)

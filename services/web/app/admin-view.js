@@ -430,7 +430,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [ct, setCt] = useState(blankCatalog); // the data catalog form (S7)
   const [hook, setHook] = useState(null); // the webhook panel open under a row (S8): { name, signing, made }
   const [capture, setCapture] = useState(null); // the capture panel open under a Slack row (C2b): { name, channels, error }
-  const [answering, setAnswering] = useState(null); // the answers panel under a Slack row (C2d): { name, models, model, classes, error }
+  const [answering, setAnswering] = useState(null); // the answers panel under a Slack or Teams row (C2d, C1b): { name, chat, models, model, classes, error }
   const [declared, setDeclared] = useState([]); // each connection as the API reads it back, for Terraform (G2)
   const load = () => kl(`workspaces/${enc(ws)}/connections`).then((r) => {
     setItems(r.connections);
@@ -499,26 +499,27 @@ function Connections({ ws, teams, orgAdmin }) {
             ch.capture !== "off" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setChannel(c.name, ch.channel, "off") }, "Turn off") : null))))
       : h("p", { className: "muted connector-wide" }, "No channels yet: they appear once the bot is in one and the connection has synced."),
     h("div", { className: "actions connector-wide" }, h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setCapture(null) }, "Close")));
-  async function openAnswers(name) {
+  async function openAnswers(name, kind) {
     if (answering?.name === name) {
       setAnswering(null);
       return;
     }
-    setAnswering({ name, models: null, model: "", classes: [], error: null });
+    const chat = kind === "teams" ? "Teams" : "Slack";
+    setAnswering({ name, chat, models: null, model: "", classes: [], error: null });
     try {
       const [a, m] = await Promise.all([kl(`workspaces/${enc(ws)}/connections/${enc(name)}/answers`), kl(`workspaces/${enc(ws)}/models`)]);
-      setAnswering({ name, models: m.models.map((x) => x.name), model: (a.model || "").split("/")[1] || "", classes: a.classifications, error: null });
+      setAnswering({ name, chat, models: m.models.map((x) => x.name), model: (a.model || "").split("/")[1] || "", classes: a.classifications, error: null });
     } catch (e) {
-      setAnswering({ name, models: null, model: "", classes: [], error: e.message });
+      setAnswering({ name, chat, models: null, model: "", classes: [], error: e.message });
     }
   }
   async function saveAnswers() {
-    const { name, model, classes } = answering;
+    const { name, chat, model, classes } = answering;
     say(name, "idle", "Saving…");
     try {
       await kl(`workspaces/${enc(ws)}/connections/${enc(name)}/answers`, { method: "PUT",
         body: { model: model ? `${ws}/${model}` : null, classifications: classes } });
-      say(name, "ok", model ? `Slack asks are answered through ${model}` : "Slack asks are off");
+      say(name, "ok", model ? `${chat} asks are answered through ${model}` : `${chat} asks are off`);
       setAnswering(null);
     } catch (e) {
       say(name, "bad", e.message);
@@ -526,16 +527,18 @@ function Connections({ ws, teams, orgAdmin }) {
   }
   const REACH = ["public", "internal", "confidential", "restricted"];
   const answersPanel = (c) => h("div", { className: "connector-form", role: "group", "aria-label": `Answers for ${c.name}` },
-    h("p", { className: "connector-lede connector-wide" }, "Answers /aerugo ask and mentions privately, as each asker, through one of this team's models, so only its members can ask here. An answer carries only what's classified as you allow below; anything more is left out and the asker is pointed to Aerugo. Askers sign in to Aerugo at least once a week."),
+    h("p", { className: "connector-lede connector-wide" }, answering.chat === "Teams"
+      ? "Answers questions asked of your Teams app, in its 1:1 chat or by a mention in a channel, privately in each asker's own 1:1 chat with it, as each asker, through one of this team's models, so only its members can ask here. An answer carries only what's classified as you allow below; anything more is left out and the asker is pointed to Aerugo. Askers sign in to Aerugo at least once a week."
+      : "Answers /aerugo ask and mentions privately, as each asker, through one of this team's models, so only its members can ask here. An answer carries only what's classified as you allow below; anything more is left out and the asker is pointed to Aerugo. Askers sign in to Aerugo at least once a week."),
     answering.error ? h("div", { className: "connector-wide" }, h(Alert, { onRetry: () => { setAnswering(null); openAnswers(c.name); } }, answering.error))
       : answering.models === null ? h("div", { className: "connector-wide" }, h(SkeletonRows, { rows: 2, widths: [30, 50] }))
       : [
         h("label", { key: "model", className: "field" }, h("span", null, "Model"),
           h("select", { className: "input", value: answering.model, onChange: (e) => setAnswering({ ...answering, model: e.target.value }) },
-            h("option", { value: "" }, "Off: Slack asks aren't answered"),
+            h("option", { value: "" }, `Off: ${answering.chat} asks aren't answered`),
             answering.models.map((m) => h("option", { key: m, value: m }, m)))),
         answering.models.length ? null : h("p", { key: "none", className: "muted connector-wide" }, "This team has no models yet: add one under Models."),
-        h("fieldset", { key: "reach", className: "connector-wide" }, h("legend", null, "What may reach Slack"),
+        h("fieldset", { key: "reach", className: "connector-wide" }, h("legend", null, `What may reach ${answering.chat}`),
           REACH.map((r) => h("label", { key: r, className: "check" }, h("input", { type: "checkbox", checked: answering.classes.includes(r),
             onChange: () => setAnswering({ ...answering, classes: answering.classes.includes(r) ? answering.classes.filter((x) => x !== r) : [...answering.classes, r] }) }), r))),
       ],
@@ -1169,8 +1172,8 @@ function Connections({ ws, teams, orgAdmin }) {
                 onClick: () => setHook(hook?.name === c.name ? null : { name: c.name, signing: "", made: null }) }, c.webhook ? "Webhook on" : "Webhook") : null,
               c.kind === "slack" || c.kind === "teams" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": capture?.name === c.name,
                 onClick: () => openCapture(c.name) }, "Capture") : null,
-              c.kind === "slack" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": answering?.name === c.name,
-                onClick: () => openAnswers(c.name) }, "Answers") : null,
+              c.kind === "slack" || c.kind === "teams" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": answering?.name === c.name,
+                onClick: () => openAnswers(c.name, c.kind) }, "Answers") : null,
               h("button", { type: "button", className: "btn btn-sm", onClick: () => resync(c.name), disabled: c.status === "disabled" },
                 h(Icon, { name: "refresh", size: 14 }), "Re-sync"),
               c.managed_by ? null : [ // what Terraform manages changes there, not here
