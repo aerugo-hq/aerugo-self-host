@@ -121,12 +121,12 @@ def test_from_a_dont_capture_action_only_the_ids_are_taken():
                 "from": {"aadObjectId": user}, "channelData": {"channel": {"id": CHANNEL}, "tenant": {"id": TENANT}},
                 "value": {"commandId": "dontCapture", "messagePayload": {"id": "1760364120000", "replyToId": "1760364000000",
                                                                           "body": {"content": "never taken from here"}}}}
-    assert teams_bot.mark_request(activity, TENANT) == {"channel": CHANNEL, "message": "1760364120000", "user": user,
-                                                        "post": "1760364000000"}
-    assert teams_bot.mark_request({**activity, "channelData": {"channel": {"id": CHANNEL}, "tenant": {"id": str(uuid.uuid4())}}}, TENANT) is None
-    assert teams_bot.mark_request({**activity, "value": {**activity["value"], "commandId": "save"}}, TENANT) is None
-    assert teams_bot.mark_request({**activity, "channelData": {"channel": {"id": "19:x@thread.tacv2/../teams"}, "tenant": {"id": TENANT}}}, TENANT) is None
-    assert teams_bot.mark_request({**activity, "type": "message"}, TENANT) is None
+    assert teams_bot.action_request(activity, TENANT) == ("teams.exclude", {"channel": CHANNEL, "message": "1760364120000",
+                                                                           "user": user, "post": "1760364000000"})
+    assert teams_bot.action_request({**activity, "channelData": {"channel": {"id": CHANNEL}, "tenant": {"id": str(uuid.uuid4())}}}, TENANT) is None
+    assert teams_bot.action_request({**activity, "value": {**activity["value"], "commandId": "save"}}, TENANT) is None
+    assert teams_bot.action_request({**activity, "channelData": {"channel": {"id": "19:x@thread.tacv2/../teams"}, "tenant": {"id": TENANT}}}, TENANT) is None
+    assert teams_bot.action_request({**activity, "type": "message"}, TENANT) is None
 
 
 def test_only_someone_in_the_team_marks_a_message():
@@ -134,3 +134,158 @@ def test_only_someone_in_the_team_marks_a_message():
     members = [member("eli@acme.test", user=eli), member("vendor@else.test", "guest", user=vendor)]
     assert teams.may_mark(members, eli.upper())
     assert not teams.may_mark(members, vendor) and not teams.may_mark(members, str(uuid.uuid4())) and not teams.may_mark(members, "")
+
+
+# ------------------------------------------------------------------ C1b: asks and saves
+APP_USER = "29:1abcDEF-ghi_JKL"
+
+
+def test_a_question_comes_from_a_1on1_message_or_from_a_mention_read_back_later():
+    user = str(uuid.uuid4())
+    base = {"type": "message", "id": "1760364300000", "from": {"id": APP_USER, "aadObjectId": user},
+            "channelData": {"tenant": {"id": TENANT}}}
+    personal = {**base, "text": "  Which forklift for dock 2?  ", "conversation": {"id": "a:1chatXYZ", "conversationType": "personal"}}
+    assert teams_bot.ask_request(personal, TENANT, APP) == {"user": user, "user_id": APP_USER, "conversation": "a:1chatXYZ",
+                                                           "via": "personal", "question": "Which forklift for dock 2?"}
+    group = {**base, "text": "hi", "conversation": {"id": "19:meeting1@thread.v2", "conversationType": "groupChat"}}
+    assert teams_bot.ask_request(group, TENANT, APP) is None  # group chats are never read
+
+    def mention(app):
+        return {**base, "text": "<at>Aerugo</at> which forklift?", "entities": [{"type": "mention", "mentioned": {"id": f"28:{app}"}}],
+                "conversation": {"id": f"{CHANNEL};messageid=1760364000000", "conversationType": "channel"},
+                "channelData": {"tenant": {"id": TENANT}, "channel": {"id": CHANNEL}}}
+    asked = teams_bot.ask_request(mention(APP), TENANT, APP)
+    assert asked == {"user": user, "user_id": APP_USER, "conversation": f"{CHANNEL};messageid=1760364000000", "via": "mention",
+                     "channel": CHANNEL, "message": "1760364300000", "post": "1760364000000"} and "question" not in asked
+    assert teams_bot.ask_request(mention(str(uuid.uuid4())), TENANT, APP) is None  # another app mentioned
+    assert teams_bot.ask_request({**personal, "channelData": {"tenant": {"id": str(uuid.uuid4())}}}, TENANT, APP) is None
+
+
+def test_a_mentions_question_drops_only_the_apps_own_mention():
+    message = {"body": {"contentType": "html", "content": '<p><at id="0">Aerugo</at> where is <at id="1">Dock</at> 2?</p>'},
+               "mentions": [{"id": 0, "mentioned": {"application": {"id": APP.upper()}}}, {"id": 1, "mentioned": {"user": {"id": "x"}}}]}
+    assert teams.question_of(message, APP) == "where is @Dock 2?"
+
+
+def test_only_someone_in_the_team_saves_their_own_message_or_one_in_a_captured_channel():
+    eli, vendor, carol = (str(uuid.uuid4()) for _ in range(3))
+    members = [member("eli@acme.test", user=eli), member("carol@acme.test", user=carol), member("vendor@else.test", "guest", user=vendor)]
+    own = {**message("1760364000000", "Use forklift 5."), "from": {"user": {"id": eli.upper(), "displayName": "Eli"}}}
+    assert teams.may_save(members, eli, own, False, frozenset()) is None                 # your own, anywhere the app reads
+    assert teams.may_save(members, carol, own, False, frozenset()) == "someone else's"   # someone else's: only where captured
+    assert teams.may_save(members, carol, own, True, frozenset()) is None
+    assert teams.may_save(members, vendor, own, True, frozenset()) == "saver"            # a guest saves nothing
+    assert teams.may_save(members, eli, own, True, frozenset({"1760364000000"})) == "marked"
+    sensitive = {**own, "body": {"contentType": "html", "content": "<p>Sam is having surgery on Tuesday.</p>"}}
+    assert teams.may_save(members, eli, sensitive, True, frozenset()) == "sensitive"
+    assert teams.may_save(members, eli, {}, True, frozenset()) == "gone"
+
+
+def test_a_save_is_taken_only_with_where_to_tell_the_saver():
+    user = str(uuid.uuid4())
+    activity = {"type": "invoke", "name": "composeExtension/submitAction", "id": "f:9", "from": {"id": APP_USER, "aadObjectId": user},
+                "channelData": {"channel": {"id": CHANNEL}, "tenant": {"id": TENANT}},
+                "value": {"commandId": "aerugoSave", "messagePayload": {"id": "1760364000000"}}}
+    assert teams_bot.action_request(activity, TENANT) == ("teams.save", {"channel": CHANNEL, "message": "1760364000000", "user": user,
+                                                                         "user_id": APP_USER})
+    assert teams_bot.action_request({**activity, "from": {"aadObjectId": user}}, TENANT) is None
+
+
+def test_the_teams_reply_is_plain_text_naming_sources_by_title():
+    from kl import teams_ask
+    result = {"answer": "Use [this](https://evil.example) <at>everyone</at>", "withheld_by_policy": 1, "confidence": {"level": "high"},
+              "citations": [{"id": "teams-abc-1760364000000", "title": "Reno DC: Forklift 3", "cited": True},
+                            {"id": "unit:0b1d", "title": "Forklift", "cited": True, "unit": {"kind": "fact"}},
+                            {"id": "legal-hold", "title": "Not cited", "cited": False}]}
+    reply = teams_ask.reply_of(result, "https://aerugo.example")
+    assert "- Reno DC: Forklift 3: https://aerugo.example/#/documents/teams-abc-1760364000000" in reply
+    assert "- Forklift (knowledge)" in reply and "Not cited" not in reply and "Confidence: high" in reply
+    assert "Some sources aren't shown in Teams" in reply
+
+
+class Lane:
+    """Stands in for the answers lane's connection: the Teams connection, and the channel a mention is in."""
+
+    def __init__(self, audits):
+        self.audits = audits
+
+    def transaction(self):
+        import contextlib
+        return contextlib.nullcontext()
+
+    def execute(self, sql, params=()):
+        if sql.startswith("INSERT INTO audit_events"):
+            self.audits.append(params)
+        row = {"id": "c1", "org_id": "o1", "kind": "teams", "status": "ready", "team": "distribution", "ms_team": str(uuid.UUID(int=7)),
+               "config": {"tenant_id": TENANT, "client_id": APP, "api_base": "https://graph.microsoft.com",
+                          "answers": {"model": "distribution/fake"}}}
+
+        class Result:
+            def fetchone(self):
+                return row
+        return Result()
+
+
+def test_only_the_asker_teams_reads_back_is_answered_and_only_for_their_own_mention(monkeypatch):
+    from kl import chat_ask, teams_ask
+    eli = str(uuid.uuid4())
+    told, asked, audits = [], [], []
+    person = {"aadObjectId": eli, "email": "Eli@Acme.test", "tenantId": TENANT, "userRole": "user"}
+
+    class Bot:
+        def __init__(self, found):
+            self.found = found
+
+        def member(self, conversation, user_id):
+            return self.found
+
+    class Graph:
+        def __init__(self, author):
+            self.author = author
+
+        def message(self, team, channel, message, post=None):
+            return {"id": message, "from": {"user": {"id": self.author}}, "mentions": [],
+                    "body": {"contentType": "html", "content": "<p>Which forklift?</p>"}}
+    monkeypatch.setattr(teams_bot, "tell", lambda c, user_id, text: told.append((user_id, text)))
+    monkeypatch.setattr(chat_ask, "answer_as",
+                        lambda conn, account, email, q, s: asked.append((account, q)) or (None, {"answer": "Forklift 5."}, "eli"))
+
+    def job(**more):
+        return {"payload": {"connection_id": "c1", "user": eli, "user_id": APP_USER, "conversation": "a:1chatXYZ", **more}}
+    for who in ({**person, "aadObjectId": str(uuid.uuid4())}, {**person, "userRole": "guest"}, {**person, "tenantId": str(uuid.uuid4())}, {}):
+        monkeypatch.setattr(teams_bot, "bot_for", lambda c, who=who: Bot(who))
+        assert teams_ask.ask(Lane(audits), job(via="personal", question="Which forklift?")) == {"refused": "outsider"}
+    monkeypatch.setattr(teams_bot, "bot_for", lambda c: Bot(person))
+    assert teams_ask.ask(Lane(audits), job(via="personal", question="Which forklift?")) == {"answered": True}
+    assert asked[-1] == ("ext:microsoft.eli@acme.test", "Which forklift?") and told[-1] == (APP_USER, "Forklift 5.") and len(audits) == 1
+    mention = job(via="mention", channel=CHANNEL, message="1760364300000", conversation=f"{CHANNEL};messageid=1760364000000")
+    monkeypatch.setattr(teams, "client_for", lambda c: Graph(str(uuid.uuid4())))  # someone else's message
+    assert teams_ask.ask(Lane(audits), mention) == {"skipped": "the message isn't the asker's"}
+    monkeypatch.setattr(teams, "client_for", lambda c: Graph(eli))
+    assert teams_ask.ask(Lane(audits), {"payload": {**mention["payload"], "question": "never from here"}}) == {"answered": True}
+    assert asked[-1] == ("ext:microsoft.eli@acme.test", "Which forklift?")  # read back from Graph, not the delivery
+
+
+def test_a_save_is_refused_unless_teams_says_the_saver_is_who_the_delivery_names(monkeypatch):
+    eli, told = str(uuid.uuid4()), []
+
+    class Bot:
+        def __init__(self, found):
+            self.found = found
+
+        def member(self, conversation, user_id):
+            return self.found
+
+    class Graph:
+        def message(self, team, channel, message, post=None):
+            raise AssertionError("a save went on to Graph before its saver was confirmed")
+    monkeypatch.setattr(teams_bot, "tell", lambda c, user_id, text: told.append(text))
+    monkeypatch.setattr(teams, "client_for", lambda c: Graph())
+    monkeypatch.setattr(teams_bot, "channel_of", lambda conn, p: {"id": "c1", "org_id": "o1", "ms_team": str(uuid.UUID(int=7)),
+                                                                  "config": {"tenant_id": TENANT}, "capture": "on"})
+    job = {"payload": {"connection_id": "c1", "channel": CHANNEL, "message": "1760364000000", "user": eli, "user_id": APP_USER}}
+    person = {"aadObjectId": eli, "tenantId": TENANT, "userRole": "user"}
+    for found in ({**person, "aadObjectId": str(uuid.uuid4())}, {**person, "userRole": "guest"}, {**person, "tenantId": str(uuid.uuid4())}, {}):
+        monkeypatch.setattr(teams_bot, "bot_for", lambda c, found=found: Bot(found))
+        assert teams_bot.save(Lane([]), job) == {"refused": "saver"}
+    assert told == [teams_bot.NOT_SAVED["saver"]] * 4

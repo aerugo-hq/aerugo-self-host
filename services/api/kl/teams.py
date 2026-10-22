@@ -37,6 +37,9 @@ log = logging.getLogger("kl.teams")
 
 CHANNEL = re.compile(r"^19:[A-Za-z0-9_-]{1,100}@thread\.(tacv2|skype)$")
 MESSAGE = re.compile(r"^[0-9]{10,20}$")
+USER_ID = re.compile(r"^29:[A-Za-z0-9_-]{1,400}$")  # a person's id in Teams' bot conversations (C1b)
+# A bot conversation: a 1:1 chat with the bot, or a channel's (with its post)
+CONVERSATION = re.compile(r"^(a:[A-Za-z0-9_-]{1,400}|19:[A-Za-z0-9_-]{1,100}@thread\.(tacv2|skype)(;messageid=[0-9]{10,20})?)$")
 HISTORY_DAYS = 365
 
 
@@ -228,3 +231,36 @@ def may_mark(members: list[dict], user: str) -> bool:
     """Who may mark a message "don't capture": anyone in its team (not a guest), as Graph lists the team now."""
     return GUID.fullmatch(user or "") is not None and any(
         str(m.get("userId") or "").lower() == user.lower() and member_email(m) for m in members)
+
+
+def author(message: dict) -> str:
+    """A message's author, as Graph says: their Entra id, lower case ('' for an app's)."""
+    return str(((message.get("from") or {}).get("user") or {}).get("id") or "").lower()
+
+
+def question_of(message: dict, app: str) -> str:
+    """A mention's question (C1b): its text without its mentions of the app itself, as Graph lists them."""
+    ours = {str(m.get("id")) for m in message.get("mentions") or []
+            if str((((m.get("mentioned") or {}).get("application") or {}).get("id")) or "").lower() == app.lower()}
+    body = dict(message.get("body") or {})
+    if ours and body.get("contentType") == "html":
+        body["content"] = re.sub(r'<at\b[^>]*\bid="([^"]*)"[^>]*>.*?</at>', lambda m: " " if m[1] in ours else m[0],
+                                 str(body.get("content") or ""), flags=re.I | re.S)
+    return re.sub(r"\s+", " ", plain(body)).strip()
+
+
+def may_save(members: list[dict], saver: str, message: dict, captured: bool, excluded: frozenset[str]) -> str | None:
+    """Why a message can't be saved, or None (C1b, C2c's rules): by someone in its team, never a guest; their own
+    message anywhere the app reads, someone else's only where capture is on; never one marked "don't capture" or speaking
+    of someone's personal matters."""
+    if not may_mark(members, saver):
+        return "saver"
+    if not kept(message):
+        return "gone"
+    if author(message) != saver.lower() and not captured:
+        return "someone else's"
+    if str(message.get("id")) in excluded:
+        return "marked"
+    if privacy.sensitive(plain(message.get("body"))):
+        return "sensitive"
+    return None

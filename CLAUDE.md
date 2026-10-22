@@ -130,7 +130,7 @@ decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 10. No new infrastructure dependency without an ADR in `docs/adr/`.
 11. Don't return counts of hidden items or distinguish "forbidden" from "not found" for content or private workspaces. Use 404.
 12. Synced content carries only the source's permissions. ACL arrays hold source identities (`ext:github.<login>`), and a caller gets them only through a `principal_aliases` link, expanded inside `db.scoped()`. Never put workspace, group, or org principals on synced content: connecting a source must never widen who can read it.
-13. Webhooks are hints, never truth. A delivery must pass HMAC verification (for Teams, Microsoft's signed Bot Framework token stands in for it: C1a, approved 2026-10-21) and replay protection, and it may only queue jobs. Never read permissions or content from a webhook payload; the job re-reads the source. One recorded exception (C2d, approved 2026-10-21): `/aerugo ask`'s question, taken from the signed command because no Slack message holds it; it's the asker's own query, run as them, never source content and never kept as knowledge.
+13. Webhooks are hints, never truth. A delivery must pass HMAC verification (for Teams, Microsoft's signed Bot Framework token stands in for it: C1a, approved 2026-10-21) and replay protection, and it may only queue jobs. Never read permissions or content from a webhook payload; the job re-reads the source. One recorded exception (C2d, approved 2026-10-21): `/aerugo ask`'s question, taken from the signed command because no Slack message holds it, and a question asked of the Teams bot in its 1:1 chat (C1b, approved 2026-10-21), taken from the signed delivery for the same reason; it's the asker's own query, run as them, never source content and never kept as knowledge.
 14. Every link carries its provenance: the signal that made it, its strength, and the evidence behind it. Never store a bare edge.
 15. Graph expansion is authorized at every hop. A walk never passes through, or reveals, a node the asker can't read.
 16. Nothing derived mixes permissions. A summary, cluster label, or entity description shown to someone is built only from what that person can read; never precompute one across documents with different readers.
@@ -2476,6 +2476,88 @@ CI on pull request 83 first failed the team sets' gate: distribution's MRR fell 
 forklift, which waited on C1) found at #2; smoke 189 passed, 17 skipped, 0 failed, and the golden set, the scenario, the
 retailer (the forklift question new, `registers-down-leader` better), and the Atlas held their baselines. Distribution's
 entry was recorded from that run, a fresh stack in CI's order: the forklift question at #2, MRR 0.8333.
+C1b, the Teams bot answers privately and saves (the plan approved 2026-10-21 with C1a: a question asked of the bot in
+its 1:1 chat is taken from the delivery, extending C2d's recorded exception to invariant 13; everything else the bot acts
+on is read back). The answering path both bots share moved out of `slack_ask` into `kl/chat_ask.py` (`answer_as`): the
+linked account (`ext:slack.<id>` or `ext:microsoft.<email>`), the directory's leavers (`LEFT_SQL`), a sign-in under
+`KL_SLACK_ASK_DAYS`, admission, and the API's own Ask narrowed by `reach`, each refusal a key the bot words for its
+asker; `slack_ask` keeps Slack's reading back, wording, and reply. `kl/teams_ask.py` (`teams.ask`, in the answers lane
+beside `slack.ask`): who's asking is read back from the Bot Connector (`BotConnector.member`: the person in that
+conversation by the ids the delivery names, their Entra id, tenant, role, and email), so a guest, someone in another
+tenant, and a delivery naming one person from another's chat are refused; a mention's question is read back from Graph
+(`teams.question_of`, the app's own mention dropped) and answered only for its own author; a 1:1 question is the
+delivery's text, at most 1,000 characters, never kept. The answer (`reply_of`: plain text, so nothing in it becomes a
+link with a hidden address or a mention; sources by title with their address in Aerugo's reader, a unit by title alone;
+its confidence; where to ask when sources were left out) goes only to the asker's own 1:1 chat with the bot
+(`BotConnector.whisper`: a 1:1 conversation opened by their Teams id, never a delivery's conversation), never in a
+channel. The hook (`teams_bot.ask_request`) takes a message in the bot's 1:1 chat or a channel message that mentions the
+bot's own id, never a group chat, and queues the ask, tried once. "Save to Aerugo" is a second message action
+(`teams_bot.action_request`, `teams.save` in the worker), with C2c's rules (`teams.may_save`): someone in the team, never a
+guest or someone outside it; their own message anywhere the app reads, someone else's only where capture is on; never a
+marked or sensitive one; read back from Graph, its section found in the post's document (a message newer than the last
+sync waits for one, up to five tries), proposed as a fact (trust observed, `created_by` `teams-save`, one per message by
+its topic) for the connection's team's curators with exactly the team's readers, the saver told privately in their 1:1
+chat. A mark removes that message's save, and a save whose post was deleted or edited, or whose document went, goes with
+it (`UNSAVED_SQL`, `ORPHANED_SQL`, and the pointer cleanup now name `teams-save`). The Answers panel and its routes take
+Teams connections (`ANSWER_KINDS`), the panel speaking of Teams. The app package's bot gains the personal scope and the
+Save to Aerugo action. The fake Bot Connector knows people (`/teams-bot/setup`), answers a member lookup only for someone
+in that conversation (their own 1:1 chat, or a channel of a team they're in), opens 1:1 chats, and keeps private replies.
+The retailer: `teams_ask_check` (in CI, beside Slack's): eli asks one of his questions in his 1:1 chat, as Teams sends
+it, and is answered there with only sources his own Ask cites and the truth lets him read. Docs: the Teams doc's Asking
+and Save sections, the architecture, the diagram (the Teams bot built), the plan (C1 ticked), and invariant 13's
+exception. Smoke: `teams_asks_are_answered_privately_and_saves_kept_for_the_team` (asking before a model is chosen told
+so; a member can't choose it; alice's answer, in her 1:1 chat, links only her own Ask's sources and none she can't read;
+bob, unlinked, told how to link; a guest refused; a delivery naming alice from bob's chat answered to no one but bob, as
+bob; another app's token a 401; alice's mention answered privately, a mention claimed for carol's post not answered; with
+only public allowed, no link and the note; carol's own post saved for Payments, read by alice and not bob; someone else's
+reply refused until capture is on, then saved; a second save already saved; someone outside the team and a guest
+refused; a sensitive and a marked message refused; the bot posting in the channel only capture's notice; a saved post
+deleted in Teams leaving its text nowhere). Unit: seven more in `tests/test_teams.py` (14), and the Slack tests now against
+`chat_ask`. Browser: `test_a_team_admin_chooses_how_teams_asks_are_answered`. Red first: five unit mutations, each put
+back (`cmp`): an ask from another tenant taken, a mention's question keeping the app's own mention, someone else's message
+saving anywhere, the asker not compared with whom Teams reads back, and a mention answered whoever wrote it, each failing
+its own test. Then five, each built into the service that runs it, the smoke check run against it, then put back
+(`cmp`) and the service rebuilt: a mention answered whoever wrote it, in the lane (failed: "a mention was answered for
+someone who didn't write it", alice's last reply answering carol's post); `reach` not passed, in the lane (failed: "an
+internal page reached a public-only Teams"); someone else's message saving anywhere (failed: "someone else's message was
+saved without capture"); someone outside the team saving (failed: "someone outside the team saved"); and `teams-save` left
+out of the orphaned cleanup (failed: "a saved post deleted in Teams kept its save"); on the clean rebuild, it passed.
+Found while proving it: the check first sent alice an ask it didn't wait for, whose late reply could land while it
+counted her replies around carol's mention, so two mutations first failed at another assertion; the ask is gone, and both
+were run again, each failing for its own reason; C1a's check read every bot post's channel, which a private reply has
+none of. An automated security review of the pushed branch found that a save took its saver's two ids from the
+delivery's unsigned body and checked only that the Entra id was in the team, so someone holding a leaked token could
+claim to be a message's author and save it where capture is off; the saver is now read back from the Bot Connector, as
+an asker is (the Entra id, tenant, and role of the person with that Teams id in the channel), and refused otherwise.
+Red first: its unit test failed with the saver taken from the delivery, then passed (`make unit` 245); the smoke check
+passed on the fixed build. Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 244 passed;
+the new check passed, and so did C1a's, C2d's ask, and C2c's save; `kl.company_eval`: eli's Teams ask answered privately
+with one of his Ask's six sources linked and none he may not see, ana's Slack ask likewise, everyone opening exactly what
+the truth says, no leak, Recall@10 100% and MRR 0.83 over 53 counted questions; its only failure F6's eight Jira-cited
+units this stack sent back before PR 82's fix (which, its record says, doesn't bring back units already stale); the
+Teams, Answers, and Capture browser tests passed (5); the lint at 0 errors and 43 warnings; `make pins` passed. Not run:
+the full smoke suite and the other sets (CI's run on the pull request, and the fresh-stack loop next, over C2d, C1a, and
+C1b). Not built: follow-up questions in a thread, "ask an expert" from an unsure answer, an answer in a channel (by
+decision, every answer goes to its asker's own 1:1 chat), and Terraform for the answer settings.
+**The fresh-stack loop over C2d, C1a, and C1b, 2026-10-22** (once after the three, at the top of the stack,
+c1b-teams-bot's 8f50913, with CI's settings): `make pins` passed; `make unit` 245 passed; `make smoke` 192 passed, 15
+skipped, 0 failed (both Teams checks among them; the web servers recreated first); the golden set hit@1 1.0, MRR 1.0,
+found@5 1.0, no regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24 of 25,
+no leak, no regression; `make eval-company` failed once, on C1b's retailer code: its wait for the Teams notice read every
+bot post's channel, which the private replies smoke's C1b check had left have none of (a KeyError; `p.get`), then passed
+on the same stack: everyone opening exactly what the truth says, no leak, CO201 and the Reno DC Teams channel captured
+with both keys and each bot posting only its notice, 30 proposals from 20 documents (4 from captured threads), 1 of 1
+saves, Recall@10 100%, MRR 0.83 over 53 counted questions (the forklift question new, at #2; `registers-down-leader`
+better), Ask right for 27 of 27, the right unit first for 15 of 26, both sensitive messages kept nowhere, ana's Slack ask
+and eli's Teams ask each answered privately with only their own Ask's sources, exactly the truth's 3 stale units (F6's
+fix holding on a fresh stack) and its 1 gap, no regression; `make atlas-eval` exact, no leak, no regression; `make
+eval-teams` no leak, every team at its baseline (distribution's with the forklift question); the retailer as pointers
+Recall@10 99%, MRR 0.83, Ask right for 27 of 27, and live only Recall@10 99%, MRR 0.62, Ask right for 25 of 27, each with
+no leak and no regression; no planted text in the services' logs; `make e2e` 42 passed; `make test-web` 7 passed; the
+lint at 0 errors and 43 warnings. The retailer's three baselines were recorded on that stack, in CI's order, each gaining
+the forklift question (#2 indexed and as pointers, #5 live only): `company` MRR 0.8286, `company-pointer` 0.8292,
+`company-live` 0.6231; every other set's record unchanged. CI's smoke job then needed more than its 40 minutes (pull
+request 83's run, cancelled at 40m37s with everything through the team sets passed), so its limit is 60 (C1a's branch).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2490,7 +2572,8 @@ answers), with the fresh-stack loop over the three, and F11a (pointer mode) and 
 loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
 fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and C2d (the bot
 answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
-source, with capture); next, C1b (the Teams bot's private answers and Save to Aerugo), C3, and C4.
+source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
+fresh-stack loop over the three; next, C3 and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

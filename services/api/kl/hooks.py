@@ -225,10 +225,12 @@ def teams_app(connection_id: str) -> tuple[str, str, str] | None:
 
 @router.post("/v1/hooks/teams/{connection_id}/messages")
 async def teams_activity(connection_id: str, request: Request, authorization: str = Header(default="")):
-    """The company's Teams bot's messaging address (C1a). A delivery stands only on Microsoft's signed token (invariant 13
-    for Teams, decided 2026-10-21: it takes the HMAC's place), checked before anything is acted on; anything wrong, an
-    unknown connection included, is the same 401. It's taken once, by its activity's id, and only queues a job, which
-    reads back from Graph whatever it acts on. Today it takes "Don't capture" alone, answered privately in Teams."""
+    """The company's Teams bot's messaging address (C1a, C1b). A delivery stands only on Microsoft's signed token
+    (invariant 13 for Teams, decided 2026-10-21: it takes the HMAC's place), checked before anything is acted on; anything
+    wrong, an unknown connection included, is the same 401. It's taken once, by its activity's id, and only queues a job,
+    which reads back from Graph or the Bot Connector whatever it acts on: "Don't capture" and "Save to Aerugo" (each
+    answered privately in Teams at once), and an ask, by a message to the bot in its 1:1 chat or a mention in a channel
+    (answered later, privately, in the asker's 1:1 chat)."""
     body = await capped_body(request, MAX_BODY)
     if body is None:
         telemetry.webhook_rejected("too_large")
@@ -247,11 +249,19 @@ async def teams_activity(connection_id: str, request: Request, authorization: st
         await run_in_threadpool(teams_bot.verify, authorization, app, str(activity.get("serviceUrl") or ""))
     except teams_bot.Refused:
         raise refused("signature")
-    asked = teams_bot.mark_request(activity, tenant)
-    if asked and TEAMS_ACTIVITY.fullmatch(str(activity.get("id") or "")):
-        result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"mark-{activity['id']}", "teams.exclude", asked)
-        log.info("teams don't-capture for %s: %s", connection_id, result)
-        return JSONResponse({"task": {"type": "message", "value": teams_bot.MARK_REPLY}}, status_code=200)
+    if not TEAMS_ACTIVITY.fullmatch(str(activity.get("id") or "")):
+        return Response(status_code=200)
+    acted = teams_bot.action_request(activity, tenant)
+    if acted:
+        job, asked = acted
+        result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"act-{activity['id']}", job, asked)
+        log.info("teams %s for %s: %s", job, connection_id, result)
+        reply = teams_bot.MARK_REPLY if job == "teams.exclude" else teams_bot.SAVE_REPLY
+        return JSONResponse({"task": {"type": "message", "value": reply}}, status_code=200)
+    asked = teams_bot.ask_request(activity, tenant, app, QUESTION_CHARS)  # C1b: a 1:1 question is the recorded exception
+    if asked:
+        result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"ask-{activity['id']}", "teams.ask", asked, 1)
+        log.info("teams ask for %s: %s", connection_id, result)
     return Response(status_code=200)
 
 

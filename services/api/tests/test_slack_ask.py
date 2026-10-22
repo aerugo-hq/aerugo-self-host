@@ -8,15 +8,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from kl import slack, slack_ask, worker
+from kl import chat_ask, slack, slack_ask, worker
 
 NOW = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
 
 
 def test_a_sign_in_counts_for_seven_days():
-    assert slack_ask.fresh(NOW - timedelta(days=6, hours=23), NOW)
-    assert not slack_ask.fresh(NOW - timedelta(days=7, minutes=1), NOW)
-    assert not slack_ask.fresh(None, NOW)
+    assert chat_ask.fresh(NOW - timedelta(days=6, hours=23), NOW)
+    assert not chat_ask.fresh(NOW - timedelta(days=7, minutes=1), NOW)
+    assert not chat_ask.fresh(None, NOW)
 
 
 def test_the_reply_escapes_slack_and_links_only_titles():
@@ -56,7 +56,7 @@ class Conn:
     """Stands in for the lane's connection: the link and the sign-in it's asked for."""
 
     def __init__(self, link=None, seen=None, left=False):
-        self.rows = {slack_ask.PERSON_SQL: link, slack_ask.SIGN_IN_SQL: seen, slack_ask.LEFT_SQL: {"?column?": 1} if left else None}
+        self.rows = {chat_ask.PERSON_SQL: link, chat_ask.SIGN_IN_SQL: seen, chat_ask.LEFT_SQL: {"?column?": 1} if left else None}
         self.audits = []
 
     def execute(self, sql, params=()):
@@ -90,7 +90,7 @@ def lane(monkeypatch):
     monkeypatch.setattr(slack_ask, "channel_of", lambda conn, p: {"id": "c1", "org_id": "o1", "team": "payments",
                                                                   "config": {"answers": {"model": "payments/fake"}}})
     monkeypatch.setattr(slack_ask, "tell", lambda c, channel, user, text, thread=None: told.append(text))
-    monkeypatch.setattr(slack_ask.admission, "admitted", lambda caller: caller.username != "nora")
+    monkeypatch.setattr(chat_ask.admission, "admitted", lambda caller: caller.username != "nora")
     api = types.ModuleType("kl.main")  # the API's own Ask, stood in for: the lane imports it when it answers
     api.answer_question = lambda caller, q, model, reach: asked.append((caller, q, reach)) or {
         "answer": "the answer", "citations": [], "confidence": {"level": "high"}}

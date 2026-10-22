@@ -14,8 +14,8 @@
     "full": "Aerugo, {{COMPANY}}'s knowledge layer"
   },
   "description": {
-    "short": "Proposes knowledge from this team's channels, where its admins turn capture on.",
-    "full": "Aerugo reads this team's standard channels once its owner adds the app, each post readable only by the team's members. A channel is captured only when its team's admin in Aerugo confirms it; the bot then posts a notice there. Anyone in the team can choose Don't capture on a message to keep it out. Private and shared channels, group chats, and 1:1 chats are never read."
+    "short": "Answers you privately in Teams, saves what you choose, and proposes knowledge where capture is on.",
+    "full": "Ask Aerugo in a 1:1 chat with it, or mention it in a channel: it answers you privately, in your 1:1 chat, with only what you may read. Choose Save to Aerugo on a message to propose it to your team's curators: your own anywhere, someone else's where capture is on. Aerugo reads this team's standard channels once its owner adds the app, each post readable only by the team's members; a channel is captured only when its team's admin in Aerugo confirms it, and the bot then posts a notice there. Anyone in the team can choose Don't capture on a message to keep it out. Private and shared channels and group chats are never read."
   },
   "icons": {
     "color": "color.png",
@@ -25,7 +25,10 @@
   "bots": [
     {
       "botId": "{{APP_ID}}",
-      "scopes": ["team"],
+      "scopes": [
+        "team",
+        "personal"
+      ],
       "supportsFiles": false,
       "isNotificationOnly": false
     }
@@ -39,7 +42,9 @@
           "type": "action",
           "title": "Don't capture",
           "description": "Keep this message out of Aerugo",
-          "context": ["message"],
+          "context": [
+            "message"
+          ],
           "fetchTask": false,
           "parameters": [
             {
@@ -49,12 +54,34 @@
               "inputType": "toggle"
             }
           ]
+        },
+        {
+          "id": "aerugoSave",
+          "type": "action",
+          "title": "Save to Aerugo",
+          "description": "Propose this message to your team's curators",
+          "context": [
+            "message"
+          ],
+          "fetchTask": false,
+          "parameters": [
+            {
+              "name": "confirm",
+              "title": "Save this message to Aerugo",
+              "description": "Your team's curators review it; only this team's members can read it.",
+              "inputType": "toggle"
+            }
+          ]
         }
       ]
     }
   ],
-  "permissions": ["identity"],
-  "validDomains": ["{{AERUGO_DOMAIN}}"],
+  "permissions": [
+    "identity"
+  ],
+  "validDomains": [
+    "{{AERUGO_DOMAIN}}"
+  ],
   "webApplicationInfo": {
     "id": "{{APP_ID}}",
     "resource": "api://{{AERUGO_DOMAIN}}/{{APP_ID}}"
@@ -62,10 +89,22 @@
   "authorization": {
     "permissions": {
       "resourceSpecific": [
-        { "name": "ChannelMessage.Read.Group", "type": "Application" },
-        { "name": "TeamMember.Read.Group", "type": "Application" },
-        { "name": "ChannelSettings.Read.Group", "type": "Application" },
-        { "name": "TeamSettings.Read.Group", "type": "Application" }
+        {
+          "name": "ChannelMessage.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "TeamMember.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "ChannelSettings.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "TeamSettings.Read.Group",
+          "type": "Application"
+        }
       ]
     }
   }

@@ -233,6 +233,41 @@ def test_a_team_admin_chooses_how_slack_asks_are_answered(page):
         page.request.delete(f"{base}/connections/{name}", headers={"Origin": WEB})
 
 
+def test_a_team_admin_chooses_how_teams_asks_are_answered(page):
+    """C1b: a Teams connection's Answers panel speaks of Teams, starts off, and keeps the team admin's model."""
+    sign_in(page, "alice")
+    tag, tenant = uuid.uuid4().hex[:6], str(uuid.uuid4())
+    name = f"e2e-tanswers-{tag}"
+    json_post = lambda url, body, headers=None: page.request.post(url, data=json.dumps(body), headers=headers or {"Content-Type": "application/json"})
+    app = json_post("http://fake-llm:8080/microsoft/app", {"tenant_id": tenant})
+    assert app.ok, "the fake Graph (fake-llm, from make smoke) isn't up"
+    app = app.json()
+    write, base = {"Origin": WEB, "Content-Type": "application/json"}, f"{WEB}/api/workspaces/payments"
+    json_post(f"{base}/models", {"name": "smoke-fake", "provider": "openai_compatible", "model": "fake",  # 201, or 409
+                                 "base_url": "http://fake-llm:8080/v1", "api_key": "unused"}, write)
+    made = json_post(f"{base}/connections/teams", {"name": name, "api_base": "http://fake-llm:8080/microsoft", "tenant_id": tenant,
+                                                   "client_id": app["client_id"], "certificate": app["certificate"],
+                                                   "team_ids": [str(uuid.uuid4())], "bot_service": "http://fake-llm:8080/teams-bot",
+                                                   "every_minutes": 10080}, write)
+    assert made.status == 201, made.text()
+    try:
+        page.goto(f"{WEB}/#/admin/sources")
+        row = panel(page, "Connections").get_by_role("row").filter(has_text=name)
+        row.get_by_role("button", name="Answers", exact=True).click()
+        group = page.get_by_role("group", name=f"Answers for {name}")
+        model = group.get_by_label("Model")
+        expect(model).to_have_value("", timeout=30_000)  # off until the team's admin chooses
+        expect(group).to_contain_text("1:1 chat")
+        expect(group.get_by_text("What may reach Teams")).to_be_visible()
+        model.select_option("smoke-fake")
+        group.get_by_role("button", name="Save").click()
+        expect(page.get_by_text("Teams asks are answered through smoke-fake")).to_be_visible(timeout=30_000)
+        kept = page.request.get(f"{base}/connections/{name}/answers").json()
+        assert kept == {"model": "payments/smoke-fake", "classifications": ["internal", "public"]}, kept
+    finally:
+        page.request.delete(f"{base}/connections/{name}", headers={"Origin": WEB})
+
+
 def test_a_team_admin_opens_the_microsoft_365_form(page):
     sign_in(page, "alice")
     open_connector(page, "Microsoft 365")
