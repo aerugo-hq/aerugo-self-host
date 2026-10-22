@@ -360,6 +360,7 @@ export const CONNECTORS = [
   { id: "confluence", name: "Confluence Cloud", what: "Spaces, their pages and blog posts, with Confluence's own permissions: each space's readers, narrowed by every restriction down the tree.", ready: true, action: "Connect" },
   { id: "slack", name: "Slack", what: "Channels a bot is in, readable by each channel's members; a thread is one document.", ready: true, action: "Connect" },
   { id: "microsoft", name: "Microsoft 365", what: "SharePoint sites an admin grants, one by one, with each file's own sharing.", ready: true, action: "Connect" },
+  { id: "teams", name: "Microsoft Teams", what: "Standard channels of the teams whose owners add your company's Teams app; each post is readable by its team's members.", ready: true, action: "Connect" },
   { id: "notion", name: "Notion", what: "Pages and databases shared with an internal integration, readable by this team's members.", ready: true, action: "Connect" },
   { id: "catalog", name: "Data catalog", what: "Dataplex, Unity Catalog, Glue, Purview, or DataHub: tables with their columns, owners, and lineage, readable by whom the catalog lets read each one.", ready: true, action: "Connect" },
   { id: "directory", name: "Directory", what: "Who's at the company, and who has left (Okta, Google Workspace, or Microsoft Entra): a leaver's matched access goes at once. Google's and Entra's groups also reach the files shared with them.", ready: true, action: "Connect" },
@@ -382,6 +383,8 @@ const CATALOG_KINDS = {
   datahub: { label: "DataHub", lede: "Create a DataHub user for Aerugo and an access token for it. DataHub's view policies can't be read with a token, so a dataset is readable only by the people DataHub names as its owners." },
 };
 const blankM365 = { name: "microsoft", tenant_id: "", client_id: "", certificate: "", sites: "", every_minutes: 60, credential_ref: "" };
+const blankTeams = { name: "teams", tenant_id: "", client_id: "", certificate: "", team_ids: "", channels: "", history_days: 365, every_minutes: 60,
+                     credential_ref: "" };
 const blankSlack = { name: "slack", bot_token: "", channels: "", company_workspace: false, history_days: 365, every_minutes: 60, credential_ref: "", storage: "index" };
 // F11a: how a connection keeps what it reads; only these sources can read their text again live
 const POINTER_KINDS = new Set(["jira", "confluence", "slack"]);
@@ -393,6 +396,7 @@ const blankDirectory = { name: "directory", provider: "okta", api_base: "", api_
 // The scope list each kind has, to edit in place: its field, its label, and an example.
 const SCOPES = { jira: ["projects", "Projects", "EDP, PAY"], confluence: ["spaces", "Spaces", "PAY, ENG"], google: ["drives", "Shared drives", "Drive ids"],
                  slack: ["channels", "Channels", "C0123ABCD"], microsoft: ["sites", "Sites", "acme.sharepoint.com,<site id>,<web id>"],
+                 teams: ["channels", "Channels", "19:...@thread.tacv2"],
                  github: ["repositories", "Repositories", "acme/payments-api"] };
 // The sources that sign their webhooks (S8), and what each one's admin does with the hook Aerugo gives.
 const HOOKS = {
@@ -421,6 +425,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const [cf, setCf] = useState(blankConfluence); // the Confluence form (index 14)
   const [sl, setSl] = useState(blankSlack); // the Slack form (S4)
   const [ms, setMs] = useState(blankM365); // the Microsoft 365 form (S5)
+  const [tm, setTm] = useState(blankTeams); // the Teams form (C1a)
   const [nt, setNt] = useState(blankNotion); // the Notion form (S6)
   const [ct, setCt] = useState(blankCatalog); // the data catalog form (S7)
   const [hook, setHook] = useState(null); // the webhook panel open under a row (S8): { name, signing, made }
@@ -479,14 +484,18 @@ function Connections({ ws, teams, orgAdmin }) {
     }
   }
   const CAPTURE_STATE = { off: "Off", requested: "Asked for in the channel", on: "On" };
+  const TEAMS_CAPTURE_STATE = { off: "Off", requested: "Its team's owner added the app", on: "On" };
   const capturePanel = (c) => h("div", { className: "connector-form", role: "group", "aria-label": `Capture for ${c.name}` },
-    h("p", { className: "connector-lede connector-wide" }, "Capture proposes knowledge from a channel's threads for this team's curators to confirm, readable only by the channel's members. It needs two keys: the channel's creator or a workspace admin runs /aerugo capture on in the channel, then you confirm here. The bot tells the channel when it starts and stops, and anyone can react :no_entry_sign: to keep a message out."),
+    h("p", { className: "connector-lede connector-wide" }, c.kind === "teams"
+      ? "Capture proposes knowledge from a channel's posts for this team's curators to confirm, readable only by its team's members. It needs two keys: the team's owner added your Teams app (which lists its channels here), then you confirm each channel. The bot tells the channel when it starts and stops, and anyone in the team can choose Don't capture on a message to keep it out. Removing the app from the team ends it all."
+      : "Capture proposes knowledge from a channel's threads for this team's curators to confirm, readable only by the channel's members. It needs two keys: the channel's creator or a workspace admin runs /aerugo capture on in the channel, then you confirm here. The bot tells the channel when it starts and stops, and anyone can react :no_entry_sign: to keep a message out."),
     capture.error ? h("div", { className: "connector-wide" }, h(Alert, { onRetry: () => openCapture(c.name, true) }, capture.error))
       : capture.channels === null ? h("div", { className: "connector-wide" }, h(SkeletonRows, { rows: 2, widths: [30, 14] }))
       : capture.channels.length ? h("ul", { className: "linklist connector-wide", "aria-label": "Channels" }, capture.channels.map((ch) => h("li", { key: ch.channel },
-          h("span", null, ch.name || ch.channel), h("small", null, CAPTURE_STATE[ch.capture] || ch.capture),
+          h("span", null, ch.name || ch.channel), h("small", null, (c.kind === "teams" ? TEAMS_CAPTURE_STATE : CAPTURE_STATE)[ch.capture] || ch.capture),
           h("div", { className: "actions" },
-            ch.capture === "requested" ? h("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => setChannel(c.name, ch.channel, "confirm") }, "Confirm") : null,
+            ch.capture === "requested" || (c.kind === "teams" && ch.capture === "off") // Teams' first key holds while the app does
+              ? h("button", { type: "button", className: "btn btn-sm btn-primary", onClick: () => setChannel(c.name, ch.channel, "confirm") }, "Confirm") : null,
             ch.capture !== "off" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setChannel(c.name, ch.channel, "off") }, "Turn off") : null))))
       : h("p", { className: "muted connector-wide" }, "No channels yet: they appear once the bot is in one and the connection has synced."),
     h("div", { className: "actions connector-wide" }, h("button", { type: "button", className: "btn btn-sm btn-ghost", onClick: () => setCapture(null) }, "Close")));
@@ -688,6 +697,27 @@ function Connections({ ws, teams, orgAdmin }) {
       setBusy(false);
     }
   }
+  async function connectTeams(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const byRef = tm.credential_ref.trim();
+    try {
+      await kl(`workspaces/${enc(ws)}/connections/teams`, { method: "POST", body: {
+        name: tm.name.trim(), tenant_id: tm.tenant_id.trim(), client_id: tm.client_id.trim(),
+        certificate: byRef ? null : tm.certificate.trim(), credential_ref: byRef || null,
+        team_ids: tm.team_ids.split(/[\s,]+/).filter(Boolean), channels: list(tm.channels),
+        history_days: Number(tm.history_days), every_minutes: Number(tm.every_minutes) } });
+      setChosen(null);
+      setGallery(false);
+      setTm(blankTeams);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
   async function connectSlack(event) {
     event.preventDefault();
     setBusy(true);
@@ -836,6 +866,7 @@ function Connections({ ws, teams, orgAdmin }) {
   const setC = (key) => (e) => setCf({ ...cf, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const setS = (key) => (e) => setSl({ ...sl, [key]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const setM = (key) => (e) => setMs({ ...ms, [key]: e.target.value });
+  const setT = (key) => (e) => setTm({ ...tm, [key]: e.target.value });
   const setN = (key) => (e) => setNt({ ...nt, [key]: e.target.value });
   const setK = (key) => (e) => setCt({ ...ct, [key]: e.target.value });
   const field = (label, input, hint) => h("label", { className: "field" }, h("span", null, label), input, hint ? h("span", { className: "hint" }, hint) : null);
@@ -912,6 +943,31 @@ function Connections({ ws, teams, orgAdmin }) {
           "A secret with certificate (its private_key, certificate, and thumbprint), under this team's own connections path.")),
       h("div", { className: "actions connector-wide" },
         h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Microsoft 365"),
+        h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
+    teams: () => h("form", { className: "panel-body connector-form", onSubmit: connectTeams, "aria-label": "Connect Microsoft Teams" },
+      h("p", { className: "connector-lede" }, "Register an app in Entra with a certificate and make it your company's own Teams app: an Azure Bot for it (single tenant), whose messaging endpoint is this connection's address, and the app package from deploy/teams, uploaded to your Teams admin center. A team's owner adds the app to their team, which lets it read that team's standard channels and no other's: private and shared channels, group chats, and 1:1 chats are never read."),
+      h("p", { className: "connector-lede connector-wide" }, h("b", null, "Who reads it: "), "each post is readable by its team's members and owners as Teams lists them, never a guest and never the whole org."),
+      field("Name", h("input", { className: "input", value: tm.name, onChange: setT("name"), required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" })),
+      field("Tenant ID", h("input", { className: "input mono", value: tm.tenant_id, onChange: setT("tenant_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" })),
+      field("Application (client) ID", h("input", { className: "input mono", value: tm.client_id, onChange: setT("client_id"), placeholder: "00000000-0000-0000-0000-000000000000", required: true, autoComplete: "off" }),
+        "The app's id, which is also its bot's."),
+      h("label", { className: "field connector-wide" }, h("span", null, "Teams"),
+        h("textarea", { className: "input mono", rows: 2, value: tm.team_ids, onChange: setT("team_ids"), required: true, spellCheck: false,
+                        placeholder: "00000000-0000-0000-0000-000000000000" }),
+        h("span", { className: "hint" }, "The teams it may read, by id, one per line. Each is read only once its owner adds the app.")),
+      field("Channels", h("input", { className: "input mono", value: tm.channels, onChange: setT("channels"), placeholder: "19:...@thread.tacv2" }), "Leave empty for every standard channel of those teams."),
+      field("History", h("input", { className: "input", type: "number", min: 1, max: 3650, value: tm.history_days, onChange: setT("history_days"), required: true }),
+        "Days back it reads. Older posts leave the index."),
+      tm.credential_ref ? null : h("label", { className: "field connector-wide" }, h("span", null, "Certificate"),
+        h("textarea", { className: "input mono", rows: 4, value: tm.certificate, onChange: setT("certificate"), required: true, spellCheck: false, autoComplete: "off",
+                        placeholder: "-----BEGIN PRIVATE KEY-----\n...\n-----BEGIN CERTIFICATE-----\n..." }),
+        h("span", { className: "hint" }, "The app's private key and its certificate (PEM). Kept in OpenBao and never shown again.")),
+      field("Sync", h("select", { className: "select", value: tm.every_minutes, onChange: setT("every_minutes") }, EVERY.map(([m, label]) => h("option", { key: m, value: m }, label)))),
+      h("details", { className: "connector-wide" }, h("summary", null, "Use a certificate the team keeps in OpenBao instead"),
+        field("Credential reference", h("input", { className: "input mono", value: tm.credential_ref, onChange: setT("credential_ref"), placeholder: `openbao://secret/kl/acme/${ws}/connections/teams` }),
+          "A secret with certificate (its private_key, certificate, and thumbprint), under this team's own connections path.")),
+      h("div", { className: "actions connector-wide" },
+        h("button", { type: "submit", className: "btn btn-primary", disabled: busy }, busy ? "Connecting…" : "Connect Microsoft Teams"),
         h("button", { type: "button", className: "btn btn-ghost", onClick: () => setChosen(null) }, "Cancel"))),
     slack: () => h("form", { className: "panel-body connector-form", onSubmit: connectSlack, "aria-label": "Connect Slack" },
       h("p", { className: "connector-lede" }, "In Slack, create an app in your own workspace (don't distribute it), give its bot the read-only scopes channels:read, groups:read, channels:history, groups:history, users:read, and users:read.email, install it, and invite the bot to the channels to index. Each message keeps its channel's own readers."),
@@ -1111,7 +1167,7 @@ function Connections({ ws, teams, orgAdmin }) {
               c.kind === "github" ? h("button", { type: "button", className: "btn btn-sm", onClick: () => showRepos(c.name) }, repos[c.name] ? "Hide repos" : "Repos") : null,
               HOOKS[c.kind] ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": hook?.name === c.name,
                 onClick: () => setHook(hook?.name === c.name ? null : { name: c.name, signing: "", made: null }) }, c.webhook ? "Webhook on" : "Webhook") : null,
-              c.kind === "slack" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": capture?.name === c.name,
+              c.kind === "slack" || c.kind === "teams" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": capture?.name === c.name,
                 onClick: () => openCapture(c.name) }, "Capture") : null,
               c.kind === "slack" ? h("button", { type: "button", className: "btn btn-sm btn-ghost", "aria-expanded": answering?.name === c.name,
                 onClick: () => openAnswers(c.name) }, "Answers") : null,

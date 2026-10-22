@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, capture, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, telemetry, unity
+from . import alerting, capture, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, teams, teams_bot, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -29,7 +29,7 @@ INGEST_DB = os.environ.get("KL_INGEST_DATABASE_URL", "postgresql://kl_ingest:ing
 POLL_SECONDS = float(os.environ.get("KL_WORKER_POLL_SECONDS", "2"))
 RESYNC_MINUTES = float(os.environ.get("KL_RESYNC_MINUTES", "10"))      # freshness window per connection
 READERS_MINUTES = float(os.environ.get("KL_READERS_REFRESH_MINUTES", "5"))  # how stale a connection's readers may get (S8)
-OWNED_KINDS = {"jira", "confluence", "slack", "microsoft", "notion", "catalog"}  # kinds whose documents carry their connection (migration 0040)
+OWNED_KINDS = {"jira", "confluence", "slack", "microsoft", "notion", "catalog", "teams"}  # kinds whose documents carry their connection (migration 0040)
 # A data catalog's client by its provider (S7), and the source its accounts are recorded under for identity matching
 # (Purview's people are Entra's, which the Entra directory records).
 CATALOGS = {"dataplex": dataplex, "unity": unity, "glue": glue, "purview": purview, "datahub": datahub}
@@ -101,7 +101,7 @@ RETURNING payload->>'connection_id' AS connection_id
 # S8: a readers refresh for every ready connection whose readers are older than the window, between content syncs,
 # unless one of its jobs is already pending. GitHub's and directories' syncs are their readers (GitHub's webhooks and a
 # directory's own cadence keep them fresh), and a catalog's readers come with its daily listing.
-READERS_KINDS = ("google", "jira", "confluence", "slack", "microsoft", "notion")
+READERS_KINDS = ("google", "jira", "confluence", "slack", "microsoft", "notion", "teams")
 READERS_SQL = """
 INSERT INTO jobs (org_id, kind, payload)
 SELECT c.org_id, 'connection.refresh_readers', jsonb_build_object('connection_id', c.id::text, 'reason', 'schedule')
@@ -294,6 +294,9 @@ def handle_connection_discover(conn, job) -> dict:
     elif c["kind"] == "microsoft":  # S5: the libraries of the sites an admin granted the app
         connector = microsoft365.client_for(c)
         wanted = c["config"].get("libraries")  # None: every library of those sites
+    elif c["kind"] == "teams":  # C1a: the standard channels of the teams whose owners consented to the app
+        connector = teams.client_for(c)
+        wanted = c["config"].get("channels")  # None: every standard channel of those teams
     elif c["kind"] == "directory":  # ADR 0011: who's at the company, and who has left
         connector = directory.client_for(c)
         wanted = None
@@ -309,6 +312,9 @@ def handle_connection_discover(conn, job) -> dict:
     with conn.transaction():
         captured = {r["external_id"]: r for r in conn.execute(  # a channel's capture outlives a rediscovery (C2b)
             "SELECT external_id, capture, capture_changed_at FROM connection_containers WHERE connection_id = %s", (cid,))}
+        # A Teams channel is listed only once its team's owner consented to the app: that consent is capture's first key
+        # (C1a, decided 2026-10-21), so a channel new to the connection arrives as requested, for the team's admin.
+        first = "requested" if c["kind"] == "teams" else "off"
         conn.execute("DELETE FROM connection_containers WHERE connection_id = %s", (cid,))
         for ct in found:
             was = captured.get(ct.external_id) or {}
@@ -320,7 +326,7 @@ def handle_connection_discover(conn, job) -> dict:
                 (cid, c["org_id"], ct.external_id, ct.kind, ct.visibility, ct.default_ref,
                  wanted is None or ct.external_id in wanted or ct.kind == "folder",  # a folder shared with it is chosen by that sharing
                  (ct.name or "")[:300] or None,  # its name as the source gives it, for the Documents tree
-                 was.get("capture", "off"), was.get("capture_changed_at")))
+                 was.get("capture", first), was.get("capture_changed_at")))
         conn.execute(CONNECTION_READY_SQL, (cid,))
         conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",  # a full read (H6)
                      (c["org_id"], Jsonb({"connection_id": str(cid), "full": True})))
@@ -405,6 +411,9 @@ def sync_containers(conn, c: dict, containers: list) -> list[dict]:
     elif c["kind"] == "microsoft":
         client = microsoft365.client_for(c)
         results = [microsoft365.sync_library(conn, c, client, ct["external_id"], since=ct.get("since")) for ct in containers]
+    elif c["kind"] == "teams":  # each channel through its team, kept as its container's default_ref
+        client = teams.client_for(c)
+        results = [teams.sync_channel(conn, c, client, ct["external_id"], ct.get("default_ref")) for ct in containers]
     elif c["kind"] == "directory":
         results = [directory.sync_directory(conn, c, directory.client_for(c))]
     elif c["kind"] == "catalog":
@@ -675,7 +684,7 @@ def handle_import_retire(conn, job) -> dict:
 
 
 SOURCE_KINDS = {"github": ["github", "okf"], "google": ["gdrive"], "jira": ["jira"], "confluence": ["confluence"],
-                "slack": ["slack"], "microsoft": ["microsoft"], "notion": ["notion"],
+                "slack": ["slack"], "microsoft": ["microsoft"], "notion": ["notion"], "teams": ["teams"],
                 "catalog": sorted(CATALOGS)}  # what each kind of connection's documents are
 
 
@@ -728,6 +737,7 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "connection.sync": handle_connection_sync, "connection.refresh_readers": handle_connection_refresh_readers,
             "slack.capture": capture.request, "slack.notice": capture.notice, "slack.exclude": capture.exclude,  # C2b
             "slack.save": capture.save,  # C2c
+            "teams.notice": teams_bot.notice, "teams.exclude": teams_bot.exclude,  # C1a
             "embeddings.backfill": handle_embeddings_backfill,
             "alerts.evaluate": lambda conn, job: alerting.evaluate(conn, RESYNC_MINUTES),  # on demand (slice P)
             "retention.apply": handle_retention_apply,

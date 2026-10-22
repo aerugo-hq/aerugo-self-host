@@ -130,7 +130,7 @@ decision is in `aerugo-SaaS/docs/adr/0001`; the product side will be ADR 0011.
 10. No new infrastructure dependency without an ADR in `docs/adr/`.
 11. Don't return counts of hidden items or distinguish "forbidden" from "not found" for content or private workspaces. Use 404.
 12. Synced content carries only the source's permissions. ACL arrays hold source identities (`ext:github.<login>`), and a caller gets them only through a `principal_aliases` link, expanded inside `db.scoped()`. Never put workspace, group, or org principals on synced content: connecting a source must never widen who can read it.
-13. Webhooks are hints, never truth. A delivery must pass HMAC verification and replay protection, and it may only queue jobs. Never read permissions or content from a webhook payload; the job re-reads the source. One recorded exception (C2d, approved 2026-10-21): `/aerugo ask`'s question, taken from the signed command because no Slack message holds it; it's the asker's own query, run as them, never source content and never kept as knowledge.
+13. Webhooks are hints, never truth. A delivery must pass HMAC verification (for Teams, Microsoft's signed Bot Framework token stands in for it: C1a, approved 2026-10-21) and replay protection, and it may only queue jobs. Never read permissions or content from a webhook payload; the job re-reads the source. One recorded exception (C2d, approved 2026-10-21): `/aerugo ask`'s question, taken from the signed command because no Slack message holds it; it's the asker's own query, run as them, never source content and never kept as knowledge.
 14. Every link carries its provenance: the signal that made it, its strength, and the evidence behind it. Never store a bare edge.
 15. Graph expansion is authorized at every hop. A walk never passes through, or reveals, a node the asker can't read.
 16. Nothing derived mixes permissions. A summary, cluster label, or entity description shown to someone is built only from what that person can read; never precompute one across documents with different readers.
@@ -2334,6 +2334,10 @@ text didn't change (proposed as its own follow-up). Proof, against the running s
 the thread), "ask an expert" from an unsure answer (F5b, through the interactivity address), the Teams bot (C1b; the
 ask's core, from the person to the private reply, doesn't depend on Slack), answers posted in a channel, direct messages
 to the bot (never read), and Terraform for the answer settings.
+CI on pull request 81: unit 227 passed; smoke 187 passed, 17 skipped, 0 failed; the golden set, the scenario (Recall@10
+94%, MRR 0.81), the retailer (ana's Slack ask answered privately with only sources her own Ask cites; Recall@10 100%, MRR
+0.83), its pointer (MRR 0.84) and live-only (MRR 0.63) runs, the Atlas, and every team's set at their baselines; no leak
+and no regression. C2d merged (pull request 81).
 F6's evidence by its text (found by C2d's proof on a long-lived stack, its own item, 2026-10-21). F6 snapshotted each
 evidence document's `content_hash` at confirmation and sent a unit back for review when it moved, but a synced
 document's `content_hash` is its source's version, so a version that moved with the same text counted as a change: the
@@ -2395,6 +2399,83 @@ the pull request; nothing the web app or the provider use changed). Not built: c
 document's text hash kept at its sync, so the pass reads a column instead of hashing every confirmed unit's evidence
 each minute (the ponytail note in `lifecycle.py`, once an org holds hundreds of thousands of units); and bringing back
 units that already went stale this way on a long-lived stack (their owners confirm them again).
+C1a, Teams channels as a source, with capture (the plan approved 2026-10-21 with three decisions: Microsoft's signed
+Bot Framework token stands in for invariant 13's HMAC, repeats refused and everything acted on read back; a question
+asked of the bot directly is the recorded exception, C1b's; and the team owner's consent to the app is capture's first
+key). A `teams` connection (migration 0071 adds the kind; `POST .../connections/teams`): the tenant, the company's own
+Teams app (one Entra app registration with a certificate, never a client secret, which is also its Azure Bot's id), the
+teams it may read by id (`team_ids`, never `teams`: that's GitHub's routing map, `team_for`), optional channels and a
+history window, and the Bot Framework address its bot posts through (`bot_service`, allowlisted). `kl/teams.py`
+(`TeamsClient` on `directory.GraphClient`): Graph reads a team only through its resource-specific consent, which its
+owner grants by adding the app (`ChannelMessage.Read.Group`, `TeamMember.Read.Group`, `ChannelSettings.Read.Group`,
+`TeamSettings.Read.Group`), so a team without it answers 403 and is skipped, and nothing tenant-wide is ever asked for.
+Discovery lists each consented team's standard channels (private and shared never; group chats and 1:1s never), each
+container keeping its team's id in `default_ref`; a channel new to the connection arrives as capture `requested`, the
+owner's consent being the first key. A post and its replies are one document (`teams-<channel hash>-<post id>`), read
+in full within the window every sync, its version moving on any edit, deletion, or newly dropped message; text from
+Teams' HTML (mentions kept as names); a message the sensitive gate flags (C2a, `privacy.sensitive`) or someone marked
+is left out of every section, and a post opening with one is titled by its day. Readers (`readers`): the team's members
+and owners as Graph lists them now, `ext:microsoft.<email>` (the identity Entra and Microsoft 365 already record, so
+sign-in matching links them), never a guest, never anyone Graph gives no email for, never `org:`, even for an org-wide
+team; recorded for matching; refreshed by S8's readers refresh, which reads no replies. A team that stops consenting (its
+owner removed the app) answers 403 and its channel keeps nothing; discovery then drops the channel and `retire_unlisted`
+takes its documents and what was proposed from them. Indexed only: pointer and live-only are refused. `kl/teams_bot.py`:
+the bot's messaging address, `/v1/hooks/teams/<connection id>/messages`, stands only on Microsoft's token (`verify`):
+RS256 with a key Bot Framework publishes and endorses for Teams (read from `KL_TEAMS_BOT_OPENID`, kept a day, read again
+for an unknown key at most once a minute, each read one short try while the delivery waits, the keys only on the
+metadata's own host), issued by Bot Framework, for the
+connection's app, unexpired (five minutes' skew), naming the service address the activity came from, which must be on
+`KL_TEAMS_BOT_SERVICES` (Teams' own `https://smba.trafficmanager.net/` by default). Anything wrong, an unknown
+connection included, is the same 401. A delivery is taken once by its activity's id (`webhook_deliveries`) and only
+queues a job. Today it takes "Don't capture", a message action in the Teams app (`mark_request`: only the channel, the
+message and its post, the tenant checked, and who chose it), answered privately in Teams with a fixed text; the job
+(`teams.exclude`) acts only once Graph shows the message in a channel the connection reads and its marker in the team
+(`may_mark`), then records the exclusion, drops the unconfirmed proposals from its post, and reads the channel again in
+full. Capture: the team admin confirms a channel in the existing Capture panel (`CAPTURE_KINDS`; for Teams a channel
+off can be confirmed again, since the owner's consent holds while the app does), and the bot posts its one notice when
+capture starts and stops (`teams.notice`, `BotConnector.post`: a new post in the channel through the Bot Connector, as
+the app, its token from Entra for Bot Framework, to the service address the connection names, never one a delivery
+names). Extraction (F2) already reads chat only from a captured channel, Teams' included. The fakes: Graph's Teams
+calls (consent per app, members, channels, posts, replies), Bot Framework's metadata, keys (one endorsed for Teams, one
+only for Skype), and a signer (`/botframework/sign`), and a Bot Connector that takes the app's token and keeps its posts
+(`/teams-bot/posted`); `/microsoft/app` can mint an app under a given id. The app: the gallery's Microsoft Teams card
+and form (no Keep choice: indexed only), the Capture panel on Teams rows (its own wording), and Teams' brand mark. Docs:
+`docs/connectors/teams.md` (the app registration, the Azure Bot, the package, the four permissions and why, who reads,
+capture, how deliveries are checked), `deploy/teams/manifest.json` (the package's template: the bot in team scope, the
+Don't capture action, the four resource-specific permissions), the architecture, the diagram (Teams channels and capture,
+and the bot's notice and marks, built; its asks and saves still to build), the plan (C1's decisions), and the readers
+refresh's list. Terraform (terraform-provider-aerugo): `kind = "teams"` with `team_ids`, `channels`, `history_days`,
+`tenant_id`, `client_id`, `bot_service`, and the write-only `certificate`; an acceptance test; the onboarding module's
+fields. The retailer: its Teams channel is now Teams-shaped (`TEAMS_CHANNEL`, keys as the connector makes them,
+`teams_key`), loaded (`LOADED` gains Teams; `teams_tenant` serves its team, consented to by the company's app, its members
+exactly the channel's readers, its lead the owner), and captured with both keys (`CAPTURED`; `teams_capture_on`), Teams
+connections made per team with the app's fixed id and its new certificate rotated in each run; distribution opts in to
+extraction, and the proposals check holds that each captured channel, Slack's and Teams', gives some and that the Teams
+bot posted only its notice. eli's forklift question, which waited on C1, now counts; the question sets regenerated.
+Smoke: `a_teams_channel_reaches_only_its_team_and_is_captured_with_both_keys` (six refusals at creation, pointers among
+them; a consented team's standard channel read, a private channel's post and an unconsented team's never; a post's
+readers exactly the team's members and owners, a guest and someone outside the team never; a sensitive message in no
+table; the channel requested by its owner's consent alone; no notice before the confirm, an unconsented team's channel a
+404, a member refused; the notice once confirmed; proposals readable by the team and not by bob; a delivery with no
+token, another app's, a key endorsed only for Skype, one naming another service address, an expired one, and one for a
+connection that doesn't exist each a 401; a mark Graph doesn't back taken by no one, a good one taken once, its message
+then kept nowhere and its post's proposals alone dropped; the closing notice; someone taken out of the team losing its
+posts; the owner removing the app leaving nothing; the bot posting only its two notices). Unit: `tests/test_teams.py`
+(7) and one more in `test_company.py`. Browser: `test_a_team_admin_connects_teams_and_confirms_capture_once_its_owner_added_the_app`.
+Red first: four mutations, each run against `tests/test_teams.py` and put back (`cmp`): a guest reaching a channel failed its two tests (readers, and who may mark); a key endorsed only for Skype, and the token's service address not compared, each failed the delivery test; another tenant's action taken failed the action test. Then five, each built into the service that runs it, the smoke check run against it, then put back (`cmp`) and the service rebuilt: a guest reaching a channel (failed: "a post's readers aren't exactly its team's members", the guest's identity among them); a private channel read (failed: "a private channel's post, or a team whose owner didn't consent, was read"); another app's token taken, in the API (failed: "another app's token was taken"); a mark taken without Graph's word (failed: "a mark Graph doesn't back was taken"); and a consented channel's capture starting without the team admin (failed: "the owner's consent didn't stand as capture's first key, alone"); on the clean rebuild after, it passed. Found while building: the connection first kept its teams as `config["teams"]`, which
+GitHub connections use for routing, so `team_for` read the list as a map and every sync failed (the smoke check caught
+it: no post arrived); they're `team_ids` now, which also keeps GitHub's routes out of the settings read back. On this
+long-lived stack, carol's Microsoft identity link was already in OpenFGA from an earlier run, which failed both this
+check and S5's at their first write, so both now write only the links that aren't there, and this one removes any stale
+link at the end, as the Entra check does; the browser test reloads the page, which a navigation to the form's own address doesn't;
+the fake's Bot Connector keeps every app's posts, so the retailer counts only its own app's. Proof, against the running stack (not fresh: it holds the scenario and the retailer): `make unit` 235 passed; the new check passed, before the mutations and on the clean rebuild after, and so did C2b's capture, C2c's save, C2d's ask, S5's Microsoft 365, F2's extraction, and the paused connection's checks; `kl.company_eval`: no leak, everyone opening exactly what the truth says (eli 18 documents), the Teams channel captured with both keys and the Teams bot posting only its notice, 30 proposals from 20 documents (4 from captured threads, Slack's and Teams'), Recall@10 100%, MRR 0.83 over 53 counted questions (the forklift question found at #2), Ask right for 27 of 27, the right unit first for 15 of 26, both sensitive messages kept nowhere, the Slack ask answered, the truth's gap; its only failure F6's known staleness on this stack (11 units stale where the truth says 3, the 8 more all citing Jira issues: PR 82's fix); the Teams browser test and the gallery's, Slack's, Microsoft 365's, and the Capture panel's passed; the lint at 0 errors and 43 warnings; `make pins` passed; the provider's build, vet, and unit tests, and `TestAccConnectionTeams`, passed, and the onboarding example validates. Not run: the full smoke suite and the other sets (CI's run on the pull request; the fresh-stack loop comes after C1b). Not built: the bot
+answering privately and Save to Aerugo (C1b); pointer and live-only modes for Teams; private and shared channels;
+incremental reads (each sync reads the window in full, as Slack's first did: simpler, and it follows deletions exactly);
+Graph's change notifications (the readers refresh carries membership changes); and the package's icons (the company's own).
+CI on pull request 83 first failed the team sets' gate: distribution's MRR fell from 1.00 to 0.83, its new question (eli's
+forklift, which waited on C1) found at #2; smoke 189 passed, 17 skipped, 0 failed, and the golden set, the scenario, the
+retailer (the forklift question new, `registers-down-leader` better), and the Atlas held their baselines. Distribution's
+entry was recorded from that run, a fresh stack in CI's order: the forklift question at #2, MRR 0.8333.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2408,8 +2489,8 @@ three, F5a (questions, gaps, and corrections), F7 (question sets per team), and 
 answers), with the fresh-stack loop over the three, and F11a (pointer mode) and F11b (live only), with the fresh-stack
 loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
 fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and C2d (the bot
-answers privately, as the asker), which completes C2, and F6's evidence by its text; next, Teams (C1a, C1b), C3, and
-C4.
+answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
+source, with capture); next, C1b (the Teams bot's private answers and Save to Aerugo), C3, and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

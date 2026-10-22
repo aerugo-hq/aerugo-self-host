@@ -172,6 +172,9 @@ services:
       KL_SLACK_API_BASES: ${KL_SLACK_API_BASES:-https://slack.com/api,http://fake-llm:8080/slack/api,http://fake-llm:8080/retail-slack/api}
       # Microsoft Graph addresses Entra directories may use (S3); the fake one exists only while smoke runs.
       KL_MICROSOFT_GRAPH_BASES: ${KL_MICROSOFT_GRAPH_BASES:-https://graph.microsoft.com,http://fake-llm:8080/microsoft}
+      # Teams' bot (C1a): Bot Framework's service addresses and signing keys; the fake ones exist only while smoke runs.
+      KL_TEAMS_BOT_SERVICES: ${KL_TEAMS_BOT_SERVICES:-https://smba.trafficmanager.net/,http://fake-llm:8080/teams-bot/}
+      KL_TEAMS_BOT_OPENID: ${KL_TEAMS_BOT_OPENID:-http://fake-llm:8080/botframework/v1/.well-known/openidconfiguration}
       # Data catalogs (S7): Google's, Databricks', AWS's, and Purview's own addresses are always allowed; the fakes
       # exist only while smoke runs.
       KL_DATAPLEX_API_BASES: ${KL_DATAPLEX_API_BASES:-https://googleapis.com,http://fake-llm:8080/gcp-catalog}

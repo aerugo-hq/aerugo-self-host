@@ -41,7 +41,7 @@ pull requests, and APIs and agents. A loop runs back from people to Aerugo: they
 Bottom to top. Built today is marked (built); everything else is to build.
 
 - **Connectors and capture:** documents (Confluence, Drive, SharePoint, Notion: built), tickets and chat (Jira,
-  Slack: built), Teams capture, meetings, and handovers, code (GitHub, at thousands of repos: built, to scale),
+  Slack, Teams channels and their capture: built), meetings and handovers, code (GitHub, at thousands of repos: built, to scale),
   warehouses, catalogs (built), and usage logs, schedulers and ETL (Control-M, Airflow).
 - **Stores:** documents and their index in Postgres with pgvector (built), knowledge units (built: each readable only
   by someone who can read all of its evidence, with perspectives and conflicts), the Atlas graph (built:
@@ -156,6 +156,18 @@ with the groups of their last verified sign-in (`person_sign_ins`, recorded as t
 under a week old and the org's admission lets them in; their question goes through the API's own Ask, narrowed to what
 a Slack reply may carry, and the answer goes only to them, privately. A mention is read back from Slack; a command's
 question is the one text taken from a delivery, invariant 13's recorded exception.
+
+Teams channels and their capture (C1a): the company's own Teams app (an Entra app registration with a certificate, an
+Azure Bot in its own tenant, and an app package it uploads). A team's owner adding the app grants it resource-specific
+consent for that team alone, so Graph reads only consented teams' standard channels; private and shared channels, group
+chats, and 1:1s never. A post and its replies are one document, readable by the team's members and owners (never a guest,
+never the whole org), the sensitive gate (C2a) leaving messages out as in Slack. The owner's consent is capture's first
+key: a consented team's channels arrive requested, the team's admin in Aerugo confirms each, and the bot posts the notice
+when it starts and stops. The bot's deliveries carry no HMAC: Microsoft's signed Bot Framework token stands in for one
+(invariant 13 for Teams, decided 2026-10-21), checked before anything else, a delivery taken once by its activity's id,
+and the job it queues reads back from Graph whatever it acts on. "Don't capture" is a message action, taken once Graph
+shows the message and its marker in the team. Removing the app from a team ends it all: Graph refuses, and the team's
+documents and proposals go.
 
 ## 7. The engineering and data pack
 

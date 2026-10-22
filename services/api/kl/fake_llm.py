@@ -110,7 +110,18 @@ ADMIN_PAGE = 2
 # client assertion this fake verifies as Entra does: PS256, the certificate's SHA-256 thumbprint, this token address
 # as its audience, the app as issuer and subject. Pages are small and come with @odata.nextLink, as Graph's do.
 MICROSOFT = os.environ.get("KL_FAKE_MICROSOFT", "http://fake-llm:8080/microsoft")
-GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False, "sites": {}}
+GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False, "sites": {}, "teams": {}}
+# Teams (C1a): teams, each consented to by the apps its owner installed (resource-specific consent), with members and
+# channels holding posts and their replies in Graph's own shapes; set through POST /microsoft/teams. A team an app has
+# no consent for answers 403, as Graph does.
+# Bot Framework (C1a): its OpenID metadata and keys (one endorsed for Teams, one only for Skype), a signer smoke uses
+# to make the tokens Bot Framework sends (POST /botframework/sign), and a Bot Connector that takes the bot's posts for
+# its app's token and keeps them (GET /teams-bot/posted).
+BOTFRAMEWORK = os.environ.get("KL_FAKE_BOTFRAMEWORK", "http://fake-llm:8080/botframework")
+BOT_SCOPE = "https://api.botframework.com/.default"
+BOT_TOKEN = "fake-bot-token"
+TEAMS_BOT: dict = {"posted": []}
+_BOT_KEYS: dict = {}
 # SharePoint, for Microsoft 365 (S5): sites, each granted to the apps an admin chose (Sites.Selected), with document
 # libraries holding folders and files, each file with its permissions and text; set through POST /microsoft/sites. A
 # file's content is a redirect to a download address, which smoke can point at another host (bad_download).
@@ -199,8 +210,9 @@ def service_account_token(assertion: str) -> tuple[int, dict]:
     return 400, {"error": "invalid_scope"}
 
 
-def new_entra_app(tenant: str) -> dict:
-    """An app registration and its certificate: the PEM bundle the client takes, and the public half Entra keeps."""
+def new_entra_app(tenant: str, client: str | None = None) -> dict:
+    """An app registration and its certificate: the PEM bundle the client takes, and the public half Entra keeps. Given
+    an id, the app is that one, with a new certificate (the retailer's Teams app keeps its id across the fake's restarts)."""
     import base64, datetime, hashlib, uuid as uuidlib
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -212,7 +224,7 @@ def new_entra_app(tenant: str) -> dict:
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
             .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=5))
             .not_valid_after(now + datetime.timedelta(days=1)).sign(key, hashes.SHA256()))
-    client = str(uuidlib.uuid4())
+    client = client or str(uuidlib.uuid4())
     der = cert.public_bytes(serialization.Encoding.DER)
     GRAPH["apps"][client] = {"tenant": tenant.lower(), "key": key.public_key(),
                              "thumbprint": base64.urlsafe_b64encode(hashlib.sha256(der).digest()).rstrip(b"=").decode()}
@@ -246,6 +258,32 @@ def entra_token(tenant: str, form: dict, login: str = MICROSOFT, scope: str = "h
     GRAPH_REQUESTS.append({"tenant": tenant, "client_id": field("client_id"), "aud": claims["aud"], "alg": header["alg"],
                            "x5t#S256": header["x5t#S256"], "scope": field("scope")})
     return 200, {"access_token": f"{token}.{field('client_id')}", "token_type": "Bearer", "expires_in": 3599}  # the app's own
+
+
+def bot_key(kid: str):
+    """One of Bot Framework's signing keys: fake-bot is endorsed for Teams, fake-skype only for Skype."""
+    if kid not in _BOT_KEYS:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        _BOT_KEYS[kid] = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return _BOT_KEYS[kid]
+
+
+def bot_jwks() -> dict:
+    import jwt
+    keys = []
+    for kid, endorsed in (("fake-bot", ["msteams", "skype"]), ("fake-skype", ["skype"])):
+        keys.append({**json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(bot_key(kid).public_key())), "kid": kid, "use": "sig",
+                     "endorsements": endorsed})
+    return {"keys": keys}
+
+
+def bot_token(request: dict) -> str:
+    """A token as Bot Framework sends one to a bot: for an app, naming the service address the activity came from."""
+    import jwt
+    now = int(time.time()) + int(request.get("shift", 0))
+    claims = {"iss": request.get("iss", "https://api.botframework.com"), "aud": request.get("aud"), "serviceurl": request.get("serviceurl"),
+              "nbf": now - 60, "exp": now + int(request.get("ttl", 3600))}
+    return jwt.encode(claims, bot_key(request.get("kid", "fake-bot")), algorithm="RS256", headers={"kid": request.get("kid", "fake-bot")})
 
 
 def graph_transitive(group: str, seen: frozenset = frozenset()) -> list[dict]:
@@ -368,6 +406,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, TOKEN_REQUESTS)
         if self.path == "/microsoft/requests":
             return self._json(200, GRAPH_REQUESTS)
+        if self.path == "/botframework/v1/.well-known/openidconfiguration":
+            return self._json(200, {"issuer": "https://api.botframework.com", "jwks_uri": f"{BOTFRAMEWORK}/v1/.well-known/keys"})
+        if self.path == "/botframework/v1/.well-known/keys":
+            return self._json(200, bot_jwks())
+        if self.path == "/teams-bot/posted":  # what the bot posted, for smoke to read (C1a)
+            return self._json(200, TEAMS_BOT["posted"])
         if self.path.startswith("/microsoft/v1.0/"):
             return self._graph(urlparse(self.path))
         if self.path.startswith("/microsoft/download/"):  # a pre-authenticated download address: no Graph token
@@ -950,6 +994,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+        if parts[0] == "teams" and len(parts) >= 2:  # Teams (C1a): only for an app the team's owner consented to
+            team = GRAPH["teams"].get(parts[1])
+            if team is None or app not in team.get("consented", []):
+                return self._json(403 if team else 404, {"error": {"code": "Forbidden", "message": "Missing role permissions"}})
+            if len(parts) == 2:
+                return self._json(200, {"id": parts[1], "displayName": team["name"]})
+            if parts[2:] == ["members"]:
+                return page(team.get("members", []))
+            if parts[2:] == ["channels"]:
+                return page([{"id": cid, "displayName": ch["name"], "membershipType": ch.get("membershipType", "standard")}
+                             for cid, ch in team["channels"].items()])
+            channel = team["channels"].get(parts[3]) if len(parts) >= 5 and parts[2] == "channels" and parts[4] == "messages" else None
+            if channel is None:
+                return self._json(404, {"error": {"code": "NotFound"}})
+            posts = channel.get("messages", [])
+            bare = lambda m: {k: v for k, v in m.items() if k != "replies"}
+            if len(parts) == 5:
+                return page([bare(m) for m in posts])
+            post = next((m for m in posts if m["id"] == parts[5]), None)
+            if post is None:
+                return self._json(404, {"error": {"code": "NotFound"}})
+            if len(parts) == 6:
+                return self._json(200, bare(post))
+            if parts[6:] == ["replies"]:
+                return page(post.get("replies", []))
+            reply = next((r for r in post.get("replies", []) if len(parts) == 8 and parts[6] == "replies" and r["id"] == parts[7]), None)
+            return self._json(200, reply) if reply else self._json(404, {"error": {"code": "NotFound"}})
         if rest == "users":
             return page(GRAPH["users"])
         if rest == "directory/deletedItems/microsoft.graph.user":
@@ -1160,7 +1231,24 @@ class Handler(BaseHTTPRequestHandler):
                                                       if private else {})})
             return self._json(200, {"ok": True, "channel": form["channel"], **({"message_ts": ts} if private else {"ts": ts})})
         if path == "/microsoft/app":  # smoke mints an app registration and its certificate
-            return self._json(200, new_entra_app(self._body()["tenant_id"]))
+            body = self._body()
+            return self._json(200, new_entra_app(body["tenant_id"], body.get("client_id")))
+        if path == "/microsoft/teams":  # smoke sets Teams' teams, who consented, members, channels, and posts (C1a)
+            GRAPH["teams"] = self._body()["teams"]
+            return self._json(200, {})
+        if path == "/botframework/sign":  # smoke makes a token as Bot Framework signs one for a bot (C1a)
+            return self._json(200, {"token": bot_token(self._body())})
+        if path == "/teams-bot/v3/conversations":  # the bot starts a post in a channel: capture's notice (C1a)
+            auth = self.headers.get("Authorization") or ""
+            app = auth[len(f"Bearer {BOT_TOKEN}."):] if auth.startswith(f"Bearer {BOT_TOKEN}.") else None
+            body = self._body()
+            if app not in GRAPH["apps"]:
+                return self._json(401, {"error": {"code": "Unauthorized", "message": "Authorization has been denied"}})
+            channel = ((body.get("channelData") or {}).get("channel") or {}).get("id")
+            if not body.get("isGroup") or not any(channel in t["channels"] and app in t.get("consented", []) for t in GRAPH["teams"].values()):
+                return self._json(403, {"error": {"code": "BotNotInConversationRoster"}})
+            TEAMS_BOT["posted"].append({"channel": channel, "text": (body.get("activity") or {}).get("text", ""), "app": app})
+            return self._json(201, {"id": f"{channel};messageid={int(time.time() * 1000)}", "activityId": str(len(TEAMS_BOT["posted"]))})
         if path == "/microsoft/sites":  # smoke sets SharePoint's sites, which apps each is granted to, and their files
             GRAPH["sites"] = self._body()["sites"]
             for site in GRAPH["sites"].values():
@@ -1192,6 +1280,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if path.startswith("/microsoft/") and path.endswith("/oauth2/v2.0/token"):  # Entra's token endpoint
             form = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+            if form.get("scope", [""])[0] == BOT_SCOPE:  # Teams' bot, as its app (C1a)
+                return self._json(*entra_token(path.split("/")[2].lower(), form, scope=BOT_SCOPE, token=BOT_TOKEN))
             return self._json(*entra_token(path.split("/")[2].lower(), form))
         if path == "/google/admin/setup":  # smoke sets the fake Workspace directory, and which admins delegation allows
             ADMIN.clear()

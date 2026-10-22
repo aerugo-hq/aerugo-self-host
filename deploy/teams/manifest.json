@@ -1,0 +1,72 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "{{APP_ID}}",
+  "developer": {
+    "name": "{{COMPANY}}",
+    "websiteUrl": "https://{{AERUGO_DOMAIN}}",
+    "privacyUrl": "https://{{AERUGO_DOMAIN}}/privacy",
+    "termsOfUseUrl": "https://{{AERUGO_DOMAIN}}/terms"
+  },
+  "name": {
+    "short": "Aerugo",
+    "full": "Aerugo, {{COMPANY}}'s knowledge layer"
+  },
+  "description": {
+    "short": "Proposes knowledge from this team's channels, where its admins turn capture on.",
+    "full": "Aerugo reads this team's standard channels once its owner adds the app, each post readable only by the team's members. A channel is captured only when its team's admin in Aerugo confirms it; the bot then posts a notice there. Anyone in the team can choose Don't capture on a message to keep it out. Private and shared channels, group chats, and 1:1 chats are never read."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#2E7D6E",
+  "bots": [
+    {
+      "botId": "{{APP_ID}}",
+      "scopes": ["team"],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "composeExtensions": [
+    {
+      "botId": "{{APP_ID}}",
+      "commands": [
+        {
+          "id": "dontCapture",
+          "type": "action",
+          "title": "Don't capture",
+          "description": "Keep this message out of Aerugo",
+          "context": ["message"],
+          "fetchTask": false,
+          "parameters": [
+            {
+              "name": "confirm",
+              "title": "Keep this message out of Aerugo",
+              "description": "Aerugo won't keep or propose from it again.",
+              "inputType": "toggle"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": ["identity"],
+  "validDomains": ["{{AERUGO_DOMAIN}}"],
+  "webApplicationInfo": {
+    "id": "{{APP_ID}}",
+    "resource": "api://{{AERUGO_DOMAIN}}/{{APP_ID}}"
+  },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        { "name": "ChannelMessage.Read.Group", "type": "Application" },
+        { "name": "TeamMember.Read.Group", "type": "Application" },
+        { "name": "ChannelSettings.Read.Group", "type": "Application" },
+        { "name": "TeamSettings.Read.Group", "type": "Application" }
+      ]
+    }
+  }
+}

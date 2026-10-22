@@ -4619,6 +4619,7 @@ def microsoft_365_files_carry_their_own_sharing():
     body = {"name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
             "sites": [site, hidden], "every_minutes": 60}
     links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in people}
+    links -= {(t["user"], t["relation"], t["object"]) for _, _, o in links for t in fga.read({"object": o})}  # only what isn't there
 
     def hits(u):
         return {h["id"] for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
@@ -4634,7 +4635,8 @@ def microsoft_365_files_carry_their_own_sharing():
         for u in people:  # each has linked their Microsoft account
             conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
                          "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
-    fga.write(writes=links)
+    if links:
+        fga.write(writes=links)
     try:
         assert httpx.post(f"{FAKE_MICROSOFT}/setup", json={"users": [user(u) for u in people], "groups": group_of("bob", "carol")},
                           timeout=10).status_code == 200
@@ -4675,7 +4677,8 @@ def microsoft_365_files_carry_their_own_sharing():
     finally:
         api("DELETE", path, "alice")
         api("DELETE", dpath, "olivia")
-        fga.write(deletes=links)
+        if links:
+            fga.write(deletes=links)
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
 
@@ -4994,6 +4997,200 @@ def a_slack_channel_is_captured_only_with_both_keys_and_its_marks_honored():
         with psycopg.connect(OWNER_DB, autocommit=True) as conn:
             conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([p for _, p in principals],))
             conn.execute("DELETE FROM kl.source_identities WHERE external_id LIKE %s", (f"UCAP%{tag}",))
+
+
+@check
+def a_teams_channel_reaches_only_its_team_and_is_captured_with_both_keys():
+    """C1a, Teams: only the standard channels of a team whose owner consented to the app are read, each post reaching exactly the team's members and owners (never a guest, someone outside the team, or a private channel's post), a sensitive message kept nowhere; the owner's consent is capture's first key and the team's admin confirms each channel, the bot posting one notice when it starts and one when it stops, and nothing else; a delivery stands only on Microsoft's token for this app, from the service address it names, signed by a key endorsed for Teams, taken once; "Don't capture" is taken only when Graph shows the message and its marker in the team; someone taken out of the team loses its posts, and a team whose owner removes the app keeps nothing"""
+    from .authz import fga
+    from .teams import key_of
+    tag = secrets.token_hex(3).upper()
+    tenant = str(uuid.uuid4())
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    someone_else = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    people = ("alice", "bob", "carol")
+    ids = {u: str(uuid.uuid4()) for u in (*people, "vendor")}
+    principal = lambda u: f"ext:microsoft.{u}@acme.test"
+    team, hidden = str(uuid.uuid4()), str(uuid.uuid4())
+    channel, private, elsewhere = (f"19:{k}{tag.lower()}@thread.tacv2" for k in ("handover", "leads", "hidden"))
+    gate = f"side gate code for {tag.lower()} is 4412"
+    surgery = f"Sam is having surgery on Tuesday ({tag})"
+    mid = lambda n: f"17603640{n:05d}"
+    post = lambda n, who, text, **more: {"id": mid(n), "messageType": "message", "createdDateTime": "2026-10-13T14:00:00Z",
+                                        "lastModifiedDateTime": "2026-10-13T14:00:00Z", "replyToId": None,
+                                        "from": {"user": {"id": ids[who], "displayName": who.title()}},
+                                        "body": {"contentType": "html", "content": f"<p>{text}</p>"},
+                                        "webUrl": f"https://teams.microsoft.com/l/message/{mid(n)}", **more}
+    member = lambda u, *roles: {"userId": ids[u], "email": f"{u}@{'else.test' if u == 'vendor' else 'acme.test'}",
+                                "displayName": u.title(), "roles": list(roles)}
+
+    def state(members=("alice", "carol"), consented=True):
+        return {"teams": {
+            team: {"name": "Payments floor", "consented": [app["client_id"]] if consented else [],
+                   "members": [member("alice", "owner"), *(member(u) for u in members if u != "alice"), member("vendor", "guest")],
+                   "channels": {
+                       channel: {"name": "Handover", "membershipType": "standard", "messages": [
+                           post(1, "carol", f"How do we reset the till float {tag}?", replies=[
+                               {**post(2, "alice", f"Count the float at close and log it in the drawer book {tag}."), "replyToId": mid(1)}]),
+                           post(3, "carol", f"Reminder: the {gate}."),
+                           post(4, "alice", surgery)]},
+                       private: {"name": "Leads", "membershipType": "private", "messages": [post(5, "alice", f"Leads only {tag}.")]}}},
+            hidden: {"name": "Elsewhere", "consented": [someone_else["client_id"]], "members": [member("alice", "owner")],
+                     "channels": {elsewhere: {"name": "Hidden", "membershipType": "standard",
+                                              "messages": [post(6, "alice", f"Another team's post {tag}.")]}}}}}
+
+    name = f"teams-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    service = f"{FAKE_LLM}/teams-bot"
+    body = {"name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "team_ids": [team, hidden], "history_days": 3650, "bot_service": service, "every_minutes": 10080}
+    links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in people}
+    links -= {(t["user"], t["relation"], t["object"]) for _, _, o in links for t in fga.read({"object": o})}  # only what isn't there
+    thread, reminder, sensitive = (key_of(channel, mid(n)) for n in (1, 3, 4))
+
+    def hits(u):
+        return {h["id"] for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def capture():
+        return {c["channel"]: c["capture"] for c in api("GET", path + "/capture", "alice").json()["channels"]}
+
+    def posted():
+        return [p for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json() if p["channel"] == channel]
+
+    def proposals(key):
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.knowledge_units u JOIN kl.documents d ON d.id = ANY(u.evidence) "
+                                "WHERE u.created_by = 'extraction' AND d.external_key = %s", (key,)).fetchone()[0]
+
+    def exclusions():
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FROM kl.capture_exclusions WHERE connection_id = %s", (cid,)).fetchone()[0]
+
+    def jobs(kind):
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT count(*) FILTER (WHERE status NOT IN ('done', 'failed')), count(*) FROM kl.jobs "
+                                "WHERE kind = %s AND payload->>'connection_id' = %s", (kind, cid)).fetchone()
+
+    def until(ok, seconds=180):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(3)
+        return ok()
+
+    def deliver(n, message, who="carol", reply_to=None, auth=None, service_url=service + "/", connection=None):
+        activity = {"type": "invoke", "name": "composeExtension/submitAction", "id": f"f:{tag}{n}", "serviceUrl": service_url,
+                    "from": {"id": f"29:{ids[who]}", "aadObjectId": ids[who]},
+                    "channelData": {"channel": {"id": channel}, "tenant": {"id": tenant}},
+                    "value": {"commandId": "dontCapture", "messagePayload": {"id": message, "replyToId": reply_to}}}
+        if auth is None:
+            auth = "Bearer " + httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": app["client_id"], "serviceurl": service_url},
+                                          timeout=10).json()["token"]
+        return httpx.post(f"{API}/v1/hooks/teams/{connection or cid}/messages", json=activity, timeout=15,
+                          headers={"Authorization": auth} if auth else {})
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u in people:  # each has linked their Microsoft account
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
+    if links:
+        fga.write(writes=links)
+    ensure_fake_models()
+    cid = None
+    try:
+        assert httpx.post(f"{FAKE_MICROSOFT}/teams", json=state(), timeout=10).status_code == 200
+        refusals = {"an internal address was accepted": {**body, "api_base": "http://10.0.0.5"},
+                    "a team named by anything but its id was accepted": {**body, "team_ids": ["Payments floor"]},
+                    "a Bot Framework address not allowed was accepted": {**body, "bot_service": "https://evil.example/bot"},
+                    "a junk certificate was accepted": {**body, "certificate": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----"},
+                    "pointers only were accepted for Teams": {**body, "storage": "pointer"},
+                    "a reference to another team's secret was accepted": {**body, "certificate": None,
+                                                                         "credential_ref": "openbao://secret/kl/acme/finance/models/smoke-fake"}}
+        for problem, attempt in refusals.items():
+            assert api("POST", "/v1/workspaces/payments/connections/teams", "alice", json=attempt).status_code == 422, problem
+        r = api("POST", "/v1/workspaces/payments/connections/teams", "alice", json=body)
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        assert until(lambda: thread in hits("alice") and thread in hits("carol")), "Teams' posts never arrived"
+        alice, bob, carol = (hits(u) for u in people)
+        assert thread not in bob, "a post reached someone outside its team"
+        assert not any(k.endswith(mid(5)) or k.endswith(mid(6)) for h in (alice, bob, carol) for k in h), \
+            "a private channel's post, or a team whose owner didn't consent, was read"
+        assert capture() == {channel: "requested"}, f"the owner's consent didn't stand as capture's first key, alone: {capture()}"
+        assert not stored_anywhere(surgery), f"a sensitive Teams message was kept: {stored_anywhere(surgery)}"
+        doc = api("GET", "/v1/documents", "carol", params={"scope": "org", "key": thread}).json()["documents"]
+        assert doc and doc[0]["container"]["name"] == "Payments floor / Handover", f"the post isn't placed in its channel: {doc}"
+        with psycopg.connect(OWNER_DB) as conn:
+            acl = conn.execute("SELECT acl_principals FROM kl.documents WHERE external_key = %s", (thread,)).fetchone()[0]
+        assert sorted(acl) == [principal("alice"), principal("carol")], f"a post's readers aren't exactly its team's members: {acl}"
+
+        assert not posted(), "the bot posted before the team's admin confirmed"
+        assert api("POST", f"{path}/capture/{elsewhere}", "alice", json={"action": "confirm"}).status_code == 404, \
+            "a channel whose team's owner never consented was captured"
+        assert api("POST", f"{path}/capture/{channel}", "carol", json={"action": "confirm"}).status_code in (403, 404), \
+            "someone who isn't the team's admin confirmed capture"
+        assert api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": "smoke-fake"}).status_code == 200
+        assert api("POST", f"{path}/capture/{channel}", "alice", json={"action": "confirm"}).json()["capture"] == "on"
+        assert until(lambda: len(posted()) == 1), "the channel wasn't told capture started"
+        assert "Payments" in posted()[0]["text"] and "Don't capture" in posted()[0]["text"], posted()
+        assert until(lambda: proposals(thread) > 0, 240), "nothing was proposed from the captured channel"
+        with psycopg.connect(OWNER_DB) as conn:
+            unit = conn.execute("SELECT u.id FROM kl.knowledge_units u JOIN kl.documents d ON d.id = ANY(u.evidence) "
+                                "WHERE u.created_by = 'extraction' AND d.external_key = %s LIMIT 1", (thread,)).fetchone()[0]
+        assert api("GET", f"/v1/units/{unit}", "carol").status_code == 200, "a member of the team can't read its proposal"
+        assert api("GET", f"/v1/units/{unit}", "bob").status_code == 404, "someone outside the team read its proposal"
+
+        forged = httpx.post(f"{FAKE_LLM}/botframework/sign", timeout=10, json={"aud": someone_else["client_id"], "serviceurl": service + "/"}).json()["token"]
+        skype = httpx.post(f"{FAKE_LLM}/botframework/sign", timeout=10, json={"aud": app["client_id"], "serviceurl": service + "/",
+                                                                                "kid": "fake-skype"}).json()["token"]
+        elsewhere_url = httpx.post(f"{FAKE_LLM}/botframework/sign", timeout=10, json={"aud": app["client_id"],
+                                                                                       "serviceurl": "https://smba.trafficmanager.net/amer/"}).json()["token"]
+        stale = httpx.post(f"{FAKE_LLM}/botframework/sign", timeout=10, json={"aud": app["client_id"], "serviceurl": service + "/",
+                                                                                "shift": -7200}).json()["token"]
+        refused = {"a delivery with no token": deliver(1, mid(3), auth=""),
+                   "another app's token": deliver(2, mid(3), auth=f"Bearer {forged}"),
+                   "a key endorsed only for Skype": deliver(3, mid(3), auth=f"Bearer {skype}"),
+                   "a token naming another service address": deliver(4, mid(3), auth=f"Bearer {elsewhere_url}"),
+                   "an expired token": deliver(5, mid(3), auth=f"Bearer {stale}"),
+                   "a delivery for a connection that doesn't exist": deliver(6, mid(3), connection=str(uuid.uuid4()))}
+        for problem, got in refused.items():
+            assert got.status_code == 401, f"{problem} was taken: {got.status_code}"
+        assert deliver(7, mid(9)).status_code == 200  # a message Graph doesn't hold
+        assert deliver(8, mid(3), who="bob").status_code == 200  # someone outside the team
+        assert until(lambda: jobs("teams.exclude") == (0, 2)), jobs("teams.exclude")
+        assert exclusions() == 0, "a mark Graph doesn't back was taken"
+        got = deliver(9, mid(3))
+        assert got.status_code == 200 and "won't be kept" in got.json()["task"]["value"], got.text[:200]
+        assert deliver(9, mid(3)).status_code == 200  # the same delivery again
+        assert until(lambda: not stored_anywhere(gate), 240), f"a message marked don't capture is still kept: {stored_anywhere(gate)}"
+        assert jobs("teams.exclude")[1] == 3 and exclusions() == 1, "a replayed delivery was taken twice"
+        assert proposals(reminder) == 0 and proposals(thread) > 0, "the mark took the wrong proposals"
+
+        assert api("POST", f"{path}/capture/{channel}", "alice", json={"action": "off"}).json()["capture"] == "off"
+        assert until(lambda: len(posted()) == 2), "turning capture off wasn't told to the channel"
+        assert posted()[1]["text"].startswith("Aerugo no longer proposes"), posted()
+
+        assert httpx.post(f"{FAKE_MICROSOFT}/teams", json=state(members=("alice",)), timeout=10).status_code == 200
+        assert api("POST", path + "/refresh", "alice").status_code in (200, 202)
+        assert until(lambda: thread not in hits("carol")), "someone taken out of the team still finds its posts"
+        assert thread in hits("alice"), "a member still in the team lost its posts"
+        assert httpx.post(f"{FAKE_MICROSOFT}/teams", json=state(members=("alice",), consented=False), timeout=10).status_code == 200
+        assert api("POST", path + "/refresh", "alice").status_code in (200, 202)
+        assert until(lambda: thread not in hits("alice")), "a team whose owner removed the app still has its posts read"
+        assert capture() == {}, f"a team whose owner removed the app still lists channels: {capture()}"
+        assert len(posted()) == 2, f"the bot posted something besides capture's two notices: {posted()}"
+    finally:
+        api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": None})
+        if cid:
+            api("DELETE", path, "alice")
+        if links:
+            fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
+        stale = {(t["user"], t["relation"], t["object"]) for u in people for t in fga.read({"object": f"identity:{principal(u)[4:]}"})
+                 if t["user"] == f"user:{u}"}
+        if stale:  # a link sign-in matching made from the team's members, as the Entra check leaves none
+            fga.write(deletes=stale)
 
 
 @check

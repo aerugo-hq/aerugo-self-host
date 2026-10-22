@@ -50,6 +50,11 @@ SLACK_API_BASES = [b.strip().rstrip("/") for b in _env("KL_SLACK_API_BASES", "ht
 # Microsoft Graph addresses an Entra directory may use (S3); its tokens come from login.microsoftonline.com.
 MICROSOFT_GRAPH_BASES = [b.strip().rstrip("/") for b in _env("KL_MICROSOFT_GRAPH_BASES", "https://graph.microsoft.com").split(",")
                          if b.strip()]
+# Teams' bot (C1a): the Bot Framework service addresses its bot may be sent from and may post to (each a prefix, ending
+# in a slash), and where Bot Framework publishes the keys it signs deliveries with.
+TEAMS_BOT_SERVICES = [b.strip().rstrip("/") + "/" for b in _env("KL_TEAMS_BOT_SERVICES", "https://smba.trafficmanager.net/").split(",")
+                      if b.strip()]
+TEAMS_BOT_OPENID = _env("KL_TEAMS_BOT_OPENID", "https://login.botframework.com/v1/.well-known/openidconfiguration")
 # Data catalogs a catalog connection may use (S7). Dataplex: Google's own APIs (the sentinel https://googleapis.com
 # means dataplex., bigquery., and datalineage.googleapis.com), or the dev fake. Unity Catalog: Databricks workspaces
 # (https://<workspace>.cloud.databricks.com, .azuredatabricks.net, .gcp.databricks.com, always allowed) and these. Glue:
