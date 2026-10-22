@@ -2472,6 +2472,10 @@ the fake's Bot Connector keeps every app's posts, so the retailer counts only it
 answering privately and Save to Aerugo (C1b); pointer and live-only modes for Teams; private and shared channels;
 incremental reads (each sync reads the window in full, as Slack's first did: simpler, and it follows deletions exactly);
 Graph's change notifications (the readers refresh carries membership changes); and the package's icons (the company's own).
+CI on pull request 83 first failed the team sets' gate: distribution's MRR fell from 1.00 to 0.83, its new question (eli's
+forklift, which waited on C1) found at #2; smoke 189 passed, 17 skipped, 0 failed, and the golden set, the scenario, the
+retailer (the forklift question new, `registers-down-leader` better), and the Atlas held their baselines. Distribution's
+entry was recorded from that run, a fresh stack in CI's order: the forklift question at #2, MRR 0.8333.
 C1b, the Teams bot answers privately and saves (the plan approved 2026-10-21 with C1a: a question asked of the bot in
 its 1:1 chat is taken from the delivery, extending C2d's recorded exception to invariant 13; everything else the bot acts
 on is read back). The answering path both bots share moved out of `slack_ask` into `kl/chat_ask.py` (`answer_as`): the

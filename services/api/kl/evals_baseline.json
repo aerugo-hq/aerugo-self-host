@@ -1387,6 +1387,11 @@
     },
     "distribution": {
       "cases": {
+        "forklift-dock-2": {
+          "first": 2,
+          "found": 1,
+          "of": 1
+        },
         "late-shipment": {
           "first": 1,
           "found": 1,
@@ -1399,7 +1404,7 @@
         }
       },
       "k": 10,
-      "mrr": 1.0,
+      "mrr": 0.8333,
       "recall": 1.0,
       "scenario": "team distribution"
     },
