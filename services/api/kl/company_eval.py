@@ -752,7 +752,7 @@ def teams_capture_on(c: company.Container, team_name: str) -> list[str]:
     if r.status_code != 200:
         raise SystemExit(f"confirming capture of {c.id}: {r.status_code} {r.text[:200]}")
     notice = teams_bot.NOTICE_ON.format(team=team_name)
-    while not any(p["channel"] == c.id and p["text"] == notice for p in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json()) \
+    while not any(p.get("channel") == c.id and p["text"] == notice for p in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json()) \
             and time.monotonic() < deadline + 120:
         time.sleep(2)
     return []

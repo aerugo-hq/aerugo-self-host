@@ -2539,6 +2539,25 @@ Teams, Answers, and Capture browser tests passed (5); the lint at 0 errors and 4
 the full smoke suite and the other sets (CI's run on the pull request, and the fresh-stack loop next, over C2d, C1a, and
 C1b). Not built: follow-up questions in a thread, "ask an expert" from an unsure answer, an answer in a channel (by
 decision, every answer goes to its asker's own 1:1 chat), and Terraform for the answer settings.
+**The fresh-stack loop over C2d, C1a, and C1b, 2026-10-22** (once after the three, at the top of the stack,
+c1b-teams-bot's 8f50913, with CI's settings): `make pins` passed; `make unit` 245 passed; `make smoke` 192 passed, 15
+skipped, 0 failed (both Teams checks among them; the web servers recreated first); the golden set hit@1 1.0, MRR 1.0,
+found@5 1.0, no regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24 of 25,
+no leak, no regression; `make eval-company` failed once, on C1b's retailer code: its wait for the Teams notice read every
+bot post's channel, which the private replies smoke's C1b check had left have none of (a KeyError; `p.get`), then passed
+on the same stack: everyone opening exactly what the truth says, no leak, CO201 and the Reno DC Teams channel captured
+with both keys and each bot posting only its notice, 30 proposals from 20 documents (4 from captured threads), 1 of 1
+saves, Recall@10 100%, MRR 0.83 over 53 counted questions (the forklift question new, at #2; `registers-down-leader`
+better), Ask right for 27 of 27, the right unit first for 15 of 26, both sensitive messages kept nowhere, ana's Slack ask
+and eli's Teams ask each answered privately with only their own Ask's sources, exactly the truth's 3 stale units (F6's
+fix holding on a fresh stack) and its 1 gap, no regression; `make atlas-eval` exact, no leak, no regression; `make
+eval-teams` no leak, every team at its baseline (distribution's with the forklift question); the retailer as pointers
+Recall@10 99%, MRR 0.83, Ask right for 27 of 27, and live only Recall@10 99%, MRR 0.62, Ask right for 25 of 27, each with
+no leak and no regression; no planted text in the services' logs; `make e2e` 42 passed; `make test-web` 7 passed; the
+lint at 0 errors and 43 warnings. The retailer's three baselines were recorded on that stack, in CI's order, each gaining
+the forklift question (#2 indexed and as pointers, #5 live only): `company` MRR 0.8286, `company-pointer` 0.8292,
+`company-live` 0.6231; every other set's record unchanged. CI's smoke job then needed more than its 40 minutes (pull
+request 83's run, cancelled at 40m37s with everything through the team sets passed), so its limit is 60 (C1a's branch).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2553,8 +2572,8 @@ answers), with the fresh-stack loop over the three, and F11a (pointer mode) and 
 loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2c (Save to Aerugo), with the
 fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and C2d (the bot
 answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
-source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1; next, the
-fresh-stack loop over C2d, C1a, and C1b, then C3 and C4.
+source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
+fresh-stack loop over the three; next, C3 and C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

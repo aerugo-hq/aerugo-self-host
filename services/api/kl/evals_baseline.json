@@ -180,6 +180,11 @@
         "found": 1,
         "of": 1
       },
+      "forklift-dock-2": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      },
       "holiday-results": {
         "first": 2,
         "found": 1,
@@ -276,7 +281,7 @@
         "of": 1
       },
       "registers-down-leader": {
-        "first": 3,
+        "first": 2,
         "found": 1,
         "of": 1
       },
@@ -352,7 +357,7 @@
       }
     },
     "k": 10,
-    "mrr": 0.8317,
+    "mrr": 0.8286,
     "recall": 1.0,
     "scenario": "company",
     "units": {
@@ -505,6 +510,11 @@
         "found": 1,
         "of": 1
       },
+      "forklift-dock-2": {
+        "first": 5,
+        "found": 1,
+        "of": 1
+      },
       "holiday-results": {
         "first": 2,
         "found": 1,
@@ -551,7 +561,7 @@
         "of": 1
       },
       "recall-decision": {
-        "first": 5,
+        "first": 3,
         "found": 1,
         "of": 1
       },
@@ -677,8 +687,8 @@
       }
     },
     "k": 10,
-    "mrr": 0.6286,
-    "recall": 0.9904,
+    "mrr": 0.6231,
+    "recall": 0.9906,
     "scenario": "company",
     "units": {
       "allocation-fewer-units": false,
@@ -830,6 +840,11 @@
         "found": 1,
         "of": 1
       },
+      "forklift-dock-2": {
+        "first": 2,
+        "found": 1,
+        "of": 1
+      },
       "holiday-results": {
         "first": 2,
         "found": 1,
@@ -1002,8 +1017,8 @@
       }
     },
     "k": 10,
-    "mrr": 0.8356,
-    "recall": 0.9904,
+    "mrr": 0.8292,
+    "recall": 0.9906,
     "scenario": "company",
     "units": {
       "allocation-fewer-units": false,
