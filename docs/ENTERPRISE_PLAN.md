@@ -292,6 +292,12 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
       the capture and the attendees' confirmation in Aerugo, and C3b, the review card in Teams with Confirm and Not
       right, settled as whoever pressed them: built.)
 - [ ] **C4.** Handover interviews.
+      (Decided 2026-10-23: the person starts their own handover, or accepts one their manager or a team admin asks for;
+      prompts only from what they own, built as them, then open ones; drafts theirs alone; each answer shared with the
+      audience they choose, the team plus the named successor and lead by default, or the whole company; the successor
+      or lead confirms; they can withdraw a shared answer until they leave, and their unshared drafts are deleted when a
+      directory says they've left; in the web app only. C4a, the interview, sharing, confirmation, and withdrawal behind
+      the API: built.)
 - [ ] **C5.** Announcement mailboxes as policy versions (optional).
 
 ### Where people meet it

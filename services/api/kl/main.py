@@ -34,6 +34,7 @@ from .auth import Caller, authenticate, signed_in
 from .authz import fga
 from .atlas import connect as atlas_connect, record as atlas_record, router as atlas_router
 from .units import router as units_router
+from .handover import router as handover_router
 from . import context as asking, experts, gaps, live, unit_answers, units as unit_store
 from .extraction import router as extraction_router
 from .gateway import month_usage
@@ -75,6 +76,7 @@ app = FastAPI(title="knowledge-layer API", version="0.1.0", lifespan=lifespan)
 app.include_router(connections_router)
 app.include_router(atlas_router)
 app.include_router(units_router)
+app.include_router(handover_router)
 app.include_router(extraction_router)
 app.include_router(webhooks_router)
 app.include_router(hooks_router)

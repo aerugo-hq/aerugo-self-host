@@ -13,7 +13,8 @@ documented), confirm, retire, and supersede them with a new version on the same 
 conflicts; a curator of either side may open one. F2's extraction writes as the worker; F3 merges; F4 answers from them.
 A unit whose evidence is meeting transcripts alone (C3a) is readable only by the people in those meetings, so they, not
 the owner team's curators, confirm or retire it: anyone who reads it in full (`GET /v1/meetings/review` lists theirs, and
-C3b's review card in Teams, built as them, settles them).
+C3b's review card in Teams, built as them, settles them). A unit from one handover's shared answers alone (C4a) is
+confirmed or retired by that handover's named successor or lead, beside the team's curators.
 """
 from __future__ import annotations
 
@@ -322,6 +323,25 @@ def settle_from_meeting(caller: Caller, unit_id: str, verb: str) -> tuple[str, s
     return "dismissed", row["title"]
 
 
+HANDOVER_REVIEW_SQL = f"""
+SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team
+WHERE u.status = 'proposed' AND u.created_by = 'handover' AND kl.handover_confirmer(u.evidence)
+ORDER BY u.created_at DESC, u.id LIMIT %(limit)s
+"""
+
+
+def handover_proposals(caller: Caller, limit: int = LIMIT) -> list[dict]:
+    """What handovers naming the caller as successor or lead proposed and no one has settled yet (C4a): units from those
+    handovers' shared answers alone that they read in full, each with its text."""
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        rows = conn.execute(HANDOVER_REVIEW_SQL, {"limit": limit}).fetchall()
+        docs = readable(conn, caller, [d for r in rows for d in r["evidence"]])
+        mine = [r for r in rows if shown(r["evidence"], set(docs)) and from_handover(r, docs)]
+        audit(conn, org_id, caller.username, "handovers.review", [], {"shown": len(mine)})
+    return [{**_summary(r), "text": r["body"], "evidence": _evidence(r, docs)} for r in mine]
+
+
 @router.get("/meetings/review")
 def meetings_review(limit: int = Query(50, ge=1, le=LIMIT), caller: Caller = Depends(authenticate)):
     """What the caller's meetings proposed and no one has confirmed or dismissed yet (C3a)."""
@@ -448,16 +468,24 @@ def from_meetings(row: dict, docs: dict[str, dict]) -> bool:
     return bool(row["evidence"]) and all(docs.get(e, {}).get("source_kind") == "meeting" for e in row["evidence"])
 
 
-def _settled_by(conn, caller: Caller, unit_id: str) -> tuple[dict, bool]:
-    """A unit the caller may confirm or retire, and whether they do it as one of its meetings' people (C3a): its owner
-    team's curator, or, for a unit from meetings alone, anyone who reads it in full. 404 when it's hidden, 403 otherwise."""
+def from_handover(row: dict, docs: dict[str, dict]) -> bool:
+    """Whether a unit's evidence is handovers' shared answers alone (C4a), every one readable by the caller."""
+    return bool(row["evidence"]) and all(docs.get(e, {}).get("source_kind") == "handover" for e in row["evidence"])
+
+
+def _settled_by(conn, caller: Caller, unit_id: str) -> tuple[dict, str | None]:
+    """A unit the caller may confirm or retire, and who they are to it: its owner team's curator (None); for a unit from
+    meetings alone, anyone who reads it in full (C3a); for one from a handover alone, the successor or lead it names
+    (C4a), as the database says. 404 when it's hidden, 403 otherwise."""
     row, docs = _visible_unit(conn, caller, unit_id)
     if not row:
         raise HTTPException(404, "unit not found")
     if fga.check(caller.fga_user, "curator", f"workspace:{row['owner']}"):
-        return row, False
+        return row, None
     if from_meetings(row, docs):
-        return row, True
+        return row, "someone in its meeting"
+    if from_handover(row, docs) and conn.execute("SELECT kl.handover_confirmer(%s::uuid[]) AS ok", (row["evidence"],)).fetchone()["ok"]:
+        return row, "its handover's successor or lead"
     raise HTTPException(403, "a curator of the team required")
 
 
@@ -521,11 +549,12 @@ def _set_status(unit_id: str, caller: Caller, status: str, action: str) -> dict:
     uid = _unit_id(unit_id)
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
-        row, attendee = _settled_by(conn, caller, uid)
+        row, who = _settled_by(conn, caller, uid)
     if row["status"] in ("superseded", "retired"):
         raise HTTPException(409, f"the unit is {row['status']}")
-    # One of a meeting's people names no team: the database lets them change a unit only from meetings they were in
-    with scoped(org_id, caller.principals, teams=[] if attendee else [row["owner"]]) as conn:
+    # One of a meeting's people, or a handover's successor or lead, names no team: the database lets them change a unit
+    # only from meetings they were in (0072), or from the handover that names them (0074)
+    with scoped(org_id, caller.principals, teams=[] if who else [row["owner"]]) as conn:
         trust = "confirmed" if status == "confirmed" else row["trust"]
         # F6: confirming restarts its review and snapshots its evidence, so a change underneath it can be told
         conn.execute("UPDATE knowledge_units SET status = %s, trust = %s, updated_at = now(), "
@@ -533,8 +562,8 @@ def _set_status(unit_id: str, caller: Caller, status: str, action: str) -> dict:
                      f"evidence_hashes = CASE WHEN %s = 'confirmed' THEN {SNAPSHOT} ELSE evidence_hashes END, "
                      f"evidence_texts = CASE WHEN %s = 'confirmed' THEN {TEXT_SNAPSHOT} ELSE evidence_texts END WHERE id = %s",
                      (status, trust, status, status, status, uid))
-        who = "someone in its meeting" if attendee else "its owner"
-        conn.execute(EVENT_SQL, (uid, row["status"], status, f"{'confirmed' if status == 'confirmed' else 'retired'} by {who}", caller.username))
+        conn.execute(EVENT_SQL, (uid, row["status"], status, f"{'confirmed' if status == 'confirmed' else 'retired'} by {who or 'its owner'}",
+                                 caller.username))
         audit(conn, org_id, caller.username, action, [row["owner"]], {"unit": uid})
     return {"id": uid, "status": status, "trust": trust}
 

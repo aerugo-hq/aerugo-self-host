@@ -85,6 +85,13 @@ CAPTURED = ("CRTSCO201", TEAMS_CHANNEL, MEETING_CHAT)
 # C2c: messages saved to Aerugo, as (thread, message), each by the thread's first author: someone else's message, so
 # only in a captured channel; it becomes a proposed unit with exactly its channel's readers.
 SAVES = (("key-thread-CO201", 1),)
+# C4a: a handover. Cora, CA301's store manager, is changing roles; Ben, an associate moving up, takes over, and Dara, a
+# district manager, is the lead she names. She hands over what no page says (who to call when a store's back-door alarm
+# trips after close), for Stores and the two people she names; Ana, in Stores, asks it, and Fay, outside it, never sees it.
+HANDOVER = {"person": "cora", "team": "stores", "successor": "ben", "lead": "dara", "reason": "changing roles", "kind": "contact",
+            "answer": "When a store's back-door alarm trips after close, call Pacific Alarm on the number taped inside the "
+                      "office door, never the police non-emergency line.",
+            "asker": "ana", "outsider": "fay", "question": "Who do we call when a store's back-door alarm trips after close?"}
 # Time passing on the retailer, for F6's lifecycle check: the fact whose unit's review comes due, and a page that changes
 # (a fact it holds, the page, and what in it changes); every unit citing that page goes stale with it, and every other
 # unit stays as it is.
@@ -1036,6 +1043,12 @@ def problems(world: World) -> list[str]:
     out += [f"captured channel {c}: not a Slack channel with a creator, a Teams channel with an owner, or a meeting with an organizer"
             for c in CAPTURED
             if c not in chats or not creator_of(world, chats[c])]
+    signs_in = {p.username: p for p in world.people if p.username}
+    out += [f"handover: {HANDOVER[k]} doesn't sign in" for k in ("person", "successor", "lead", "asker", "outsider") if HANDOVER[k] not in signs_in]
+    out += [f"handover: {HANDOVER[k]} isn't in {HANDOVER['team']}" for k in ("person", "asker")
+            if HANDOVER[k] in signs_in and signs_in[HANDOVER[k]].team != HANDOVER["team"]]
+    out += [f"handover: {HANDOVER['outsider']} is in {HANDOVER['team']}" for _ in [0]
+            if HANDOVER["outsider"] in signs_in and signs_in[HANDOVER["outsider"]].team == HANDOVER["team"]]
     out += [f"save {n}/{i}: not someone else's message in a captured channel" for n, i in SAVES
             if n not in names or world.doc(n).container not in CAPTURED or len(world.doc(n).messages) <= i
             or world.doc(n).messages[i][0] == world.doc(n).messages[0][0]]

@@ -455,5 +455,7 @@ def sync_directory(conn, connection: dict, client) -> dict:
             p["email"]: {"email": p["email"], "name": p["name"]}
             for p in people if p["active"] and is_valid(f"ext:{client.identities}.{p['email']}")})
     left = revoke_leavers(conn)
+    from .handover import forget_leavers  # C4a: a leaver's unshared handover drafts go with them
+    drafts = forget_leavers(conn)
     return {"container": "people", "files": 0, "people": len(people), "inactive": sum(not p["active"] for p in people),
-            "left": len(gone), "groups": len(groups), "too_big": too_big[:20], "revoked": left}
+            "left": len(gone), "groups": len(groups), "too_big": too_big[:20], "revoked": left, "handover_drafts": drafts}
