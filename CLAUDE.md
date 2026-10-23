@@ -2704,7 +2704,25 @@ transcripts, and C3b deletes nothing), and every person still sees exactly the p
 fresh-stack loop next is where this is confirmed or found. Not run: the browser tests (no web change), the full smoke
 suite, and the other sets (CI's run on the pull request, and the loop). Not built: a card updating in place after a
 press (each press is answered privately instead), a note with Not right (F5a's corrections take one in Aerugo), and the
-card for a meeting's later transcripts beyond the one per extraction pass.
+card for a meeting's later transcripts beyond the one per extraction pass. CI on pull request 86: unit 257 passed; smoke
+192 passed, 17 skipped, 0 failed; the golden set, the scenario, the retailer (31 proposals from 21 documents, Kai's card
+listing 1 of the stand-up's 1 waiting proposals), its pointer and live-only runs, the Atlas, and every team's set, with
+no leak and no regression.
+**The fresh-stack loop over C3a and C3b, 2026-10-23** (once after the two, at the top of the stack, c3b-meeting-review's
+312133c, with CI's settings): `make pins` passed; `make unit` 257 passed; `make smoke` 194 passed, 15 skipped, 0 failed
+(both meeting checks among them; the web servers recreated first); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no
+regression; `make eval-scenario` Recall@10 94%, MRR 0.81 over 43 counted cases, no leak, no regression; `make
+eval-company` the stand-up captured with both keys and the Teams bot posting only its notices, 31 proposals from 21
+documents (5 from captured threads), everyone opening exactly what the truth says, no leak, Recall@10 100%, MRR 0.83 over
+54 counted questions (`recall-poles` new, at #1), Ask right for 27 of 27, the right unit first for 15 of 26, Kai's review
+card listing 1 of the stand-up's 1 waiting proposals, 3 of 50 units stale and 1 gap as the truth says, no regression;
+`make atlas-eval` exact, no leak, no regression; `make eval-teams` no leak, every team at its baseline (product quality's
+question new); the retailer as pointers Recall@10 99%, MRR 0.83, and live only Recall@10 99%, MRR 0.62, each with no leak
+and no regression; no planted text in the services' logs; `make e2e` 43 passed; `make test-web` 7 passed; the lint at 0
+errors and 43 warnings. The fresh stack's 31 proposals settle C3b's long-lived-stack finding: the seven Stores proposals
+missing there were that stack's, not C3's. The changed baselines were recorded on that stack, in CI's order (the retailer,
+the team sets, pointers, live only), each gaining `recall-poles`: `company` MRR 0.8318 (#1), `company-pointer` 0.8324
+(#1), `company-live` 0.6162 (#4), and product quality's team set MRR 1.0 (#1); every other set's record unchanged.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2721,7 +2739,7 @@ fresh-stack loop over the three, and the Jira comment visibility fix with its li
 answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
 source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
 fresh-stack loop over the three, and C3a (Teams meeting transcripts, opted in by each organizer) and C3b (confirming a
-meeting's proposals in Teams), which complete C3; next, the fresh-stack loop over the two, then C4.
+meeting's proposals in Teams), which complete C3, with the fresh-stack loop over the two; next, C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
