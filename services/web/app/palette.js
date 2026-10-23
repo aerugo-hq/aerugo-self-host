@@ -36,6 +36,7 @@ function pages(me) {
     go("Search", "#/search", "Find a document by keyword or by meaning", "/"),
     go("Documents", "#/documents", "Browse everything you can open", "G D"),
     go("Proposals", "#/proposals", "Draft and review curated knowledge", "G P"),
+    go("Handovers", "#/handovers", "Hand over what you know, or review what was handed to you"),
     go("Developer", "#/developer", "The API, and connecting AI assistants", "G V"),
     ...(admin ? [
       go("Alerts", "#/alerts", "What needs attention now"),

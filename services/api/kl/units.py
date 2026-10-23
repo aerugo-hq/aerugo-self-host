@@ -534,14 +534,15 @@ def create_unit(ws: str, body: UnitIn, caller: Caller = Depends(authenticate)):
 @router.post("/units/{unit_id}/confirm")
 def confirm_unit(unit_id: str, caller: Caller = Depends(authenticate)):
     """The owner team's curator confirms a unit: trust confirmed, reviewed now. A unit from meetings alone (C3a) is
-    confirmed by anyone in them who reads it."""
+    confirmed by anyone in them who reads it, and one from a handover alone by its named successor or lead (C4a)."""
     return _set_status(unit_id, caller, "confirmed", "unit.confirm")
 
 
 @router.post("/units/{unit_id}/retire")
 def retire_unit(unit_id: str, caller: Caller = Depends(authenticate)):
     """The owner team's curator retires a unit: kept, with its history, but no longer in use. A unit from meetings alone
-    (C3a) is retired, or dismissed, by anyone in them who reads it."""
+    (C3a) is retired, or dismissed, by anyone in them who reads it, and one from a handover alone by its named successor or
+    lead (C4a)."""
     return _set_status(unit_id, caller, "retired", "unit.retire")
 
 

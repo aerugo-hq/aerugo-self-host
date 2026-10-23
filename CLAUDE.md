@@ -2802,6 +2802,48 @@ full smoke suite, and the other sets (CI's run on the pull request, and the fres
 screens (C4b); a handover's prompts from the Atlas (what someone's jobs and tables are, P8); telling the successor or lead
 outside the app; editing a shared answer in place (withdraw, change, share again); and a handover for someone who never
 signed in.
+CI on pull request 87: unit 262 passed; smoke 193 passed, 17 skipped, 0 failed; the golden set, the scenario (Recall@10
+94%, MRR 0.81), the retailer (Recall@10 100%, MRR 0.83; the handover opened by exactly Stores' 4 people, confirmed by Ben,
+answering Ana, unseen by Fay, and withdrawn), its pointer (MRR 0.83) and live-only (MRR 0.62) runs, the Atlas, and every
+team's set, with no leak and no regression.
+C4b, the handover screens (the plan approved 2026-10-23 with C4a: in the web app only). Handovers, an org page
+(`#/handovers`, `app/handovers-view.js`; in the sidebar's Assist group, the palette, and the breadcrumb): what's waiting
+for your review, shown only when something is (each proposal from a handover naming you as successor or lead, its text
+and its team, with Confirm and Not right, which asks first, settled through the units routes as you); your handovers
+(status, team, why, successor, lead, and how many answers are shared; Accept and Decline, which asks first, on one asked
+of you; Continue on an open one); and the ones naming you or asked by you, with your part and counts only, since drafts
+are their person's alone. "Start a handover", the page's one primary action, opens the form in place: whose (yours, or
+someone on your team by username), team, why, successor, and lead, each said plainly (who confirms; your manager, as the
+directory says, unless named; a request starts when they accept); yours opens the interview, and a request says who was
+asked. The interview (`#/handovers/<id>`, a reading page): the prompts numbered in their order, each question a size up,
+its draft (up to 4,000 characters), who reads it once shared (the team and the people named, by name, or everyone at
+acme), Save draft (only once something changed), and Share (saving first), waiting until the worker keeps it (a try every
+two seconds, up to a minute, "Still sharing" after that); a shared answer behind the accent's single-sided bar with its
+status and Withdraw (which asks first, then waits until it's a draft again); a refusal (an answer about someone's health,
+say) beside the prompt, in the API's words. Someone else opening the address is told only its person can read its
+drafts; a closed handover is read-only. Loading, empty, error, and success states throughout; tokens only (the
+stylesheet's handovers section, one new icon); `docs/design/screens.md` gains the page, its paths, and its markup. Found
+while building: the prompts came back in a random order (rows inserted in one transaction share `now()`, and the list
+sorted by a random id), so the interview mixed the open prompts among what someone owns; each prompt is now a
+microsecond after the one before (`handover.open_prompts`), and C4a's smoke check holds the order: red first against the
+running API (the kinds came back `['breaks', 'owned', 'in_flight', 'contact', 'where', 'routine', 'owned', 'owned']`),
+green after rebuilding it. Screenshots at 1440, 768, and 375 pixels, reviewed: they caught Accept and Decline stacking in
+a narrow cell, the start form's toggles stretching to its width, a shared answer's status said twice, and a team named by
+its slug in the review, each fixed. Browser tests: `test_someone_hands_over_what_they_know_and_their_successor_confirms_it`
+(alice starts her own handover naming carol; Save draft and Share stay disabled until she writes; the team and carol are
+the default audience; shared, carol's list shows alice's handover with her as successor and 1 of its answers shared, and
+her review lists it; she confirms it; opening alice's interview's address she's told only its person can read its drafts
+and sees none of it; alice withdraws, asked first, and it's a draft again with her words) and
+`test_a_handover_asked_of_someone_starts_only_when_they_accept` (alice asks carol twice; carol declines the first, asked
+first, and accepts the second, which opens her interview). Red first: three mutations built into the web app, each
+restored (`cmp`) and the app rebuilt: no Handovers page, as before C4b (both failed), anyone's interview opened as theirs
+(the first failed: carol wasn't told only alice can read it), and Save draft offered with nothing changed (the first
+failed: "expected to be disabled"); restored, both passed. Proof, against the running stack (not fresh): `make unit` 262
+passed; C4a's smoke check passed with the order fix; the two browser tests passed, with the palette's, sign-in's, and the
+content security policy's; `make test-web` 7 passed; the lint at 0 errors and 43 warnings. Not run: the full smoke suite,
+the evaluation sets, and the full browser suite (the fresh-stack loop over C4a and C4b, next). Not built: the list
+updating while it's open (a reload reads it again); editing a shared answer in place (withdraw, change, share again);
+and a handover offered in Teams or Slack (by decision, the web app only).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2819,7 +2861,8 @@ answers privately, as the asker), which completes C2, F6's evidence by its text,
 source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
 fresh-stack loop over the three, and C3a (Teams meeting transcripts, opted in by each organizer) and C3b (confirming a
 meeting's proposals in Teams), which complete C3, with the fresh-stack loop over the two, and C4a (handover
-interviews behind the API); next, C4b.
+interviews behind the API) and C4b (its screens), which complete C4; next, the fresh-stack loop over the two,
+then D0 (C5, announcement mailboxes, deferred until a pack needs it).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

@@ -678,3 +678,85 @@ def test_the_theme_follows_your_choice_and_stays(page):
     page.locator(".tb-account > summary").click()
     page.get_by_role("group", name="Theme").get_by_role("button", name="System").click()
     expect(page.locator("html")).not_to_have_attribute("data-theme", re.compile(".*"))  # the operating system decides
+
+
+def test_someone_hands_over_what_they_know_and_their_successor_confirms_it(page, browser):
+    """C4b: alice starts her own handover naming carol as successor; her drafts are hers alone; an answer she shares
+    reaches carol's review, where carol confirms it, while carol sees only counts of alice's handover and never its
+    drafts; alice withdraws it, and it's a draft again."""
+    tag = uuid.uuid4().hex[:8]
+    answer = f"Call the settlement desk ({tag}) before reversing a duplicated refund batch."
+    carol = browser.new_page()  # carol, the successor, in a browser of her own (signing in also makes her someone Aerugo knows)
+    sign_in(carol, "carol")
+    sign_in(page, "alice")
+    page.goto(f"{WEB}/#/handovers")
+    expect(page.get_by_role("heading", name="Handovers", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Start a handover").click()
+    form = page.get_by_role("form", name="Start a handover")
+    form.get_by_label(re.compile(r"^Team")).select_option("payments")
+    form.get_by_label(re.compile(r"^Successor")).fill("carol")
+    form.get_by_role("button", name="Start my handover").click()
+    expect(page).to_have_url(re.compile(r"#/handovers/[0-9a-f-]{36}$"), timeout=30_000)
+    expect(page.get_by_role("heading", name="Your handover")).to_be_visible()
+    expect(page.get_by_text("Only you can read your drafts.")).to_be_visible()
+    interview = page.url
+    prompt = page.locator("li.handover-prompt").filter(has_text="Who should your successor call, and for what?")
+    save, share = prompt.get_by_role("button", name="Save draft"), prompt.get_by_role("button", name="Share", exact=True)
+    expect(save).to_be_disabled()  # nothing written yet
+    expect(share).to_be_disabled()
+    prompt.get_by_label("Who should your successor call, and for what?").fill(answer)
+    expect(save).to_be_enabled()
+    expect(prompt.get_by_role("group", name="Share with").get_by_role("button", name=re.compile(r"carol$"))).to_have_attribute("aria-pressed", "true")
+    share.click()
+    expect(prompt.get_by_text(re.compile(r"^Shared with .*carol")).first).to_be_visible(timeout=60_000)
+    expect(prompt.get_by_role("button", name="Withdraw")).to_be_visible()
+
+    carol.goto(f"{WEB}/#/handovers")
+    naming = panel(carol, "Naming you, or asked by you").get_by_role("row").filter(has_text="alice").first
+    expect(naming).to_contain_text("Successor", timeout=30_000)
+    expect(naming).to_contain_text(re.compile(r"1 of \d+"))
+    review = panel(carol, "Waiting for your review")
+    item = review.get_by_role("listitem").filter(has_text=tag)
+    expect(item).to_have_count(1, timeout=30_000)
+    item.get_by_role("button", name="Confirm").click()
+    expect(carol.get_by_role("status").filter(has_text=re.compile(r"^Confirmed"))).to_be_visible(timeout=30_000)
+    carol.goto(interview)
+    expect(carol.get_by_text("Only the person a handover belongs to can read its drafts.")).to_be_visible(timeout=30_000)
+    expect(carol.get_by_text(tag)).to_have_count(0)
+    carol.close()
+
+    prompt.get_by_role("button", name="Withdraw").click()
+    page.get_by_role("alertdialog").get_by_role("button", name="Withdraw").click()
+    expect(prompt.get_by_text("Withdrawn. It's a draft again.")).to_be_visible(timeout=60_000)
+    expect(prompt.get_by_label("Who should your successor call, and for what?")).to_have_value(answer)
+
+
+def test_a_handover_asked_of_someone_starts_only_when_they_accept(page, browser):
+    """C4b: alice, Payments' admin, asks carol for a handover; it waits for carol, who declines one and accepts the next,
+    which opens her interview."""
+    carol = browser.new_page()
+    sign_in(carol, "carol")
+    sign_in(page, "alice")
+    for _ in range(2):
+        page.goto(f"{WEB}/#/handovers")
+        page.get_by_role("button", name="Start a handover").click()
+        form = page.get_by_role("form", name="Start a handover")
+        form.get_by_role("group", name="Whose handover").get_by_role("button", name="Someone on my team").click()
+        form.get_by_label(re.compile(r"^Person")).fill("carol")
+        form.get_by_label(re.compile(r"^Team")).select_option("payments")
+        form.get_by_role("button", name="Ask for a handover").click()
+        expect(page.get_by_text("Asked carol for a handover. It starts when they accept.")).to_be_visible(timeout=30_000)
+        carol.goto(f"{WEB}/#/handovers")
+        carol.reload()  # the same address again is no navigation at all, so the list is read again
+        waiting = panel(carol, "Your handovers").get_by_role("row").filter(has_text="Waiting for you").first
+        expect(waiting).to_contain_text("asked by alice", timeout=30_000)
+        if _ == 0:
+            waiting.get_by_role("button", name="Decline").click()
+            carol.get_by_role("alertdialog").get_by_role("button", name="Decline").click()
+            expect(carol.get_by_text("Declined alice's request.")).to_be_visible(timeout=30_000)
+        else:
+            waiting.get_by_role("button", name="Accept").click()
+            expect(carol).to_have_url(re.compile(r"#/handovers/[0-9a-f-]{36}$"), timeout=30_000)
+            expect(carol.get_by_role("heading", name="Your handover")).to_be_visible()
+            expect(carol.get_by_text("What breaks, and how do you fix it?")).to_be_visible()
+    carol.close()
