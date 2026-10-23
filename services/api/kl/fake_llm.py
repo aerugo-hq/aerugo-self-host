@@ -293,9 +293,12 @@ def bot_app(auth: str) -> str | None:
 
 
 def in_conversation(conversation: str, person: dict) -> bool:
-    """Whether someone is in a bot conversation: their own 1:1 chat with the bot, or a channel whose team they're in."""
+    """Whether someone is in a bot conversation: their own 1:1 chat with the bot, a meeting's chat they're in (C3b), or a
+    channel whose team they're in."""
     if conversation.startswith("a:"):
         return conversation == "a:" + person["id"][3:]
+    if conversation.startswith("19:meeting_"):
+        return any(m.get("userId") == person.get("aadObjectId") for m in GRAPH["chats"].get(conversation, {}).get("members", []))
     channel = conversation.split(";")[0]
     return any(channel in t["channels"] and any(m.get("userId") == person.get("aadObjectId") for m in t.get("members", []))
                for t in GRAPH["teams"].values())
@@ -1322,7 +1325,8 @@ class Handler(BaseHTTPRequestHandler):
             if not app or person is None:
                 return self._json(404 if app else 401, {"error": {"code": "ConversationNotFound"}})
             TEAMS_BOT["posted"].append({"chat": chat, "user": person["id"], "text": body.get("text", ""), "private": True,
-                                        "format": body.get("textFormat"), "app": app})
+                                        "format": body.get("textFormat"), "app": app,
+                                        **({"card": body["attachments"][0]["content"]} if body.get("attachments") else {})})  # C3b
             return self._json(201, {"id": str(len(TEAMS_BOT["posted"]))})
         if path == "/teams-bot/v3/conversations":  # the bot starts a post in a channel (C1a's notice), or a 1:1 chat (C1b)
             app = bot_app(self.headers.get("Authorization") or "")

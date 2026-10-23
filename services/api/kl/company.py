@@ -1191,10 +1191,10 @@ def teams_tenant(world: World, app: str = TEAMS_APP) -> dict:
     return {"teams": teams}
 
 
-def meeting_chats(world: World, app: str = TEAMS_APP) -> dict:
+def meeting_chats(world: World, app: str = TEAMS_APP, review: str | None = None) -> dict:
     """Meetings' chats (C3a), as Graph lists them: each meeting's, the company's app added to it, organized by its team's
-    lead, its members exactly the meeting's readers, the organizer's "capture on" message, and a transcript a day, each a
-    WebVTT whose lines are what was said, each by its speaker."""
+    lead, its members exactly the meeting's readers, the organizer's "capture on" message (and, given its id, their
+    "review", C3b), and a transcript a day, each a WebVTT whose lines are what was said, each by its speaker."""
     chats: dict = {}
     for c in (c for c in world.containers if c.source == "meeting"):
         organizer = creator_of(world, c)
@@ -1211,10 +1211,10 @@ def meeting_chats(world: World, app: str = TEAMS_APP) -> dict:
                        "meeting": "MSo" + hashlib.sha256(c.id.encode()).hexdigest()[:24],
                        "join": f"https://teams.microsoft.com/l/meetup-join/{hashlib.sha256(c.id.encode()).hexdigest()[:16]}",
                        "members": members, "transcripts": transcripts,
-                       "messages": [{"id": capture_message(c.id), "messageType": "message",
-                                     "from": {"user": {"id": organizer.entra, "displayName": organizer.name}},
-                                     "body": {"contentType": "html", "content": '<at id="0">Aerugo</at> capture on'},
-                                     "mentions": [{"id": 0, "mentioned": {"application": {"id": app}}}]}]}
+                       "messages": [{"id": mid, "messageType": "message", "from": {"user": {"id": organizer.entra, "displayName": organizer.name}},
+                                     "body": {"contentType": "html", "content": f'<at id="0">Aerugo</at> {said}'},
+                                     "mentions": [{"id": 0, "mentioned": {"application": {"id": app}}}]}
+                                    for mid, said in ((capture_message(c.id), "capture on"), (review, "review")) if mid]}
     return {"chats": chats}
 
 

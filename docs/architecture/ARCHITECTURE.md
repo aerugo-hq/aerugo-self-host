@@ -189,6 +189,14 @@ owner team's curators, confirm or retire them (migration 0072 lets the API do it
 chat writing "@Aerugo don't capture", or the admin turning Meetings off, removes the meeting's transcripts and every unit
 citing them, confirmed or not; the bot posts only the on and off notices in the meeting's chat.
 
+Confirming in Teams (C3b): when extraction proposes from a meeting's transcript, its organizer (their Teams id kept at
+capture, read back from the Bot Connector) gets one review card, privately, in their 1:1 chat with the bot; anyone in the
+meeting who writes "@Aerugo review" gets the same. The card is built in the answers lane (`kl.meeting_review`) as its
+person: read back from the Bot Connector, resolved through `kl.chat_ask.caller_as` (the path every bot's asks use), and
+shown only the meeting's proposals they read in full (`kl.units.meeting_proposals`). Confirm and Not right arrive as
+signed deliveries whose button data names the unit; the presser is read back in their own 1:1 chat, and the unit is
+settled as them (`kl.units.settle_from_meeting`), only if it came from meetings alone.
+
 ## 7. The engineering and data pack
 
 Sources: GitHub (repos, Terraform, conventions), the EDW (metadata, query logs), Control-M (jobs, order, scripts),

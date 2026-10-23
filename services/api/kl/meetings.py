@@ -13,7 +13,10 @@ Consent (decided 2026-10-22):
   - anyone in the meeting's chat can write "@Aerugo don't capture" (or "capture off"): capture ends for the meeting (a
     series shares one chat) and every transcript kept from it, and everything proposed from them, confirmed or not, is
     removed. Teams keeps its own transcript;
-  - a meeting whose chat holds a guest or someone from another tenant is never captured, nor kept while one is there.
+  - a meeting whose chat holds a guest or someone from another tenant is never captured, nor kept while one is there;
+  - (C3b) its organizer gets one private review card when what it proposed is ready, and anyone in it who writes
+    "@Aerugo review" gets the same, each built as them in the answers lane (kl.meeting_review). The organizer's Teams id
+    is kept for it, read back from the Bot Connector when they turn capture on.
 
 A transcript's readers are the chat's members as Graph lists them now, which is who Teams shows the transcript to
 (invariant 12), each `ext:microsoft.<email>`; a line the sensitive gate flags (C2a) is left out of every section.
@@ -53,8 +56,8 @@ SAY = {  # what the person who wrote the command is told, privately, in their 1:
     "outsiders": "This meeting's chat has a guest or someone from another organization, so Aerugo doesn't capture it.",
     "no meeting": "Aerugo couldn't find this chat's meeting in Teams.",
     "not a meeting": "Aerugo reads only meeting chats it's added to, never other group chats.",
-    "help": "In a meeting's chat, the organizer can write \"@Aerugo capture on\", and anyone can write \"@Aerugo don't "
-            "capture\". To ask a question, write to me in our 1:1 chat.",
+    "help": "In a meeting's chat, the organizer can write \"@Aerugo capture on\", and anyone can write \"@Aerugo review\" "
+            "or \"@Aerugo don't capture\". To ask a question, write to me in our 1:1 chat.",
 }
 VOICE = re.compile(r"^<v(?:\.[^\s>]*)?\s+([^>]{1,120})>(.*)$")
 
@@ -68,14 +71,16 @@ FORGET_SQL = (f"DELETE FROM unit_perspectives WHERE evidence && ARRAY({TRANSCRIP
 
 
 def intent(text: str) -> str | None:
-    """What a mention asks of the bot, from its text as Graph holds it (its mention of the app taken out): on, off, or
-    None for anything else."""
+    """What a mention asks of the bot, from its text as Graph holds it (its mention of the app taken out): on, off,
+    review, or None for anything else."""
     said = re.sub(r"[^a-z' ]+", " ", text.lower().replace("’", "'"))
     said = " ".join(said.split())
     if said in ("capture on", "capture this meeting"):
         return "on"
     if said in ("capture off", "don't capture", "dont capture", "do not capture"):
         return "off"
+    if said == "review":  # C3b: the proposals waiting for this person, privately
+        return "review"
     return None
 
 
@@ -240,6 +245,11 @@ def command(conn, job) -> dict:
     if wanted == "off":
         removed = remove(conn, c, chat)
         return tell("off" if removed is not None else "not captured", **(removed or {}))
+    if wanted == "review":  # built as them, in the answers lane, which tells them if there's nothing (C3b)
+        with conn.transaction():
+            conn.execute("INSERT INTO jobs (org_id, kind, payload, max_attempts) VALUES (%s, 'meetings.review', %s, 1)",
+                         (c["org_id"], Jsonb({"connection_id": str(c["id"]), "chat": chat, "user": user, "user_id": user_id, "via": "asked"})))
+        return {"queued": "review"}
     if wanted != "on":
         return tell("help")
     info = held.get("onlineMeetingInfo") or {}
@@ -254,6 +264,12 @@ def command(conn, job) -> dict:
     if not teams.MEETING_PART.fullmatch(meeting):
         return tell("no meeting")
     subject = (str(held.get("topic") or "").strip() or "Meeting")[:300]
+    try:  # where the organizer's review card goes (C3b), as Teams says; without it they can still ask for one
+        found = teams_bot.bot_for(c).member(chat, user_id)
+    except httpx.HTTPError as e:
+        log.warning("the organizer's Teams id couldn't be read back (%s)", type(e).__name__)
+        found = {}
+    reach = user_id if str(found.get("aadObjectId") or "").lower() == organizer else None
     with conn.transaction():
         was = conn.execute(CONTAINER_SQL, (c["id"], chat)).fetchone()
         if was and was["capture"] == "on":
@@ -262,11 +278,12 @@ def command(conn, job) -> dict:
             already = False
             conn.execute(
                 """INSERT INTO connection_containers (connection_id, org_id, external_id, container_kind, visibility, default_ref,
-                                                      selected, display_name, capture, capture_changed_at)
-                   VALUES (%s, %s, %s, 'meeting', 'private', %s, true, %s, 'on', now())
+                                                      selected, display_name, capture, capture_changed_at, organizer_ref)
+                   VALUES (%s, %s, %s, 'meeting', 'private', %s, true, %s, 'on', now(), %s)
                    ON CONFLICT (connection_id, external_id) DO UPDATE SET capture = 'on', capture_changed_at = now(),
-                     default_ref = EXCLUDED.default_ref, display_name = EXCLUDED.display_name, selected = true""",
-                (c["id"], c["org_id"], chat, f"{organizer}/{meeting}", subject))
+                     default_ref = EXCLUDED.default_ref, display_name = EXCLUDED.display_name, selected = true,
+                     organizer_ref = EXCLUDED.organizer_ref""",
+                (c["id"], c["org_id"], chat, f"{organizer}/{meeting}", subject, reach))
             conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'meetings.notice', %s)",
                          (c["org_id"], Jsonb({"connection_id": str(c["id"]), "chat": chat, "state": "on"})))
             conn.execute("INSERT INTO jobs (org_id, kind, payload) VALUES (%s, 'connection.sync', %s)",

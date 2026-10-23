@@ -12,7 +12,8 @@ Only the owner team's curators (and admins) write: they create units citing only
 documented), confirm, retire, and supersede them with a new version on the same topic, add perspectives, and resolve
 conflicts; a curator of either side may open one. F2's extraction writes as the worker; F3 merges; F4 answers from them.
 A unit whose evidence is meeting transcripts alone (C3a) is readable only by the people in those meetings, so they, not
-the owner team's curators, confirm or retire it: anyone who reads it in full (`GET /v1/meetings/review` lists theirs).
+the owner team's curators, confirm or retire it: anyone who reads it in full (`GET /v1/meetings/review` lists theirs, and
+C3b's review card in Teams, built as them, settles them).
 """
 from __future__ import annotations
 
@@ -284,22 +285,47 @@ MEETINGS_REVIEW_SQL = f"""
 SELECT {UNIT_COLUMNS} FROM knowledge_units u JOIN workspaces w ON w.id = u.owner_team
 WHERE u.status = 'proposed' AND cardinality(u.evidence) > 0
   AND NOT EXISTS (SELECT 1 FROM unnest(u.evidence) e WHERE NOT EXISTS (
-        SELECT 1 FROM documents d WHERE d.id = e AND d.source_kind = 'meeting'))
+        SELECT 1 FROM documents d WHERE d.id = e AND d.source_kind = 'meeting'
+          AND (%(chat)s::text IS NULL OR (d.connection_id = %(connection)s::uuid AND d.container_ref = %(chat)s))))
 ORDER BY u.created_at DESC, u.id LIMIT %(limit)s
 """
 
 
-@router.get("/meetings/review")
-def meetings_review(limit: int = Query(50, ge=1, le=LIMIT), caller: Caller = Depends(authenticate)):
-    """What the caller's meetings proposed and no one has confirmed or dismissed yet (C3a): units from meetings alone that
-    they read in full, which is to say meetings they were in, each with the transcript it came from."""
+def meeting_proposals(caller: Caller, connection: str | None = None, chat: str | None = None, limit: int = LIMIT) -> list[dict]:
+    """What the caller's meetings (or one meeting: its connection and chat) proposed and no one has confirmed or dismissed
+    yet: units from meetings alone that they read in full, which is to say meetings they were in, newest first, each
+    with its text and the transcript it came from."""
     org_id = resolve_org_id(config.ORG_SLUG)
     with scoped(org_id, caller.principals) as conn:
-        rows = conn.execute(MEETINGS_REVIEW_SQL, {"limit": limit}).fetchall()
+        rows = conn.execute(MEETINGS_REVIEW_SQL, {"limit": limit, "connection": connection, "chat": chat}).fetchall()
         docs = readable(conn, caller, [d for r in rows for d in r["evidence"]])
         mine = [r for r in rows if shown(r["evidence"], set(docs)) and from_meetings(r, docs)]
-        audit(conn, org_id, caller.username, "meetings.review", [], {"shown": len(mine)})
-    return {"units": [{**_summary(r), "evidence": _evidence(r, docs)} for r in mine]}
+        audit(conn, org_id, caller.username, "meetings.review", [], {"shown": len(mine), "meeting": chat})
+    return [{**_summary(r), "text": r["body"], "evidence": _evidence(r, docs)} for r in mine]
+
+
+def settle_from_meeting(caller: Caller, unit_id: str, verb: str) -> tuple[str, str]:
+    """A press on a meeting's review card (C3b), settled as the caller: confirm, or dismiss (retire), a proposal from
+    meetings alone that they read in full. Returns what became of it (confirmed, dismissed, already, or not yours) and
+    its title, only when they may read it."""
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        row, docs = _visible_unit(conn, caller, _unit_id(unit_id))
+    if not row or not from_meetings(row, docs):
+        return "not yours", ""
+    if row["status"] != "proposed":
+        return "already", row["title"]
+    if verb == "confirm":
+        _set_status(row["id"], caller, "confirmed", "unit.confirm")
+        return "confirmed", row["title"]
+    _set_status(row["id"], caller, "retired", "unit.retire")
+    return "dismissed", row["title"]
+
+
+@router.get("/meetings/review")
+def meetings_review(limit: int = Query(50, ge=1, le=LIMIT), caller: Caller = Depends(authenticate)):
+    """What the caller's meetings proposed and no one has confirmed or dismissed yet (C3a)."""
+    return {"units": meeting_proposals(caller, limit=limit)}
 
 
 @router.get("/units")

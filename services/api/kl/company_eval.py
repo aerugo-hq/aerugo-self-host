@@ -138,8 +138,21 @@ def serve(world: company.World) -> dict:
         raise SystemExit("the fake Graph didn't take the company's Teams")
     if httpx.post(f"{FAKE_MICROSOFT}/chats", json=company.meeting_chats(world), timeout=30).status_code != 200:
         raise SystemExit("the fake Graph didn't take the company's meetings")
+    if httpx.post(f"{TEAMS_BOT}/setup", json={"people": teams_people(world)}, timeout=30).status_code != 200:  # who the Bot Connector knows (C1b)
+        raise SystemExit("the fake Bot Connector didn't take the company's people")
     return {"directory": httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT}, timeout=30).json(),
             "teams": httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": company.TENANT, "client_id": company.TEAMS_APP}, timeout=30).json()}
+
+
+def teams_id(person: company.Person) -> str:
+    """Someone's id in the company's Teams bot's conversations."""
+    return "29:rt" + hashlib.sha256(person.email.encode()).hexdigest()[:16]
+
+
+def teams_people(world: company.World) -> dict:
+    """Everyone who signs in, as the Bot Connector reads them back (C1b, C3b)."""
+    return {teams_id(p): {"id": teams_id(p), "aadObjectId": p.entra, "email": p.email, "userPrincipalName": p.email, "name": p.name,
+                          "tenantId": company.TENANT, "userRole": "user"} for p in world.people if p.username}
 
 
 def plan(world: company.World, storage: str = "index") -> list[tuple[str, str, dict]]:
@@ -713,16 +726,13 @@ def teams_ask_check(world: company.World, out) -> tuple[list[str], list[str]]:
         raise SystemExit(f"{path}: Teams answers couldn't be set up")
     with psycopg.connect(OWNER_DB) as conn:
         cid = conn.execute("SELECT id FROM kl.connections WHERE name = %s", (f"retail-teams-{me.team}",)).fetchone()[0]
-    teams_id = "29:rt" + hashlib.sha256(me.email.encode()).hexdigest()[:16]
-    person = {"id": teams_id, "aadObjectId": me.entra, "email": me.email, "userPrincipalName": me.email, "name": me.name,
-              "tenantId": company.TENANT, "userRole": "user"}
-    httpx.post(f"{TEAMS_BOT}/setup", json={"people": {teams_id: person}}, timeout=10).raise_for_status()
+    me_id = teams_id(me)
     token = httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": company.TEAMS_APP, "serviceurl": TEAMS_BOT + "/"}, timeout=10).json()["token"]
-    replies = lambda: [x["text"] for x in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json() if x.get("private") and x.get("user") == teams_id]
+    replies = lambda: [x["text"] for x in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json() if x.get("private") and x.get("user") == me_id]
     before = len(replies())
     r = httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", headers={"Authorization": f"Bearer {token}"}, timeout=15, json={
         "type": "message", "id": f"retail-{secrets.token_hex(4)}", "text": q.text, "serviceUrl": TEAMS_BOT + "/",
-        "from": {"id": teams_id, "aadObjectId": me.entra}, "conversation": {"id": "a:" + teams_id[3:], "conversationType": "personal"},
+        "from": {"id": me_id, "aadObjectId": me.entra}, "conversation": {"id": "a:" + me_id[3:], "conversationType": "personal"},
         "channelData": {"tenant": {"id": company.TENANT}}})
     if r.status_code != 200:
         raise SystemExit(f"the Teams ask was refused: {r.status_code}")
@@ -759,11 +769,10 @@ def meeting_capture_on(world: company.World, c: company.Container) -> None:
         if kept():
             return
         organizer = company.creator_of(world, c)
-        teams_id = "29:rt" + hashlib.sha256(organizer.email.encode()).hexdigest()[:16]
         token = httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": company.TEAMS_APP, "serviceurl": TEAMS_BOT + "/"}, timeout=10).json()["token"]
         r = httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", headers={"Authorization": f"Bearer {token}"}, timeout=15, json={
             "type": "message", "id": company.capture_message(c.id), "text": "Aerugo capture on", "serviceUrl": TEAMS_BOT + "/",
-            "from": {"id": teams_id, "aadObjectId": organizer.entra}, "conversation": {"id": c.id, "conversationType": "groupChat"},
+            "from": {"id": teams_id(organizer), "aadObjectId": organizer.entra}, "conversation": {"id": c.id, "conversationType": "groupChat"},
             "channelData": {"tenant": {"id": company.TENANT}}, "entities": [{"type": "mention", "mentioned": {"id": f"28:{company.TEAMS_APP}"}}]})
         if r.status_code != 200:
             raise SystemExit(f"the organizer's capture on for {c.id} was refused: {r.status_code}")
@@ -773,6 +782,43 @@ def meeting_capture_on(world: company.World, c: company.Container) -> None:
             time.sleep(3)
         if not kept():
             raise SystemExit(f"the meeting {c.id} was never kept, though its organizer turned capture on")
+
+
+def meeting_review_check(world: company.World, out) -> tuple[list[str], list[str]]:
+    """C3b on the retailer: each meeting's organizer writes "@Aerugo review" in its chat, as Teams sends it, and gets a
+    review card privately, in their 1:1 chat with the bot, listing exactly what the meeting proposed that's still waiting,
+    nothing from anywhere else. Returns (leaks, missing)."""
+    leaks, missing = [], []
+    for c in (c for c in world.containers if c.source == "meeting"):
+        organizer, review = company.creator_of(world, c), str(1780000000000 + secrets.randbelow(10 ** 9))
+        httpx.post(f"{FAKE_MICROSOFT}/chats", json=company.meeting_chats(world, review=review), timeout=30).raise_for_status()
+        with psycopg.connect(OWNER_DB) as conn:
+            cid = conn.execute("SELECT id FROM kl.connections WHERE name = %s", (f"retail-teams-{c.team}",)).fetchone()[0]
+            waiting = {r[0] for r in conn.execute(
+                "SELECT u.id::text FROM kl.knowledge_units u JOIN kl.documents d ON d.id = ANY(u.evidence) "
+                "WHERE d.connection_id = %s AND d.container_ref = %s AND u.status = 'proposed'", (cid, c.id)).fetchall()}
+        cards = lambda: [x["card"] for x in httpx.get(f"{TEAMS_BOT}/posted", timeout=10).json()
+                         if x.get("private") and x.get("user") == teams_id(organizer) and x.get("card")]
+        before = len(cards())
+        token = httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": company.TEAMS_APP, "serviceurl": TEAMS_BOT + "/"}, timeout=10).json()["token"]
+        r = httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", headers={"Authorization": f"Bearer {token}"}, timeout=15, json={
+            "type": "message", "id": review, "text": "Aerugo review", "serviceUrl": TEAMS_BOT + "/",
+            "from": {"id": teams_id(organizer), "aadObjectId": organizer.entra}, "conversation": {"id": c.id, "conversationType": "groupChat"},
+            "channelData": {"tenant": {"id": company.TENANT}}, "entities": [{"type": "mention", "mentioned": {"id": f"28:{company.TEAMS_APP}"}}]})
+        if r.status_code != 200:
+            raise SystemExit(f"the organizer's review for {c.id} was refused: {r.status_code}")
+        deadline = time.monotonic() + 180
+        while len(cards()) == before and time.monotonic() < deadline:
+            time.sleep(2)
+        if len(cards()) == before:
+            missing.append(f"{organizer.username} wrote review in {c.id} and got no card")
+            continue
+        listed = {a["data"]["unit"] for b in cards()[-1]["body"] if b["type"] == "ActionSet" for a in b["actions"]}
+        leaks += [f"{organizer.username}'s review card for {c.id} listed {u}, not one of its meeting's waiting proposals" for u in sorted(listed - waiting)]
+        missing += [f"{organizer.username}'s review card for {c.id} left out {u}" for u in sorted(waiting - listed)]
+        print(f"\nMeeting review (C3b): {organizer.username} wrote review in {c.name}'s chat and got a card privately listing "
+              f"{len(listed)} of its {len(waiting)} waiting proposals", file=out)
+    return leaks, missing
 
 
 def teams_capture_on(c: company.Container, team_name: str) -> list[str]:
@@ -991,7 +1037,9 @@ def main(argv: list[str]) -> int:
     if not pointer:  # C2d: a Slack ask, answered as its asker
         ask_leaks, ask_missing = slack_ask_check(world, out)
         teams_leaks, teams_missing = teams_ask_check(world, out)  # C1b
-        retrieval_leaks, missing = retrieval_leaks + ask_leaks + teams_leaks, missing + ask_missing + teams_missing
+        review_leaks, review_missing = meeting_review_check(world, out)  # C3b
+        retrieval_leaks = retrieval_leaks + ask_leaks + teams_leaks + review_leaks
+        missing = missing + ask_missing + teams_missing + review_missing
     life_leaks, life_missing = lifecycle_check(world, ids, out)  # after Ask's: a stale unit ranks differently
     gap_leaks, gap_missing = gaps_check(world, out)
     leaks, missing = leaks + life_leaks + gap_leaks, missing + life_missing + gap_missing

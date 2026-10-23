@@ -39,8 +39,9 @@ log = logging.getLogger("kl.teams")
 CHANNEL = re.compile(r"^19:[A-Za-z0-9_-]{1,100}@thread\.(tacv2|skype)$")
 MESSAGE = re.compile(r"^[0-9]{10,20}$")
 USER_ID = re.compile(r"^29:[A-Za-z0-9_-]{1,400}$")  # a person's id in Teams' bot conversations (C1b)
-# A bot conversation: a 1:1 chat with the bot, or a channel's (with its post)
-CONVERSATION = re.compile(r"^(a:[A-Za-z0-9_-]{1,400}|19:[A-Za-z0-9_-]{1,100}@thread\.(tacv2|skype)(;messageid=[0-9]{10,20})?)$")
+# A bot conversation: a 1:1 chat with the bot, a channel's (with its post), or a meeting's chat (C3b)
+CONVERSATION = re.compile(r"^(a:[A-Za-z0-9_-]{1,400}|19:[A-Za-z0-9_-]{1,100}@thread\.(tacv2|skype)(;messageid=[0-9]{10,20})?"
+                          r"|19:meeting_[A-Za-z0-9_-]{1,200}@thread\.v2)$")
 HISTORY_DAYS = 365
 MEETING_CHAT = re.compile(r"^19:meeting_[A-Za-z0-9_-]{1,200}@thread\.v2$")  # a scheduled meeting's chat (C3a)
 MEETING_PART = re.compile(r"^[A-Za-z0-9+/=_-]{1,400}$")  # Graph's ids for an online meeting and its transcripts

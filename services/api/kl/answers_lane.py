@@ -14,10 +14,11 @@ import time
 import psycopg
 from psycopg.rows import dict_row
 
-from . import chat_ask, config, shutdown, slack_ask, teams_ask, telemetry, worker
+from . import chat_ask, config, meeting_review, shutdown, slack_ask, teams_ask, telemetry, worker
 
 POLL_SECONDS = float(os.environ.get("KL_ANSWERS_POLL_SECONDS", "1"))
-HANDLERS = {"slack.ask": slack_ask.ask, "teams.ask": teams_ask.ask}
+HANDLERS = {"slack.ask": slack_ask.ask, "teams.ask": teams_ask.ask,
+            "meetings.review": meeting_review.review, "meetings.settle": meeting_review.settle}  # C3b
 assert set(HANDLERS) == set(worker.LANE_KINDS)
 
 log = logging.getLogger("kl.answers_lane")

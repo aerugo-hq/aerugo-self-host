@@ -186,6 +186,21 @@ def meeting_request(activity: dict, tenant: str, app: str) -> dict | None:
     return {"chat": chat, "message": message, "user": user, "user_id": user_id}
 
 
+def review_request(activity: dict, tenant: str) -> dict | None:
+    """A press of Confirm or Not right on a meeting's review card (C3b), or None: Teams sends the button's data as the
+    message's value, in the person's own 1:1 chat with the bot. Only the unit's id, the verb, and who pressed it are
+    taken; the job reads back from the Bot Connector who's in that chat, and settles the unit only as them."""
+    value, data, conversation, who = (_part(activity, k) for k in ("value", "channelData", "conversation", "from"))
+    unit, verb, chat = str(value.get("unit") or ""), str(value.get("verb") or ""), str(conversation.get("id") or "")
+    user, user_id = str(who.get("aadObjectId") or "").lower(), str(who.get("id") or "")
+    if activity.get("type") != "message" or value.get("aerugo") != "review" or verb not in ("confirm", "dismiss") \
+            or not GUID.fullmatch(unit) or conversation.get("conversationType") != "personal" or not chat.startswith("a:") \
+            or not teams.CONVERSATION.fullmatch(chat) or str(_part(data, "tenant").get("id") or "").lower() != tenant.lower() \
+            or not GUID.fullmatch(user) or not teams.USER_ID.fullmatch(user_id):
+        return None
+    return {"unit": unit.lower(), "verb": verb, "conversation": chat, "user": user, "user_id": user_id}
+
+
 class BotConnector(GraphClient):
     """The Bot Connector, as the app (its token from Entra, for Bot Framework): posts capture's notice in a channel."""
     scope = BOT_SCOPE
@@ -211,9 +226,8 @@ class BotConnector(GraphClient):
                 return {}
             raise
 
-    def whisper(self, user_id: str, text: str) -> None:
-        """A private reply, in the person's own 1:1 chat with the bot, opened by their id (C1b: their answer, or what
-        became of their save). Plain text, so nothing in it becomes a link with a hidden address, or a mention."""
+    def _one_to_one(self, user_id: str) -> str:
+        """The person's own 1:1 chat with the bot, opened by their id."""
         if not teams.USER_ID.fullmatch(user_id):
             raise ValueError("unexpected person")
         chat = str(self._call("POST", f"{self.base}/v3/conversations", None, body={
@@ -221,8 +235,18 @@ class BotConnector(GraphClient):
             "channelData": {"tenant": {"id": self.tenant}}}).get("id") or "")
         if not teams.CONVERSATION.fullmatch(chat) or not chat.startswith("a:"):
             raise ValueError("Teams opened no 1:1 chat")
-        self._call("POST", f"{self.base}/v3/conversations/{quote(chat, safe='')}/activities", None,
+        return chat
+
+    def whisper(self, user_id: str, text: str) -> None:
+        """A private reply, in the person's own 1:1 chat with the bot (C1b: their answer, or what became of their save).
+        Plain text, so nothing in it becomes a link with a hidden address, or a mention."""
+        self._call("POST", f"{self.base}/v3/conversations/{quote(self._one_to_one(user_id), safe='')}/activities", None,
                    body={"type": "message", "text": text, "textFormat": "plain"})
+
+    def card(self, user_id: str, card: dict) -> None:
+        """A meeting's review card (C3b), privately, in the person's own 1:1 chat with the bot."""
+        self._call("POST", f"{self.base}/v3/conversations/{quote(self._one_to_one(user_id), safe='')}/activities", None,
+                   body={"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": card}]})
 
     def say(self, chat: str, text: str) -> None:
         """A message in a meeting's chat (C3a): only capture's notice, ever. Plain text."""

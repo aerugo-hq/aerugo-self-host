@@ -245,6 +245,11 @@
         "found": 1,
         "of": 1
       },
+      "recall-poles": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
       "recall-regulator": {
         "first": 1,
         "found": 1,
@@ -357,7 +362,7 @@
       }
     },
     "k": 10,
-    "mrr": 0.8286,
+    "mrr": 0.8318,
     "recall": 1.0,
     "scenario": "company",
     "units": {
@@ -575,6 +580,11 @@
         "found": 1,
         "of": 1
       },
+      "recall-poles": {
+        "first": 4,
+        "found": 1,
+        "of": 1
+      },
       "recall-regulator": {
         "first": 3,
         "found": 1,
@@ -687,8 +697,8 @@
       }
     },
     "k": 10,
-    "mrr": 0.6231,
-    "recall": 0.9906,
+    "mrr": 0.6162,
+    "recall": 0.9907,
     "scenario": "company",
     "units": {
       "allocation-fewer-units": false,
@@ -905,6 +915,11 @@
         "found": 1,
         "of": 1
       },
+      "recall-poles": {
+        "first": 1,
+        "found": 1,
+        "of": 1
+      },
       "recall-regulator": {
         "first": 1,
         "found": 1,
@@ -1017,8 +1032,8 @@
       }
     },
     "k": 10,
-    "mrr": 0.8292,
-    "recall": 0.9906,
+    "mrr": 0.8324,
+    "recall": 0.9907,
     "scenario": "company",
     "units": {
       "allocation-fewer-units": false,
@@ -1534,6 +1549,11 @@
     "product-quality": {
       "cases": {
         "recall-lesson": {
+          "first": 1,
+          "found": 1,
+          "of": 1
+        },
+        "recall-poles": {
           "first": 1,
           "found": 1,
           "of": 1

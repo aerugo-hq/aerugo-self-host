@@ -212,6 +212,7 @@ def for_meeting(outcome: Outcome) -> Outcome:
 DUE_SQL = """
 SELECT t.workspace_id, w.slug, m.id AS model_id, m.name AS model_name, m.provider, m.model, m.base_url, m.credential_ref,
        m.allowed_classifications, m.monthly_token_budget, d.id AS document_id, d.title, d.classification, d.content_hash, d.source_kind,
+       d.connection_id, d.container_ref,
        coalesce(f.suggested IS NOT NULL AND f.status IN ('open', 'reclassified'), false) AS personal
 FROM team_extraction t
 JOIN workspaces w            ON w.id = t.workspace_id
@@ -245,6 +246,12 @@ ON CONFLICT (workspace_id, document_id) DO UPDATE SET content_hash = EXCLUDED.co
   outcome = EXCLUDED.outcome, proposed = EXCLUDED.proposed, unsupported = EXCLUDED.unsupported,
   sensitive = EXCLUDED.sensitive, invalid = EXCLUDED.invalid, tokens = EXCLUDED.tokens, extracted_at = now()
 """
+# C3b: a meeting's proposals are ready, so its organizer gets one private review card, built as them in the answers lane
+REVIEW_SQL = """INSERT INTO jobs (org_id, kind, payload, max_attempts)
+SELECT kl.current_org(), 'meetings.review', jsonb_build_object('connection_id', cc.connection_id::text, 'chat', cc.external_id,
+       'user', split_part(cc.default_ref, '/', 1), 'user_id', cc.organizer_ref, 'via', 'ready'), 1
+FROM connection_containers cc
+WHERE cc.connection_id = %s AND cc.external_id = %s AND cc.container_kind = 'meeting' AND cc.capture = 'on' AND cc.organizer_ref IS NOT NULL"""
 USAGE_SQL = "INSERT INTO model_usage (org_id, workspace_id, endpoint_id, prompt_tokens, completion_tokens) VALUES (kl.current_org(), %s, %s, %s, %s)"
 # A pass a minute, at most, while any team has opted in: one finding nothing due is one cheap query.
 QUEUE_SQL = """INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'units.extract' WHERE EXISTS (SELECT 1 FROM team_extraction)
@@ -305,6 +312,8 @@ def run(conn, limit: int = MAX_DOCUMENTS) -> dict:
             conn.execute(STATE_SQL, (d["workspace_id"], d["document_id"], d["content_hash"], d["model_id"], "done", len(result.kept),
                                      result.dropped["unsupported"], result.dropped["sensitive"], result.dropped["invalid"], tokens))
             conn.execute(USAGE_SQL, (d["workspace_id"], d["model_id"], usage["prompt_tokens"], usage["completion_tokens"]))
+            if meeting and result.kept:
+                conn.execute(REVIEW_SQL, (d["connection_id"], d["container_ref"]))
         totals.update({"documents": 1, "proposed": len(result.kept), **result.dropped})
     return {**totals, "more": len(rows) == limit}
 
