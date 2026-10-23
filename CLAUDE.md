@@ -2844,6 +2844,19 @@ content security policy's; `make test-web` 7 passed; the lint at 0 errors and 43
 the evaluation sets, and the full browser suite (the fresh-stack loop over C4a and C4b, next). Not built: the list
 updating while it's open (a reload reads it again); editing a shared answer in place (withdraw, change, share again);
 and a handover offered in Teams or Slack (by decision, the web app only).
+**The fresh-stack loop over C4a and C4b, 2026-10-23** (once after the two, at the top of the stack,
+c4b-handover-screens, with CI's settings): `make pins` passed; `make unit` 262 passed; `make smoke` 195 passed, 15
+skipped, 0 failed (the handover check among them, the prompts in their order; the web servers recreated first, so the
+optional web checks ran); the golden set hit@1 1.0, MRR 1.0, found@5 1.0, no regression; `make eval-scenario`
+Recall@10 94%, MRR 0.81 over 43 counted cases, Ask right for 24 of 25, no leak, no regression; `make eval-company`
+everyone opening exactly what the truth says, no leak, Recall@10 100%, MRR 0.83 over 54 counted questions, Ask right for
+27 of 27, the right unit first for 15 of 26, 31 proposals from 21 documents (5 from captured threads), 1 of 1 saves, 3
+of 50 units stale and 1 gap as the truth says, Cora's handover opened by exactly Stores' 4 people, confirmed by Ben,
+answering Ana, unseen by Fay, and withdrawn, no regression; `make atlas-eval` exact, no leak, no regression; `make
+eval-teams` no leak, every team at its baseline; the retailer as pointers Recall@10 99%, MRR 0.83, Ask right for 27 of
+27, and live only Recall@10 99%, MRR 0.62, Ask right for 25 of 27, each with no leak and no regression; no planted text
+in the services' logs; `make e2e` 45 passed (the two handover tests among them); `make test-web` 7 passed; the lint at 0
+errors and 43 warnings. No baseline changed, so none was recorded again.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
