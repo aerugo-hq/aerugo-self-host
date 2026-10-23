@@ -123,7 +123,7 @@ p = Page("2. Components", "Inside Aerugo: the parts, layer by layer",
          "right runs through every layer.")
 layers = [
     ("Surfaces: where people meet it", 130, [("Web app (Next.js)", S_BUILT), ("Slack bot: asks, capture, saves", S_BUILT),
-                                              ("Teams bot: asks, capture, saves", S_BUILT),
+                                              ("Teams bot: asks, capture, saves, reviews", S_BUILT),
                                               ("Frontline mobile view", S_NEW), ("IDE extension, pull-request bot", S_NEW),
                                               ("MCP server, APIs, SDKs", S_BUILT)]),
     ("Services: what it does", 290, [("Answers (search, Ask)", S_BUILT), ("Architect agent, playbooks", S_NEW),

@@ -48,32 +48,42 @@ def cited(result: dict) -> list[dict]:
     return ([c for c in citations if c.get("cited")] or citations)[:SOURCES]
 
 
-def answer_as(conn, account: str, email: str | None, question: str, settings: dict) -> tuple[str | None, dict | None, str | None]:
-    """Ask's answer for the person a chat account is linked to: (why not, None, None), with `why` a refusal the bot words
-    for its asker, or (None, the result, their username). `email` is the one the chat platform gives the account, used
-    only to refuse a leaver, and as the asker's own when their link was made by that verified email."""
+def caller_as(conn, account: str, email: str | None) -> tuple[str | None, Caller | None]:
+    """The person a chat account is linked to, as Aerugo would let them in now: (why not, None), with `why` a refusal the
+    bot words for them, or (None, their caller). `email` is the one the chat platform gives the account, used only to
+    refuse a leaver, and as their own when their link was made by that verified email. A meeting's review card (C3b) is
+    built, and its buttons settle units, as this caller too."""
     link = conn.execute(PERSON_SQL, (account,)).fetchone()
     if not link or not str(link["canonical"]).startswith("user:"):
-        return "unlinked", None, None
+        return "unlinked", None
     username = link["canonical"].split(":", 1)[1]
     email = (email or "").strip().lower() or None
     if conn.execute(LEFT_SQL, {"user": username, "emails": [email] if email else []}).fetchone():
-        return "left", None, None
+        return "left", None
     seen = conn.execute(SIGN_IN_SQL, (username,)).fetchone()
     if not seen or not fresh(seen["signed_in_at"], datetime.now(timezone.utc)):
-        return "stale", None, None
+        return "stale", None
     caller = Caller(username=username, groups=tuple(seen["groups"] or ()), org_slug=config.ORG_SLUG,
                     email=email if link["verified_by"] == "sso-email" else None)  # proven equal at linking
     try:
-        if not admission.admitted(caller):  # as their last sign-in left them; an ask never refreshes it
-            return "not onboarded", None, None
+        if not admission.admitted(caller):  # as their last sign-in left them; a chat never refreshes it
+            return "not onboarded", None
     except (httpx.HTTPError, psycopg.Error, RuntimeError) as e:
-        log.warning("an ask's admission couldn't be checked (%s)", type(e).__name__)
-        return "failed", None, None
+        log.warning("a chat person's admission couldn't be checked (%s)", type(e).__name__)
+        return "failed", None
+    return None, caller
+
+
+def answer_as(conn, account: str, email: str | None, question: str, settings: dict) -> tuple[str | None, dict | None, str | None]:
+    """Ask's answer for the person a chat account is linked to (`caller_as`): (why not, None, None), with `why` a refusal
+    the bot words for its asker, or (None, the result, their username)."""
+    why, caller = caller_as(conn, account, email)
+    if why or caller is None:
+        return why or "failed", None, None
     from .main import answer_question  # the API's own Ask, so a chat answer is the app's answer
     reach = frozenset(settings.get("classifications") or REACH) & frozenset(CLASSIFICATIONS)
     try:
-        return None, answer_question(caller, question, settings["model"], reach=reach), username
+        return None, answer_question(caller, question, settings["model"], reach=reach), caller.username
     except HTTPException as e:
         return {404: "no access", 429: "busy"}.get(e.status_code, "failed"), None, None
 

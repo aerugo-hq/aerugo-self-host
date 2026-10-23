@@ -230,7 +230,8 @@ async def teams_activity(connection_id: str, request: Request, authorization: st
     wrong, an unknown connection included, is the same 401. It's taken once, by its activity's id, and only queues a job,
     which reads back from Graph or the Bot Connector whatever it acts on: "Don't capture" and "Save to Aerugo" (each
     answered privately in Teams at once), an ask, by a message to the bot in its 1:1 chat or a mention in a channel
-    (answered later, privately, in the asker's 1:1 chat), and, in a meeting's chat, "capture on" or "don't capture" (C3a)."""
+    (answered later, privately, in the asker's 1:1 chat), in a meeting's chat, "capture on", "don't capture", or "review"
+    (C3a, C3b), and a press of Confirm or Not right on a meeting's review card (C3b)."""
     body = await capped_body(request, MAX_BODY)
     if body is None:
         telemetry.webhook_rejected("too_large")
@@ -258,6 +259,11 @@ async def teams_activity(connection_id: str, request: Request, authorization: st
         log.info("teams %s for %s: %s", job, connection_id, result)
         reply = teams_bot.MARK_REPLY if job == "teams.exclude" else teams_bot.SAVE_REPLY
         return JSONResponse({"task": {"type": "message", "value": reply}}, status_code=200)
+    pressed = teams_bot.review_request(activity, tenant)  # C3b: Confirm or Not right on a meeting's review card
+    if pressed:
+        result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"settle-{activity['id']}", "meetings.settle", pressed, 1)
+        log.info("teams review press for %s: %s", connection_id, result)
+        return Response(status_code=200)
     asked = teams_bot.ask_request(activity, tenant, app, QUESTION_CHARS)  # C1b: a 1:1 question is the recorded exception
     if asked:
         result = await run_in_threadpool(queue_job, org_id, "teams", connection_id, f"ask-{activity['id']}", "teams.ask", asked, 1)

@@ -5438,9 +5438,9 @@ def a_meeting_is_captured_only_by_its_organizer_and_ended_by_anyone_in_it():
     def posted(chat=room):
         return [p for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json() if p.get("chat") == chat and p.get("meeting")]
 
-    def told(who):
+    def told(who):  # a review card (C3b) isn't one of a command's private replies
         return [p["text"] for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json()
-                if p.get("private") and p.get("user") == f"29:{ids[who]}"]
+                if p.get("private") and p.get("user") == f"29:{ids[who]}" and not p.get("card")]
 
     def units():
         with psycopg.connect(OWNER_DB) as conn:
@@ -5599,6 +5599,153 @@ def a_meeting_is_captured_only_by_its_organizer_and_ended_by_anyone_in_it():
         if stale:  # a link sign-in matching made from the chat's members
             fga.write(deletes=stale)
 
+
+@check
+def a_meetings_people_confirm_its_proposals_privately_in_teams():
+    """C3b, confirming a meeting's proposals in Teams: once a captured meeting's proposals are ready, its organizer gets one private review card in their 1:1 chat with the bot, and anyone in the meeting who writes "@Aerugo review" gets the same, each listing only what that person reads; Confirm and Not right settle a proposal as whoever pressed them, read back from Teams, while someone outside the meeting, a press claimed from another's chat, a replay, a settled proposal, and a unit not from a meeting change nothing; in the meeting's chat the bot posts only capture's notice"""
+    from .authz import fga
+    from .meetings import key_of
+    tag = secrets.token_hex(3).upper()
+    tenant = str(uuid.uuid4())
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    people = ("alice", "bob", "carol", "dave")
+    ids = {u: str(uuid.uuid4()) for u in people}
+    teams_id = lambda u: f"29:{ids[u]}"
+    principal = lambda u: f"ext:microsoft.{u}@acme.test"
+    room, transcript = f"19:meeting_review{tag.lower()}@thread.v2", f"tr{tag}r"
+    vtt = (f"WEBVTT\n\n00:00:05.000 --> 00:00:09.000\n<v Alice>We decided the {tag} stores close refunds at 4 pm.</v>\n\n"
+           f"00:01:30.000 --> 00:01:34.000\n<v Carol>The {tag} pilot starts with the Denver stores on Monday.</v>\n")
+    mid = lambda n: f"17620000{n:05d}"
+    member = lambda u: {"userId": ids[u], "email": f"{u}@acme.test", "displayName": u.title(), "roles": [], "tenantId": tenant}
+    wrote = lambda n, who, text: {"id": mid(n), "messageType": "message", "from": {"user": {"id": ids[who], "displayName": who.title()}},
+                                  "body": {"contentType": "html", "content": f'<at id="0">Aerugo</at> {text}'},
+                                  "mentions": [{"id": 0, "mentioned": {"application": {"id": app["client_id"]}}}]}
+    chats = {"chats": {room: {"type": "meeting", "topic": f"Refunds sync {tag}", "organizer": ids["alice"], "meeting": f"MSo{tag}r",
+                              "join": f"https://teams.microsoft.com/l/meetup-join/{tag}r", "installed": [app["client_id"]],
+                              "members": [member(u) for u in ("alice", "carol", "dave")],
+                              "messages": [wrote(1, "alice", "capture on"), wrote(2, "dave", "review")],
+                              "transcripts": [{"id": transcript, "created": "2026-10-21T15:00:00Z", "vtt": vtt}]}}}
+    name = f"review-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    service = f"{FAKE_LLM}/teams-bot"
+    links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in people}
+    links -= {(t["user"], t["relation"], t["object"]) for _, _, o in links for t in fga.read({"object": o})}  # only what isn't there
+    key = key_of(room, transcript)
+    token = lambda: "Bearer " + httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": app["client_id"], "serviceurl": service + "/"},
+                                           timeout=10).json()["token"]
+
+    def sent():
+        return [p for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json() if p.get("app") == app["client_id"]]
+
+    def cards(who):
+        return [p["card"] for p in sent() if p.get("private") and p.get("user") == teams_id(who) and p.get("card")]
+
+    def told(who):
+        return [p["text"] for p in sent() if p.get("private") and p.get("user") == teams_id(who) and not p.get("card")]
+
+    def listed(card):
+        return {a["data"]["unit"] for b in card["body"] if b["type"] == "ActionSet" for a in b["actions"]}
+
+    def units():
+        with psycopg.connect(OWNER_DB) as conn:
+            return {r[0]: r[1] for r in conn.execute("SELECT u.id::text, u.status FROM kl.knowledge_units u JOIN kl.documents d "
+                                                    "ON d.id = ANY(u.evidence) WHERE d.external_key = %s", (key,)).fetchall()}
+
+    def until(ok, seconds=180):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(3)
+        return ok()
+
+    def mention(n, who):
+        return httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", timeout=15, headers={"Authorization": token()}, json={
+            "type": "message", "id": mid(n), "serviceUrl": service + "/", "text": "Aerugo",
+            "from": {"id": teams_id(who), "aadObjectId": ids[who]}, "conversation": {"id": room, "conversationType": "groupChat"},
+            "channelData": {"tenant": {"id": tenant}}, "entities": [{"type": "mention", "mentioned": {"id": f"28:{app['client_id']}"}}]})
+
+    def press(n, who, unit, verb, from_id=None):
+        return httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", timeout=15, headers={"Authorization": token()}, json={
+            "type": "message", "id": f"p{tag}{n}", "serviceUrl": service + "/", "value": {"aerugo": "review", "verb": verb, "unit": unit},
+            "from": {"id": from_id or teams_id(who), "aadObjectId": ids[who]},
+            "conversation": {"id": "a:" + ids[who], "conversationType": "personal"}, "channelData": {"tenant": {"id": tenant}}})
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u in people:  # each has linked their Microsoft account
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
+    if links:
+        fga.write(writes=links)
+    ensure_fake_models()
+    for u in people:  # a recent sign-in each, as a chat person must have
+        assert api("GET", "/v1/whoami", u).status_code == 200
+    assert httpx.post(f"{FAKE_LLM}/teams-bot/setup", timeout=10, json={"people": {
+        teams_id(u): {"id": teams_id(u), "aadObjectId": ids[u], "tenantId": tenant, "email": f"{u}@acme.test", "userRole": "user"}
+        for u in people}}).status_code == 200
+    cid = handbook = None
+    try:
+        assert httpx.post(f"{FAKE_MICROSOFT}/chats", json=chats, timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/teams", "alice", json={
+            "name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "team_ids": [], "bot_service": service, "every_minutes": 10080})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        assert api("PUT", path + "/meetings", "alice", json={"meetings": True}).status_code == 200
+        assert api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": "smoke-fake"}).status_code == 200
+        assert mention(1, "alice").status_code == 200
+        assert until(lambda: len(units()) == 2, 240), f"the meeting's two minutes weren't proposed from: {units()}"
+        first, second = sorted(units())
+        assert until(lambda: len(cards("alice")) == 1), "the organizer got no review card once the meeting's proposals were ready"
+        card = cards("alice")[0]
+        assert listed(card) == {first, second}, f"the organizer's card doesn't list exactly the meeting's proposals: {listed(card)}"
+        assert not cards("carol") and not cards("dave") and not cards("bob"), "a card went to someone who didn't ask for one"
+
+        assert mention(2, "dave").status_code == 200
+        assert until(lambda: len(cards("dave")) == 1), "someone in the meeting who wrote review got no card"
+        assert listed(cards("dave")[0]) == {first, second}, f"dave's card doesn't list his meeting's proposals: {listed(cards('dave')[0])}"
+
+        assert press(1, "dave", first, "confirm", from_id=teams_id("bob")).status_code == 200  # claimed for dave, from bob's id
+        assert press(2, "bob", first, "confirm").status_code == 200  # bob, who wasn't in the meeting
+        assert until(lambda: len(told("bob")) == 1), told("bob")
+        assert "isn't something proposed from a meeting you were in" in told("bob")[0], told("bob")
+        assert units()[first] == "proposed" and not told("dave"), "a press by someone outside the meeting, or claimed from another's chat, settled it"
+        assert press(3, "dave", first, "confirm").status_code == 200
+        assert press(3, "dave", first, "confirm").status_code == 200  # the same delivery again
+        assert until(lambda: units()[first] == "confirmed"), "someone in the meeting couldn't confirm a proposal from the card"
+        assert until(lambda: told("dave") and told("dave")[-1].startswith("Confirmed:")), told("dave")
+        history = api("GET", f"/v1/units/{first}", "dave").json()["history"]
+        assert [h["reason"] for h in history] == ["confirmed by someone in its meeting"] and history[-1]["by"] == "dave", \
+            f"a replayed press settled it twice, or as someone else: {history}"
+        assert press(4, "dave", second, "dismiss").status_code == 200
+        assert until(lambda: units()[second] == "retired"), "Not right didn't dismiss the proposal"
+        assert press(5, "dave", second, "confirm").status_code == 200
+        assert until(lambda: "already" in told("dave")[-1]) and units()[second] == "retired", "a dismissed proposal was confirmed"
+        handbook = api("POST", "/v1/workspaces/payments/units", "alice", json={
+            "kind": "fact", "topic": f"handbook-{tag.lower()}", "title": f"From the handbook {tag}", "text": f"The handbook says so {tag}.",
+            "evidence": [{"document": "handbook"}]}).json()["id"]
+        assert press(6, "alice", handbook, "confirm").status_code == 200  # its own team's curator, but not from a meeting
+        assert until(lambda: told("alice") and "isn't something proposed from a meeting" in told("alice")[-1]), told("alice")
+        assert api("GET", f"/v1/units/{handbook}", "alice").json()["status"] == "proposed", "a card settled a unit not from a meeting"
+        with psycopg.connect(OWNER_DB) as conn:
+            presses = conn.execute("SELECT count(*) FROM kl.jobs WHERE kind = 'meetings.settle' AND payload->>'connection_id' = %s",
+                                   (cid,)).fetchone()[0]
+        assert presses == 6, f"a replayed press was queued again: {presses}"
+        notices = [p for p in sent() if p.get("chat") == room and p.get("meeting")]
+        assert len(notices) == 1, f"the bot posted in the meeting's chat besides capture's notice: {notices}"
+    finally:
+        api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": None})
+        if cid:
+            api("DELETE", path, "alice")
+        if links:
+            fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
+            if handbook:
+                conn.execute("DELETE FROM kl.knowledge_units WHERE id = %s", (handbook,))
+        stale = {(t["user"], t["relation"], t["object"]) for u in people for t in fga.read({"object": f"identity:{principal(u)[4:]}"})
+                 if t["user"] == f"user:{u}"}
+        if stale:  # a link sign-in matching made from the chat's members
+            fga.write(deletes=stale)
 
 @check
 def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():

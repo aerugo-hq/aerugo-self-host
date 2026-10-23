@@ -126,8 +126,12 @@ Teams lets an organizer or a presenter add the app; Aerugo goes further and read
   covers their transcripts), and recordings: Aerugo reads Teams' transcript and never transcribes audio itself. Of a
   meeting's chat it reads only the messages that mention the bot.
 - **Confirmed by its people.** Only the people in a meeting can read what it proposed, so they, not the connection's
-  team's curators, confirm or dismiss it: anyone in the meeting, in Aerugo (`GET /v1/meetings/review` lists theirs).
-  Nothing a meeting proposes answers a question until one of them confirms it.
+  team's curators, confirm or dismiss it: anyone in the meeting. When a meeting's proposals are ready, its organizer
+  gets one review card, privately, in their 1:1 chat with the bot; anyone in the meeting who writes "@Aerugo review" in
+  its chat gets the same. Each card lists only what that person can read, each proposal with **Confirm** and **Not
+  right**, and a press settles it as them: Aerugo reads back from Teams who pressed it, in their own chat, and settles
+  only a proposal from meetings alone. In Aerugo, `GET /v1/meetings/review` lists the same. Nothing a meeting proposes
+  answers a question until one of them confirms it.
 - **Transcripts are indexed** and read on the connection's cadence: a captured meeting is one of the connection's
   containers, so the sync, the readers refresh, and removing the connection carry it.
 
@@ -147,5 +151,4 @@ it acts on. The bot posts only to the service address the connection names, neve
 
 ## Not built yet
 
-Follow-up questions in a thread, pointer and live-only modes, private and shared channels, confirming a meeting's
-proposals in Teams itself (C3b), channel meetings, and Zoom.
+Follow-up questions in a thread, pointer and live-only modes, private and shared channels, channel meetings, and Zoom.

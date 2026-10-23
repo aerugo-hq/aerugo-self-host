@@ -2649,7 +2649,62 @@ Not run: the full smoke suite and the other sets (CI's run on the pull request; 
 baselines aren't recorded again until that loop (the new question is found at #1, so no set's MRR falls). Not built:
 confirming in Teams (C3b), channel meetings (no permission covers their transcripts), Zoom, recordings, a meeting's
 confirmed decision shared beyond its people (that widens who can see it: a decision to ask for), Graph's transcript
-notifications (polled on the connection's cadence), and Terraform for the Meetings switch.
+notifications (polled on the connection's cadence), and Terraform for the Meetings switch. CI on pull request 85: unit
+254 passed; smoke 191 passed, 17 skipped, 0 failed; the golden set hit@1 1.0, MRR 1.0; the scenario (Recall@10 94%, MRR
+0.81), the retailer (Recall@10 100%, MRR 0.83 over 54 counted questions, `recall-poles` new), its pointer (Recall@10 99%,
+MRR 0.83) and live-only (99%, 0.62) runs, the Atlas, and every team's set (product quality's question new), with no leak
+and no regression.
+C3b, confirming a meeting's proposals in Teams (the plan approved 2026-10-22 with C3a: one private review card, the bot's
+only other new write). When extraction proposes from a meeting's transcript (`extraction.REVIEW_SQL`, once the pass keeps
+any), its organizer gets one review card, privately, in their 1:1 chat with the bot; anyone in the meeting who writes
+"@Aerugo review" in its chat (`meetings.intent`; the worker reads the message back and queues it) gets the same. Their
+Teams id is how the bot reaches them, so a captured meeting keeps its organizer's (migration 0073:
+`connection_containers.organizer_ref`), read back from the Bot Connector when they turn capture on (the person with that
+id in the meeting's chat must be the organizer; a lookup that fails keeps none, and they can still ask for a card). Cards
+are built in the answers lane (`kl.meeting_review`, `meetings.review`), as their person: read back from the Bot Connector
+in the meeting's chat (`person_of`: who the job names, the connection's tenant, not a guest, a company email), resolved
+through `chat_ask.caller_as` (split out of `answer_as`, so asks and reviews share the linked account, the week-old
+sign-in, admission, and the directory's leavers), and shown only that meeting's proposals they read in full
+(`units.meeting_proposals`, which `GET /v1/meetings/review` now uses too). A card (`card_of`, Adaptive Card 1.4) lists at
+most ten, each its title and text with Markdown's link characters replaced (`plain`), with Confirm and Not right
+(`Action.Submit`, its data the unit's id and the verb), and says how many more wait. A press arrives as a signed message
+in the presser's 1:1 chat (`teams_bot.review_request`: only the unit, the verb, the chat, and who pressed it, as ids),
+queued once as `meetings.settle`, tried once; the presser is read back in their own chat and resolved as for a card, and
+the unit is settled as them (`units.settle_from_meeting`): only a proposal from meetings alone they read in full, Not
+right retiring it; anything else is "not yours", a settled one "already", each told privately. Teams' bot conversations
+now include a meeting's chat (`teams.CONVERSATION`), which the read-back needs. The fake Bot Connector knows who's in a
+meeting's chat and keeps the cards it's sent. The retailer: every person who signs in is known to the fake Bot Connector
+(`company_eval.teams_people`, set once as the company is served), and `meeting_review_check` (in CI, beside the asks):
+Kai writes "@Aerugo review" in the stand-up's chat and gets a card listing exactly its waiting proposals, nothing else.
+Docs: the Teams doc's Meetings section, the architecture, the diagram (the Teams bot's reviews), and the plan (C3
+ticked). Smoke: `a_meetings_people_confirm_its_proposals_privately_in_teams` (the organizer's card arrives once the
+proposals do, listing both and going to no one else; dave's review brings his; a press claimed for dave from bob's id
+and bob's own press, from outside the meeting, settle nothing, bob told why; dave's Confirm settles it once, replayed or
+not, "confirmed by someone in its meeting"; Not right retires the other, and confirming it then says it's already
+settled; alice, Payments' curator, pressing on a handbook unit settles nothing; six presses queued; the bot posting in the
+meeting's chat only capture's notice). C3a's check now counts a command's private replies without the review card.
+Unit: 3 more in `tests/test_meetings.py` (11), and the conversation pattern now named there. Red first: four unit
+mutations (a press taken from any conversation, a card's text left as Markdown, review not a command, a meeting's chat
+not a bot conversation), each failing exactly its own test; five smoke mutations, each built into its service, the check
+run, then restored (`cmp`) and rebuilt: a card settling a unit not from a meeting (failed: alice's handbook unit
+"Confirmed"), a settled proposal settled again (failed: "a dismissed proposal was confirmed"), no card when the
+proposals are ready (failed: "the organizer got no review card"), review never queued (failed: "someone in the meeting
+who wrote review got no card"), and a press never taken (failed: the presses answered as asks instead). Found while
+building: the organizer's Teams id read-back first failed every capture command, the Bot Connector's lookup refusing a
+meeting's chat as a conversation (C3a's check caught it: no capture began), fixed by naming meeting chats among bot
+conversations; and the claim checker drops a transcript line holding a Markdown link (unsupported), so no unit carries
+one: a card's escaping is proven by its unit test. Proof, against the running stack (not fresh): `make unit` 257
+passed; both meeting checks passed, and so did C1b's, C2d's, and F2's (C2d's and C1b's after `caller_as`);
+`kl.company_eval`: Kai's card listed 1 of the stand-up's 1 waiting proposals, everyone opening exactly what the truth
+says, no leak, Recall@10 100%, MRR 0.84 over 54 counted questions (`recall-poles` new), the asks answered privately, 3
+of 50 units stale as the truth says, no regression. Found on that stack: 18 proposals from 15 documents where PR 85's
+fresh CI run had 31 from 21: seven Stores proposals (from STORE-101, STORE-102, and a CO201 thread) are gone though
+their extraction records say they were made; no C3 code deletes them (C3a's deletes reach only a meeting's own
+transcripts, and C3b deletes nothing), and every person still sees exactly the proposals whose document they open; the
+fresh-stack loop next is where this is confirmed or found. Not run: the browser tests (no web change), the full smoke
+suite, and the other sets (CI's run on the pull request, and the loop). Not built: a card updating in place after a
+press (each press is answered privately instead), a note with Not right (F5a's corrections take one in Aerugo), and the
+card for a meeting's later transcripts beyond the one per extraction pass.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2665,8 +2720,8 @@ loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2
 fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and C2d (the bot
 answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
 source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
-fresh-stack loop over the three, and C3a (Teams meeting transcripts, opted in by each organizer); next, C3b (confirming
-a meeting's proposals in Teams), then the fresh-stack loop over the two, then C4.
+fresh-stack loop over the three, and C3a (Teams meeting transcripts, opted in by each organizer) and C3b (confirming a
+meeting's proposals in Teams), which complete C3; next, the fresh-stack loop over the two, then C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:
