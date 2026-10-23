@@ -142,7 +142,7 @@ layers = [
                                      ("Permissions (OpenFGA)", S_DB_BUILT), ("Credentials (OpenBao, Secret Manager)", S_DB_BUILT)]),
     ("Connectors and capture: how it reads", 770, [("Docs: Confluence, Drive, SharePoint, Notion", S_BUILT),
                                                     ("Tickets and chat: Jira, Slack, Slack capture", S_BUILT),
-                                                    ("Teams channels and capture", S_BUILT), ("Teams meetings", S_BUILT), ("Handovers", S_NEW),
+                                                    ("Teams channels and capture", S_BUILT), ("Teams meetings", S_BUILT), ("Handovers", S_BUILT),
                                                     ("Code: GitHub (thousands of repos)", S_BUILT),
                                                     ("Warehouses, catalogs, usage logs", S_NEW),
                                                     ("Schedulers and ETL: Control-M, Airflow", S_NEW)]),

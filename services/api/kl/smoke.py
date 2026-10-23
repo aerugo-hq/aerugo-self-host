@@ -5748,6 +5748,169 @@ def a_meetings_people_confirm_its_proposals_privately_in_teams():
             fga.write(deletes=stale)
 
 @check
+def a_handover_is_the_persons_to_start_answer_and_share_and_its_successor_or_lead_confirms():
+    """C4a, handovers: someone starts their own handover, or one of their team's admins asks and it begins only when they accept (someone else can't ask, someone off the team can't start one, declining ends it); its prompts come from what they own (a page they vouched for, a question routed to them) and the open ones; their drafts are theirs alone, the lead seeing only how far it's come; a shared answer reaches exactly the team and the successor and lead it names, or the whole company, never naming what its prompt was about, and an answer about someone's surgery is never kept; the named successor confirms it while someone else can't, in the API and in the database; withdrawing takes its unit, confirmed or not; and when the directory says they've left, their unshared drafts are deleted and their shared answers stay"""
+    tag = secrets.token_hex(3).upper()
+    name = f"okta-c4-{tag.lower()}"
+    question = f"How do we reverse a duplicated refund batch {tag}?"
+    named_answer = f"Reverse the {tag} batch from the settlement console before 4 pm, then tell the finance desk."
+    org_answer = f"The {tag} settlement console lives behind the payments VPN, not the office network."
+    surgery = f"Sam is having surgery on Tuesday ({tag}), so cover the late shift."
+    person = lambda email, first, status="ACTIVE": {"status": status, "profile": {
+        "email": email, "firstName": first, "lastName": "Smoke", "title": "Smoke", "department": "Payments", "city": "Denver", "state": "CO"}}
+    started = []
+
+    def handover(user, body):
+        return api("POST", "/v1/handovers", user, json={"team": "payments", "reason": "changing roles", **body})
+
+    def answers(user, hid):
+        return api("GET", f"/v1/handovers/{hid}/answers", user)
+
+    def hits(user):
+        return {h["id"] for h in api("GET", "/v1/search", user, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def published(text):  # kept anywhere but the person's own drafts and the audit of their own searches
+        return [t for t in stored_anywhere(text) if t not in ("kl.handover_answers", "kl.audit_events")]
+
+    def kept(aid):
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT d.external_key, d.acl_principals, a.unit_id::text FROM kl.handover_answers a "
+                                "JOIN kl.documents d ON d.id = a.document_id WHERE a.id = %s", (aid,)).fetchone()
+
+    def until(ok, seconds=120):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(2)
+        return ok()
+
+    def changes_as(user, groups, unit):  # as the API's role naming no team, as it does for a handover's successor or lead
+        with psycopg.connect(APP_DB) as conn:
+            conn.execute("SELECT set_config('kl.org_id', %s, false), set_config('kl.principals', %s, false), "
+                         "set_config('kl.teams', '', false)", (str(org), f"user:{user},{groups},org:acme"))
+            n = conn.execute("UPDATE kl.knowledge_units SET status = status WHERE id = %s", (unit,)).rowcount
+            drafts = conn.execute("SELECT count(*) FROM kl.handover_answers WHERE handover_id = %s", (hid,)).fetchone()[0]
+            conn.rollback()
+        return n, drafts
+
+    with psycopg.connect(OWNER_DB) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+    for u in ("alice", "bob", "carol", "dave"):  # each has signed in, so Aerugo knows them by name
+        assert api("GET", "/v1/whoami", u).status_code == 200
+    routed = api("POST", "/v1/questions/route", "alice", json={"question": question, "page": "kb-sev1-playbook", "expert": "carol"})
+    assert routed.status_code == 201, f"a question couldn't be routed to carol: {routed.status_code} {routed.text[:200]}"
+    handbook = hid = None
+    try:
+        assert handover("bob", {}).status_code == 404, "someone off the team started a handover for it"
+        assert handover("bob", {"person": "carol"}).status_code == 403, "someone neither manager nor team admin asked for a handover"
+        assert handover("carol", {"person": "alice"}).status_code == 403, "someone neither manager nor team admin asked for a handover"
+        assert handover("alice", {"person": "carol", "successor": "nobody-here"}).status_code == 422, "an unknown successor was named"
+        own = handover("alice", {})
+        assert own.status_code == 201 and own.json()["status"] == "open", f"alice couldn't start her own handover: {own.text[:200]}"
+        started.append(own.json()["id"])
+        prompts = [a["prompt"] for a in answers("alice", own.json()["id"]).json()["answers"]]
+        assert any("Declaring a payments Sev1" in p for p in prompts), f"a page alice vouched for wasn't among her prompts: {prompts}"
+
+        asked = handover("alice", {"person": "carol", "successor": "dave"})
+        assert asked.status_code == 201 and asked.json()["status"] == "requested" and asked.json()["lead"] == "alice", asked.text[:200]
+        started.append(asked.json()["id"])
+        assert answers("carol", asked.json()["id"]).status_code == 409, "a request opened before carol accepted"
+        assert api("POST", f"/v1/handovers/{asked.json()['id']}/accept", "alice").status_code == 404, "the requester accepted for carol"
+        assert api("POST", f"/v1/handovers/{asked.json()['id']}/decline", "carol").json()["status"] == "declined"
+        assert api("POST", f"/v1/handovers/{asked.json()['id']}/accept", "carol").status_code == 409, "a declined request was accepted"
+        again = handover("alice", {"person": "carol", "successor": "dave"})
+        hid = again.json()["id"]
+        started.append(hid)
+        assert api("POST", f"/v1/handovers/{hid}/accept", "carol").json()["status"] == "open"
+        drafts = answers("carol", hid).json()["answers"]
+        asked_prompt = next((a for a in drafts if a["kind"] == "asked"), None)
+        assert asked_prompt and question in asked_prompt["prompt"], f"the question routed to carol wasn't among her prompts: {drafts}"
+        contact = next(a for a in drafts if a["kind"] == "contact")
+        where = next(a for a in drafts if a["kind"] == "where")
+        breaks = next(a for a in drafts if a["kind"] == "breaks")
+
+        assert answers("alice", hid).status_code == 404 and answers("dave", hid).status_code == 404, "someone else read carol's drafts"
+        assert api("PUT", f"/v1/handovers/{hid}/answers/{asked_prompt['id']}", "carol", json={"answer": named_answer}).status_code == 200
+        assert api("PUT", f"/v1/handovers/{hid}/answers/{where['id']}", "carol", json={"answer": org_answer, "audience": "org"}).status_code == 200
+        assert api("PUT", f"/v1/handovers/{hid}/answers/{breaks['id']}", "carol", json={"answer": surgery}).status_code == 200
+        assert api("PUT", f"/v1/handovers/{hid}/answers/{contact['id']}", "alice", json={"answer": "x"}).status_code == 404, \
+            "someone else wrote into carol's handover"
+        assert changes_as("alice", "group:payments", "00000000-0000-0000-0000-000000000000")[1] == 0, \
+            "the database showed carol's drafts to her lead"
+        mine = next(h for h in api("GET", "/v1/handovers", "alice").json()["handovers"] if h["id"] == hid)
+        assert mine["prompts"] == len(drafts) and mine["shared"] == 0 and "answers" not in mine, f"the lead saw more than progress: {mine}"
+
+        assert api("POST", f"/v1/handovers/{hid}/answers/{breaks['id']}/share", "carol").status_code == 422, \
+            "an answer about someone's surgery was shared"
+        for a in (asked_prompt, where):
+            assert api("POST", f"/v1/handovers/{hid}/answers/{a['id']}/share", "carol").status_code == 202
+        assert until(lambda: kept(asked_prompt["id"]) and kept(where["id"])), "the shared answers were never kept"
+        key, acl, unit = kept(asked_prompt["id"])
+        assert sorted(acl) == ["group:payments", "user:alice", "user:dave"], f"a shared answer's readers aren't its team and named people: {acl}"
+        org_key, org_acl, org_unit = kept(where["id"])
+        assert org_acl == ["org:acme"], f"an answer shared with the company has the wrong readers: {org_acl}"
+        assert until(lambda: key in hits("dave")) and key not in hits("bob"), "a shared answer reached the wrong people"
+        assert until(lambda: org_key in hits("bob")), "an answer shared with the company didn't reach it"
+        with psycopg.connect(OWNER_DB) as conn:
+            text = " ".join(r[0] or "" for r in conn.execute("SELECT d.title || ' ' || coalesce(k.body, '') FROM kl.documents d "
+                                                           "JOIN kl.chunks k ON k.document_id = d.id WHERE d.external_key = %s", (key,)))
+        assert question not in text and "Sev1" not in text, "a shared answer named what its prompt was about"
+        assert not published(surgery), f"an answer about someone's surgery was kept: {published(surgery)}"
+
+        review = {u["id"] for u in api("GET", "/v1/handovers/review", "dave").json()["units"]}
+        assert {unit, org_unit} <= review, f"the successor's review doesn't list carol's answers: {review}"
+        assert api("GET", "/v1/handovers/review", "bob").json()["units"] == [], "someone not named was asked to review"
+        assert api("POST", f"/v1/units/{org_unit}/confirm", "bob").status_code == 403, "someone not named confirmed a handover's answer"
+        got = api("POST", f"/v1/units/{unit}/confirm", "dave")
+        assert got.status_code == 200 and got.json()["trust"] == "confirmed", f"the successor couldn't confirm: {got.text[:200]}"
+        history = api("GET", f"/v1/units/{unit}", "dave").json()["history"]
+        assert history[-1]["reason"] == "confirmed by its handover's successor or lead" and history[-1]["by"] == "dave", history
+        handbook = api("POST", "/v1/workspaces/payments/units", "alice", json={
+            "kind": "fact", "topic": f"handbook-c4-{tag.lower()}", "title": f"From the handbook {tag}", "text": f"The handbook says so {tag}.",
+            "evidence": [{"document": "handbook"}]}).json()["id"]
+        found = {"dave, carol's answer": changes_as("dave", "group:legal", unit)[0],
+                 "bob, carol's company-wide answer": changes_as("bob", "group:finance", org_unit)[0],
+                 "dave, a handbook unit he reads": changes_as("dave", "group:legal", handbook)[0]}
+        assert found == {"dave, carol's answer": 1, "bob, carol's company-wide answer": 0, "dave, a handbook unit he reads": 0}, \
+            f"the database's rule for a handover's successor is wrong: {found}"
+
+        assert api("POST", f"/v1/handovers/{hid}/answers/{asked_prompt['id']}/withdraw", "carol").status_code == 202
+        assert until(lambda: not kept(asked_prompt["id"]) and not published(named_answer)), \
+            f"a withdrawn answer left something kept: {published(named_answer)}"
+        with psycopg.connect(OWNER_DB) as conn:
+            assert not conn.execute("SELECT 1 FROM kl.knowledge_units WHERE id = %s", (unit,)).fetchone(), "a withdrawn answer kept its confirmed unit"
+
+        assert httpx.post(f"{FAKE_OKTA}/setup", json={"users": [person("alice@acme.test", "Alice"), person("carol@acme.test", "Carol", "DEPROVISIONED")]},
+                          timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/directory", "olivia", json={
+            "name": name, "provider": "okta", "api_base": FAKE_OKTA, "api_token": "smoke-okta-token", "every_minutes": 60})
+        assert r.status_code == 201, f"{r.status_code} {r.text[:200]}"
+
+        def left():
+            with psycopg.connect(OWNER_DB) as conn:
+                return conn.execute("SELECT status FROM kl.handovers WHERE id = %s", (hid,)).fetchone()[0] == "closed"
+        assert until(left, 180), "carol left, and her handover stayed open"
+        with psycopg.connect(OWNER_DB) as conn:
+            remaining = conn.execute("SELECT count(*) FILTER (WHERE shared_at IS NULL), count(*) FROM kl.handover_answers "
+                                     "WHERE handover_id = %s", (hid,)).fetchone()
+        assert remaining == (0, 1), f"a leaver's unshared drafts weren't deleted, or her shared answer went: {remaining}"
+        assert not stored_anywhere(surgery), f"a leaver's unshared draft outlived her: {stored_anywhere(surgery)}"
+        assert org_key in hits("bob"), "a leaver's shared answer left with her"
+        assert api("POST", f"/v1/handovers/{hid}/answers/{where['id']}/withdraw", "carol").status_code == 409, \
+            "a closed handover's answer was withdrawn"
+    finally:
+        api("DELETE", f"/v1/workspaces/payments/connections/{name}", "olivia")
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            for h in started:
+                docs = [r[0] for r in conn.execute("SELECT document_id FROM kl.handover_answers WHERE handover_id = %s AND document_id IS NOT NULL", (h,))]
+                if docs:
+                    conn.execute("DELETE FROM kl.knowledge_units WHERE evidence && %s::uuid[]", (docs,))
+                    conn.execute("DELETE FROM kl.documents WHERE id = ANY(%s)", (docs,))
+                conn.execute("DELETE FROM kl.handovers WHERE id = %s", (h,))
+            if handbook:
+                conn.execute("DELETE FROM kl.knowledge_units WHERE id = %s", (handbook,))
+            conn.execute("DELETE FROM kl.routed_questions WHERE question = %s", (question,))
+
+@check
 def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
     """C2c, Save to Aerugo: a message someone saves becomes a proposed unit for the team's curators, readable by the channel's members and no one else; your own message saves anywhere the bot reads, someone else's only once the channel's capture is on; a saver outside the channel, a marked or sensitive message, a forged delivery, and a pointer connection save nothing, and a replay saves once; a message newer than the last sync is saved once it's read; the person who saved is told privately, and the bot writes nothing else; /aerugo save only says how; a mark later removes that message's save alone, and switching to pointers removes every unconfirmed save"""
     import hashlib

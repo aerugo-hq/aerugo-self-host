@@ -225,6 +225,7 @@ WHERE (d.source_kind <> ALL(%(chat)s) OR EXISTS (  -- chat only from a channel c
          SELECT 1 FROM connection_containers cc
          WHERE cc.connection_id = d.connection_id AND cc.external_id = d.container_ref AND cc.capture = 'on'))
   AND d.storage = 'index'  -- a pointer keeps no text to extract from (F11a)
+  AND d.source_kind <> 'handover'  -- a handover's answers are proposed as they're shared (C4a)
   AND (s.document_id IS NULL OR s.content_hash IS DISTINCT FROM d.content_hash OR s.model_id IS DISTINCT FROM t.model_id
        OR (s.outcome = 'skipped_classification' AND d.classification = ANY(m.allowed_classifications)))
 ORDER BY t.workspace_id, d.id

@@ -2723,6 +2723,85 @@ errors and 43 warnings. The fresh stack's 31 proposals settle C3b's long-lived-s
 missing there were that stack's, not C3's. The changed baselines were recorded on that stack, in CI's order (the retailer,
 the team sets, pointers, live only), each gaining `recall-poles`: `company` MRR 0.8318 (#1), `company-pointer` 0.8324
 (#1), `company-live` 0.6162 (#4), and product quality's team set MRR 1.0 (#1); every other set's record unchanged.
+C4a, handover interviews (the plan approved 2026-10-23 with five decisions: the person starts their own handover or
+accepts one asked of them; each answer's audience their choice, the team plus the named successor and lead by default;
+the successor or lead confirms; a shared answer withdrawn until they leave, drafts deleted when they do; the web app
+only). Migration 0074: `handovers` (the person, their team, the successor and lead, leaving or changing roles,
+requested, open, declined, or closed, and who asked; neither named person may be the person), readable by the person,
+the successor, the lead, and the requester, inserted by anyone (the API decides who may ask), its status changed only by
+the person; and `handover_answers` (each prompt's kind, text, and subject, the draft, its audience, `named` or `org`,
+and once shared its document and unit), the person's alone by the database's own rule (`the_person_alone`, for every
+command), so a successor, lead, requester, or admin never reads a draft. `kl.handover_progress` (security definer)
+gives the people a handover names its counts alone, prompts and shared; `kl.handover_confirmer` (security definer) says
+only whether the caller is the named successor or lead of the handover every one of a unit's documents came from; the
+policies `settle_from_its_handover` and `record_from_its_handover` let the API's role settle such a unit, and record its
+event, naming no team, only for them (C3a's pattern). `kl.subject_columns` gains `person`, `successor`, and `lead`, so an
+erasure reaches everyone a handover names. `kl/handover.py`: `POST /v1/handovers` starts your own (it opens at once, its
+prompts built as you; your lead your manager as the directory says, unless named) or asks one of someone on a team you
+administer or whose manager you are (it waits: `requested`, its lead the requester unless named); someone off the team is
+a 404, anyone else asking a 403, a successor or lead who hasn't signed in a 422, and the person can't be either. `GET
+/v1/handovers` lists yours, the ones you asked for, and the ones naming you, with counts only; `accept` and `decline`
+are the person's (anyone else's handover is a 404, as a missing one is). Prompts (`build_prompts`, as the person, so each
+names only what they read): the curated pages they own or vouched for, through the page read's own gates
+(`main.visible_concept`, at most `CONCEPT_SCAN` pages scanned), the units they wrote or confirmed whose evidence they read
+in full, the documents Git says they wrote, and the questions routed to them (F5b), at most `MAX_OWNED` (20), then five
+open prompts (what they do regularly, who to call, what breaks, what's in flight, where things live); never colleagues,
+never anyone's record. Drafts are saved (`PUT`, up to 4,000 characters, with their audience), shared (`share`: refused
+with a 422 when `privacy.sensitive` flags the answer, then queued), and withdrawn (`withdraw`), each the person's alone
+and audited. The worker's `handover.share` (`keep`) writes a shared answer as a document of kind `handover`
+(`handover-<answer id>`) whose readers are its audience (`readers_for`: the team's own members and groups as it holds
+them, `notion.team_readers`, plus `user:` the successor and lead; or `org:<org>`; never a grant to the whole company for
+a team's answer), headed by its kind of prompt ("Who to call", "What breaks, and how it's fixed") and never its subject,
+which could name a page the audience can't read; its chunks, the team's workspace, OpenFGA's viewer tuples, then
+embeddings, the bronze page, links, and the personal-data scan as for a push; and a proposed unit (a fact, a lesson for
+what breaks, an answer for what's asked; trust observed, so no answer uses it until confirmed, F4; `created_by`
+`handover`). Extraction (F2) never reads a handover's document. `GET /v1/handovers/review` lists the proposals waiting
+for their successor or lead; `kl.units._settled_by` lets the successor or lead confirm or retire a unit from handovers
+alone ("confirmed by its handover's successor or lead"). `handover.withdraw` removes the document's authorization first,
+then every unit and perspective citing it, confirmed or not, and the document. When a directory that isn't paused lists
+someone only as having left (Q6's rule), its sync (`directory.sync_directory`) runs `forget_leavers`: their unshared
+drafts are deleted and their handovers close, while what they shared stays with its audience; a withdraw after that is a
+409. Docs: `docs/handovers.md` (who starts one, what it asks, drafts and sharing, who confirms, withdrawing and leaving,
+the API), the architecture, the diagram (Handovers built), and the plan's C4 decisions (C4 is ticked with C4b, the
+screens). The retailer: `company.HANDOVER` (Cora, CA301's store manager, changing roles, names Ben as successor and
+Dara as lead; `problems` holds that all five people sign in and who is on Stores), and `handover_check` in kl.company_eval
+(in CI, indexed only): her owned prompts are exactly the units she wrote or confirmed; her answer about who to call when a
+store's back-door alarm trips is shared for Stores and the two she named, and every person who signs in opens it exactly
+when they're on Stores or named; Ben confirms it; Ana's Ask cites it and Fay, in the contact center, never finds it;
+Cora withdraws it and nothing of it is left, so no baseline changes. Smoke:
+`a_handover_is_the_persons_to_start_answer_and_share_and_its_successor_or_lead_confirms` (bob, off Payments, can't start
+one; bob and carol can't ask one of someone; an unknown successor refused; alice's own handover prompts the Sev1 page
+she vouched for; alice asks carol for one with dave as successor, it waits, alice can't accept it for her, carol declines
+and then accepts a second, whose prompts include the question routed to her; alice and dave get 404s for carol's drafts
+and the database shows alice none; alice sees only counts; an answer about someone's surgery can't be shared; carol's
+answer for the team reaches exactly `group:payments`, alice, and dave, and her answer for the company `org:acme`, dave
+finding the first and bob only the second; neither document names the routed question or the Sev1 page; dave's review
+lists both, bob's none; bob can't confirm, dave can, its history naming him; as the API's role naming no team, the
+database lets dave settle carol's unit and neither bob hers nor dave a handbook unit he reads; withdrawing removes the
+confirmed unit; a fake Okta listing carol as deprovisioned closes her handover, deletes her unshared drafts (the surgery
+draft stored nowhere), keeps her company-wide answer, and refuses a withdraw after). Unit: `tests/test_handover.py` (5).
+Red first: five unit mutations (a team's answer reaching the whole company, prompts without a cap, what breaks kept as a
+fact, the document titled by its answer, a unit citing a page too settled by the successor), each failing exactly its
+own test; seven smoke mutations, each built into its service, the check run, then restored (`cmp`) and rebuilt: someone
+off the team starting one, in the API (failed: "someone off the team started a handover for it"), anyone asking (failed:
+"someone neither manager nor team admin asked for a handover"), the sensitive gate skipped at sharing (failed: "an answer
+about someone's surgery was shared"), readers widened to the org, in the worker (failed: the readers held `org:acme`),
+leavers keeping their drafts (failed: "a leaver's unshared drafts weren't deleted"), a withdraw keeping confirmed units (failed: the unit still in
+`kl.knowledge_units`), and anyone named or not settling, in the API (failed: "someone not named confirmed a handover's
+answer"); and two database policies loosened to the org as owner, each restored exactly (`pg_policies` compared):
+`the_person_alone` (failed: "the database showed carol's drafts to her lead") and `settle_from_its_handover` (failed: bob
+and dave settled units that aren't theirs); and the retailer's check alone, against a worker widening a team's answer to
+the org, reported 11 people outside Stores opening it, then nothing once restored. Proof, against the running stack (not
+fresh: it holds the scenario and the retailer): `make unit` 262 passed; the new check passed, before the mutations and on
+the clean rebuild after, and so did F1's, F2's, F3's, F4's, F6's, F5a's, F5b's, C3a's, C3b's, Okta's, Google's, and
+Entra's directory checks, and erasure; `kl.company_eval`: the handover opened by exactly Stores' 4 people who sign in,
+confirmed by Ben, answering Ana, unseen by Fay, and withdrawn; everyone opening exactly what the truth says, no leak,
+Recall@10 100% and MRR 0.83 over 54 counted questions, Ask right for 27 of 27, the right unit first for 15 of 26, 3 of 50
+units stale and 1 gap as the truth says, no regression. Not run: the browser tests and the lint (no web change), the
+full smoke suite, and the other sets (CI's run on the pull request, and the fresh-stack loop after C4b). Not built: the
+screens (C4b); a handover's prompts from the Atlas (what someone's jobs and tables are, P8); telling the successor or lead
+outside the app; editing a shared answer in place (withdraw, change, share again); and a handover for someone who never
+signed in.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2739,7 +2818,8 @@ fresh-stack loop over the three, and the Jira comment visibility fix with its li
 answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
 source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
 fresh-stack loop over the three, and C3a (Teams meeting transcripts, opted in by each organizer) and C3b (confirming a
-meeting's proposals in Teams), which complete C3, with the fresh-stack loop over the two; next, C4.
+meeting's proposals in Teams), which complete C3, with the fresh-stack loop over the two, and C4a (handover
+interviews behind the API); next, C4b.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from . import alerting, capture, catalogs, config, confluence, consolidation, curator, experts, gaps, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, meetings, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, teams, teams_bot, telemetry, unity
+from . import alerting, capture, catalogs, config, confluence, consolidation, curator, experts, gaps, handover, lifecycle, dataplex, datahub, directory, extraction, gdrive, glue, imports, jira, knowledge, links, manifests, meetings, microsoft365, notion, okf, originals, pipelines, privacy, purview, shutdown, slack, teams, teams_bot, telemetry, unity
 from .authz import fga
 from .connectors import GitHubConnector
 from .embeddings import CONTEXT, embed, opening_line, passage_text, vector_literal
@@ -592,6 +592,14 @@ def handle_answer_keep(conn, job) -> dict:
     return result
 
 
+def handle_handover_share(conn, job) -> dict:
+    """A handover's answer shared as knowledge (C4a): its document and proposed unit, then what's derived from them."""
+    result = handover.keep(conn, job["payload"]["answer"])
+    if result.get("kept"):
+        result.update(embedded=embed_missing(conn), bronze=materialize_bronze(conn), **links.refresh(conn), personal_data=privacy.scan(conn))
+    return result
+
+
 def handle_pipeline_push(conn, job) -> dict:
     """A CI pipeline's push (slice J1): its documents, then everything derived from them, as for any connector. The
     pushed text isn't kept once it's applied."""
@@ -761,7 +769,9 @@ HANDLERS = {"noop": handle_noop, "connection.retire": handle_connection_retire, 
             "units.consolidate": lambda conn, job: consolidation.run(conn),
             "units.lifecycle": lambda conn, job: lifecycle.run(conn),
             "gaps.refresh": lambda conn, job: gaps.run(conn),
-            "answers.keep": lambda conn, job: handle_answer_keep(conn, job)}
+            "answers.keep": lambda conn, job: handle_answer_keep(conn, job),
+            "handover.share": lambda conn, job: handle_handover_share(conn, job),  # C4a
+            "handover.withdraw": lambda conn, job: handover.withdraw(conn, job["payload"]["answer"])}
 RETENTION_SQL = ("INSERT INTO jobs (org_id, kind) SELECT kl.current_org(), 'retention.apply' WHERE NOT EXISTS "
                  "(SELECT 1 FROM jobs WHERE kind = 'retention.apply' AND created_at > now() - interval '1 hour')")
 

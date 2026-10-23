@@ -60,7 +60,7 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 
-from . import company, evals, meetings, slack, smoke, teams_bot
+from . import company, evals, handover, meetings, slack, smoke, teams_bot
 from .smoke import API, BAO_TOKEN, BAO_URL, FAKE_LLM, FAKE_MICROSOFT, OWNER_DB, TOKEN_URL, api, api_ready, ask_as
 
 ADMIN = "olivia"  # the org admin makes the teams and connections
@@ -821,6 +821,74 @@ def meeting_review_check(world: company.World, out) -> tuple[list[str], list[str
     return leaks, missing
 
 
+OWNED_SQL = """SELECT u.title FROM kl.knowledge_units u
+WHERE u.status IN ('proposed', 'confirmed', 'stale') AND (u.created_by = %(me)s OR EXISTS (
+  SELECT 1 FROM kl.unit_events e WHERE e.unit_id = u.id AND e.created_by = %(me)s AND e.to_status = 'confirmed'))"""
+
+
+def handover_check(world: company.World, out) -> tuple[list[str], list[str]]:
+    """C4a on the retailer: Cora starts her handover, naming Ben as successor and Dara as lead; her prompts name exactly
+    the units she wrote or confirmed, then the open ones; she shares what no page says, and exactly Stores and the two
+    people she named can open it; Ben confirms it; Ana's question is answered from it and Fay, outside Stores, never sees
+    it; Cora withdraws it, and nothing of it is left. Returns (leaks, missing)."""
+    h = company.HANDOVER
+    leaks, missing = [], []
+    r = api("POST", "/v1/handovers", h["person"], json={"team": h["team"], "reason": h["reason"], "successor": h["successor"], "lead": h["lead"]})
+    if r.status_code != 201:
+        raise SystemExit(f"{h['person']}'s handover: {r.status_code} {r.text[:200]}")
+    hid = r.json()["id"]
+    drafts = api("GET", f"/v1/handovers/{hid}/answers", h["person"]).json()["answers"]
+    with psycopg.connect(OWNER_DB) as conn:
+        owned = {row[0] for row in conn.execute(OWNED_SQL, {"me": h["person"]}).fetchall()}
+    prompted = {a["prompt"].split('"')[1] for a in drafts if a["kind"] == "owned"}
+    if len(owned) <= handover.MAX_OWNED and prompted != owned:
+        missing.append(f"{h['person']}'s prompts name {sorted(prompted)[:5]}..., not the units she wrote or confirmed")
+    answer = next(a for a in drafts if a["kind"] == h["kind"])
+    api("PUT", f"/v1/handovers/{hid}/answers/{answer['id']}", h["person"], json={"answer": h["answer"]}).raise_for_status()
+    api("POST", f"/v1/handovers/{hid}/answers/{answer['id']}/share", h["person"]).raise_for_status()
+    def kept() -> tuple[str, str] | None:
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT d.external_key, a.unit_id::text FROM kl.handover_answers a JOIN kl.documents d "
+                                "ON d.id = a.document_id WHERE a.id = %s", (answer["id"],)).fetchone()
+
+    deadline = time.monotonic() + 120
+    while not kept() and time.monotonic() < deadline:
+        time.sleep(2)
+    found = kept()
+    if not found:
+        return leaks, missing + [f"{h['person']}'s shared answer was never kept"]
+    key, unit = found
+    audience = {p.username for p in world.people if p.username and (p.team == h["team"] or p.username in (h["successor"], h["lead"]))}
+    for p in (p for p in world.people if p.username):
+        sees = key in opened(p.username)
+        if sees and p.username not in audience:
+            leaks.append(f"{p.username} opens {h['person']}'s handover answer, shared with {h['team']} and the people she named")
+        elif not sees and p.username in audience:
+            missing.append(f"{p.username} can't open {h['person']}'s handover answer")
+    if api("POST", f"/v1/units/{unit}/confirm", h["successor"]).status_code != 200:
+        missing.append(f"{h['successor']}, the successor, couldn't confirm {h['person']}'s answer")
+    model = f"{h['team']}/smoke-fake"
+    cited = {c["id"] for c in ask_as(h["asker"], h["question"], model).json()["citations"]}
+    if not {key, f"unit:{unit}"} & cited:
+        missing.append(f"{h['asker']}'s question wasn't answered from {h['person']}'s handover: {sorted(cited)[:6]}")
+    seen = {x["id"] for x in api("GET", "/v1/search", h["outsider"], params={"q": h["question"], "scope": "org", "limit": 50}).json()["results"]}
+    if key in seen:
+        leaks.append(f"{h['outsider']}, outside {h['team']}, found {h['person']}'s handover answer")
+    api("POST", f"/v1/handovers/{hid}/answers/{answer['id']}/withdraw", h["person"]).raise_for_status()
+    deadline = time.monotonic() + 120
+    while kept() and time.monotonic() < deadline:
+        time.sleep(2)
+    with psycopg.connect(OWNER_DB) as conn:
+        left = conn.execute("SELECT count(*) FROM kl.knowledge_units WHERE id = %s", (unit,)).fetchone()[0] + \
+            conn.execute("SELECT count(*) FROM kl.documents WHERE external_key = %s", (key,)).fetchone()[0]
+    if left:
+        missing.append(f"{h['person']} withdrew her answer, and something of it was left")
+    print(f"\nHandover (C4a): {h['person']} handed over to {h['successor']} with {len(drafts)} prompts ({len(prompted)} about units "
+          f"she owns); her shared answer opened by exactly {len(audience)} people, confirmed by {h['successor']}, answering "
+          f"{h['asker']}, unseen by {h['outsider']}, and withdrawn", file=out)
+    return leaks, missing
+
+
 def teams_capture_on(c: company.Container, team_name: str) -> list[str]:
     """C1a on the retailer: the Teams channel arrives requested, its team's owner having consented to the company's app
     (the first key); its team's admin confirms, and the bot posts its one notice there. Returns what went wrong."""
@@ -1042,6 +1110,9 @@ def main(argv: list[str]) -> int:
         missing = missing + ask_missing + teams_missing + review_missing
     life_leaks, life_missing = lifecycle_check(world, ids, out)  # after Ask's: a stale unit ranks differently
     gap_leaks, gap_missing = gaps_check(world, out)
+    if not pointer:  # C4a: a handover, start to finish, its document gone again at the end
+        hand_leaks, hand_missing = handover_check(world, out)
+        gap_leaks, gap_missing = gap_leaks + hand_leaks, gap_missing + hand_missing
     leaks, missing = leaks + life_leaks + gap_leaks, missing + life_missing + gap_missing
     problems = ([f"PERMISSION LEAK: {line}" for line in leaks + retrieval_leaks] + [f"MISSING: {line}" for line in missing]
                 + [f"WRONG: {line}" for line in wrong_units])

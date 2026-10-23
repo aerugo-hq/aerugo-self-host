@@ -41,7 +41,7 @@ pull requests, and APIs and agents. A loop runs back from people to Aerugo: they
 Bottom to top. Built today is marked (built); everything else is to build.
 
 - **Connectors and capture:** documents (Confluence, Drive, SharePoint, Notion: built), tickets and chat (Jira,
-  Slack, Teams channels and their capture: built), meetings and handovers, code (GitHub, at thousands of repos: built, to scale),
+  Slack, Teams channels and their capture: built), meetings and handovers (built), code (GitHub, at thousands of repos: built, to scale),
   warehouses, catalogs (built), and usage logs, schedulers and ETL (Control-M, Airflow).
 - **Stores:** documents and their index in Postgres with pgvector (built), knowledge units (built: each readable only
   by someone who can read all of its evidence, with perspectives and conflicts), the Atlas graph (built:
@@ -196,6 +196,16 @@ person: read back from the Bot Connector, resolved through `kl.chat_ask.caller_a
 shown only the meeting's proposals they read in full (`kl.units.meeting_proposals`). Confirm and Not right arrive as
 signed deliveries whose button data names the unit; the presser is read back in their own 1:1 chat, and the unit is
 settled as them (`kl.units.settle_from_meeting`), only if it came from meetings alone.
+
+Handovers (C4a, `docs/handovers.md`): someone leaving or changing roles starts their own handover, or accepts one their
+manager or a team admin asked for. Its prompts are built as them (`kl.handover`), from what they own (curated pages they
+own or vouched for, units they wrote or confirmed, documents they wrote, questions routed to them), then open ones about
+what isn't written down. Drafts are theirs alone by the database's own rule (`handover_answers`, migration 0074); the
+people the handover names see only counts (`kl.handover_progress`). Each shared answer, with the audience they choose
+(the team plus the named successor and lead, or the whole company), becomes a document of kind `handover`, headed by its
+kind of prompt and never its subject, and a proposed unit that the successor or lead confirms (`kl.handover_confirmer`
+and the policy `settle_from_its_handover`). They can withdraw an answer until they leave; when a directory says they've
+left, their unshared drafts are deleted and the handover closes.
 
 ## 7. The engineering and data pack
 
