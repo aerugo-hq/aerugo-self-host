@@ -2558,6 +2558,98 @@ lint at 0 errors and 43 warnings. The retailer's three baselines were recorded o
 the forklift question (#2 indexed and as pointers, #5 live only): `company` MRR 0.8286, `company-pointer` 0.8292,
 `company-live` 0.6231; every other set's record unchanged. CI's smoke job then needed more than its 40 minutes (pull
 request 83's run, cancelled at 40m37s with everything through the team sets passed), so its limit is 60 (C1a's branch).
+C3a, Teams meeting transcripts, opted in by each meeting's organizer (the plan approved 2026-10-22 with four decisions:
+the organizer's command plus the team admin's switch per connection as the two keys; anyone in the meeting ending it
+removes everything kept from it, confirmed or not; the bot's only new writes the meeting chat's notice and, in C3b, a
+private review card; decisions, lessons, and facts only, never action items). A Teams connection's team admin turns
+Meetings on (`GET`/`PUT .../connections/{name}/meetings`, off by default; the count of meetings captured, never which,
+since a meeting's name is for its people), and a meeting's organizer, with the company's app added to the meeting
+(resource-specific consent for that meeting's chat: `OnlineMeetingTranscript.Read.Chat`, `OnlineMeeting.ReadBasic.Chat`,
+`ChatMember.Read.Chat`, `ChatMessage.Read.Chat`, which an organizer or a presenter may grant), writes "@Aerugo capture
+on" in its chat. The hook (`teams_bot.meeting_request`) takes only a mention of the bot in a chat shaped as a meeting's
+(`teams.MEETING_CHAT`), as ids, and queues `meetings.command`, which reads back from Graph the chat (`chatType` must be
+`meeting`, so an ordinary group chat is told so and nothing more), the message and its author, and the chat's members;
+"capture on" (`meetings.intent`: the words alone) starts capture only for the meeting's organizer (`onlineMeetingInfo`),
+with the switch on, and no outsider in the chat (`meetings.outsiders`: a guest, another tenant's member, or anyone Graph
+gives no email for), the online meeting found by its organizer and join address. "don't capture" or "capture off" from
+anyone in the chat (`remove`) deletes the meeting's transcripts (authorization first), every unit and perspective citing
+them, confirmed or not (`FORGET_SQL`), and the meeting's container; whoever wrote a command is told privately what became
+of it (`SAY`), and a question in a meeting's chat is pointed to the 1:1 chat. A captured meeting is a container of its
+Teams connection (`container_kind` `meeting`, its organizer and online meeting in `default_ref`), which discovery keeps,
+so the sync (`meetings.sync_meeting`), the readers refresh, and retiring carry it (`worker.kinds_of`: a Teams
+connection's documents are `teams` and `meeting`). Each transcript is a document (`meeting-<chat hash>-<transcript
+hash>`), read as WebVTT (`teams.TeamsClient.transcript_text`), a section a minute headed "At hh:mm:ss", each line with its
+speaker from its voice tag (`meetings.cues`), a line the sensitive gate flags left out (C2a); its readers the chat's
+members as Graph lists them now (`teams.readers`), which is who Teams shows the transcript to (invariant 12). A chat that
+gains an outsider, or that the app is removed from (Graph's 403), keeps nothing, proposals included (`forget`), so no
+unit is ever left hidden with a meeting's words in it; removing the connection does the same (the retire job), and so
+does the admin turning Meetings off (`meetings.stop`, a job per meeting, each chat told). The bot's one write there is
+`BotConnector.say`, the on and off notices (`meetings.NOTICE_ON`, `NOTICE_OFF`), only if the state still holds.
+Extraction (F2) reads a meeting's transcripts once captured (its container's capture `on`), told it's a transcript
+(`MEETING_NOTE`) and keeping decisions, lessons, and facts alone (`for_meeting`); and it now reads a long document in
+parts (`parts_of`: up to `MAX_PARTS`, 6, each within `MAX_SECTIONS` and `MAX_PROMPT_CHARS`, the budget checked before each
+call after the first), since a meeting's transcript runs past the 12,000 characters F2 sent before. A unit from meetings
+alone is readable only by the meeting's people (F1), so they, not the owner team's curators, confirm or retire it
+(`units.from_meetings`, `_settled_by`; the event says "confirmed by someone in its meeting"), and `GET
+/v1/meetings/review` lists what's waiting for the caller. Migration 0072 lets the API do it for them naming no team:
+`kl.meeting_evidence` (as the caller) and the policies `settle_from_its_meetings` (an update) and
+`record_from_its_meetings` (its event), only on a unit citing meeting transcripts alone, every one readable to the
+caller. A Teams connection may name no teams (meetings alone). The app package gains the bot's `groupChat` scope and the
+four chat permissions. The fakes: Graph's meeting chats, members, messages, online meetings, and transcripts (`POST
+/microsoft/chats`; each only for an app added to that meeting), and the Bot Connector's meeting-chat posts. The web
+app: the Teams row's Meetings panel (its two keys, on or off, how many are captured, a warning before turning it off
+ends them; Save only on a change; loading, error, and success states). The retailer: the recall stand-up is a Teams
+meeting (`company.MEETING_CHAT`) its team's lead, Kai, organizes, its chat's members exactly its readers, served by
+`company.meeting_chats` with the organizer's capture-on message and a transcript of its three lines; the loader turns
+Meetings on for product quality's Teams connection (made for meetings alone) and sends the organizer's command in every
+storage mode (`meeting_capture_on`, in `load`), and the capture check holds the bot to its notice there; Kai's
+replacement-poles question, which waited on C3, counts; the question sets regenerated. Docs: `docs/connectors/teams.md`
+(Meetings: the two keys, the permissions and why, who reads, what's never captured, and that Microsoft's own answers
+disagree on reading transcripts at `/users/{organizer}/onlineMeetings` with chat consent alone, to try in a tenant), the
+architecture, the diagram (Teams meetings built), and the plan's C3 decisions. Smoke:
+`a_meeting_is_captured_only_by_its_organizer_and_ended_by_anyone_in_it` (another app's token a 401; with Meetings off
+the organizer is told so; a team member can't turn it on; a presenter, an ordinary group chat, and a meeting with a guest
+each refused, privately, and a message Graph doesn't hold taken by no one; nothing captured and nothing posted; the
+organizer's capture on posts one notice; the transcript reaches alice, carol, and dave exactly and not bob, its sensitive
+line in no table; its two minutes proposed; dave, who curates nothing in Payments, sees both in his review, confirms
+one ("confirmed by someone in its meeting") and retires the other, while bob gets 404s and an empty review; dave can't
+confirm a Payments unit from the handbook he reads; as the API's role naming no team, the database lets dave change his
+meeting's unit and neither bob that one nor dave the handbook's; a guest joining leaves nothing kept, the confirmed unit
+included, and the transcript returns when the guest leaves; carol's "don't capture" removes the transcript and every
+unit, the chat told; the organizer captures again, and the admin turning Meetings off ends it, the chat told; a question
+in the meeting's chat is pointed to the 1:1 chat; the bot posting only the four notices; captured again, a unit
+confirmed, and the connection removed, nothing of the meeting is left). Unit: `tests/test_meetings.py` (8) and one more
+in `test_company.py`; two retailer tests updated (Kai reads the meeting; no question waits on C1 or C3). Browser:
+`test_a_team_admin_lets_organizers_capture_their_meetings`. Red first: seven unit mutations (a word that merely says
+capture, another tenant counted as ours, a sensitive line kept, any group chat taken, a unit citing a page too settled
+by attendees, a long document sent whole, a meeting proposing any kind), each failing exactly its own test; nine smoke
+mutations, each built into its service, the check run, then restored (`cmp`) and rebuilt: the organizer check removed
+(failed: "someone not the organizer turned capture on"), the chat type check (failed: "an ordinary group chat was
+taken"), the guest check (failed: "a meeting with a guest was captured"), the switch (failed: "capture began with
+meetings off"), a veto keeping confirmed units and a guest's arrival keeping units (each failed: "a meeting whose chat a
+guest joined kept what it proposed", `kl.knowledge_units`), readers widened to the org (failed: "a transcript reached
+someone outside the meeting"), attendees refused in the API (failed: "someone in the meeting couldn't confirm it"), and
+the database policy loosened to the org, as owner (failed: dave could change the handbook's unit), the policy restored
+exactly (`pg_policies` compared); and removing the connection, run against the worker before its fix (failed: "a removed
+connection's meeting left what it kept"); and the browser test against a web app whose Save stays enabled with nothing
+changed (failed: "Locator expected to be disabled"), restored and rebuilt. Found by the first mutation run: three mutations passed, each a weakness in the
+check rather than the code: it looked for a transcript's full sentence, but a unit's text carries its citation mark, so
+a leftover unit slipped past (it now looks for a phrase), and Postgres applies the read policy to an update too, so the
+loosened update rule was never reached for someone who can't read the unit (the check now tries a unit dave reads that
+isn't from a meeting); and a confirmed unit was left hidden with a meeting's words when a guest joined, or the
+connection was removed, now forgotten too. Proof, against the running stack (not fresh: it holds the scenario and the
+retailer): `make unit` 254 passed; the new check passed, and so did C1a's, C1b's, C2c's, F1's, F2's, F4's, and F6's;
+`kl.company_eval`: the meeting captured with both keys and the bot posting only its notice, 31 proposals from 21
+documents (5 from captured threads, the meeting's among them), everyone opening exactly what the truth says (Kai 20
+documents), no leak, Recall@10 100% and MRR 0.83 over 54 counted questions (`recall-poles` new, at #1), Ask citing a right
+page for 27 of 27, the right unit first for 15 of 26, 3 of 50 units stale as the truth says, the truth's 1 gap, no
+regression; the six Teams and Slack browser tests passed, the new one among them; `make test-web` 7 passed; the lint at
+0 errors and 43 warnings. Found while proving it: Docker Desktop had stopped (its engine not running); started again.
+Not run: the full smoke suite and the other sets (CI's run on the pull request; the fresh-stack loop after C3b). The
+baselines aren't recorded again until that loop (the new question is found at #1, so no set's MRR falls). Not built:
+confirming in Teams (C3b), channel meetings (no permission covers their transcripts), Zoom, recordings, a meeting's
+confirmed decision shared beyond its people (that widens who can see it: a decision to ask for), Graph's transcript
+notifications (polled on the connection's cadence), and Terraform for the Meetings switch.
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2573,7 +2665,8 @@ loop over the two, and C2a (sensitive chat), C2b (Slack channel capture), and C2
 fresh-stack loop over the three, and the Jira comment visibility fix with its live-search follow-up, and C2d (the bot
 answers privately, as the asker), which completes C2, F6's evidence by its text, and C1a (Teams channels as a
 source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
-fresh-stack loop over the three; next, C3 and C4.
+fresh-stack loop over the three, and C3a (Teams meeting transcripts, opted in by each organizer); next, C3b (confirming
+a meeting's proposals in Teams), then the fresh-stack loop over the two, then C4.
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

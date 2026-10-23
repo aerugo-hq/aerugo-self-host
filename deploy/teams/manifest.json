@@ -15,7 +15,7 @@
   },
   "description": {
     "short": "Answers you privately in Teams, saves what you choose, and proposes knowledge where capture is on.",
-    "full": "Ask Aerugo in a 1:1 chat with it, or mention it in a channel: it answers you privately, in your 1:1 chat, with only what you may read. Choose Save to Aerugo on a message to propose it to your team's curators: your own anywhere, someone else's where capture is on. Aerugo reads this team's standard channels once its owner adds the app, each post readable only by the team's members; a channel is captured only when its team's admin in Aerugo confirms it, and the bot then posts a notice there. Anyone in the team can choose Don't capture on a message to keep it out. Private and shared channels and group chats are never read."
+    "full": "Ask Aerugo in a 1:1 chat with it, or mention it in a channel: it answers you privately, in your 1:1 chat, with only what you may read. Choose Save to Aerugo on a message to propose it to your team's curators: your own anywhere, someone else's where capture is on. Aerugo reads this team's standard channels once its owner adds the app, each post readable only by the team's members; a channel is captured only when its team's admin in Aerugo confirms it, and the bot then posts a notice there. Anyone in the team can choose Don't capture on a message to keep it out. Private and shared channels and group chats are never read. In a meeting its organizer adds it to, the organizer can write \"@Aerugo capture on\": Aerugo then keeps the meeting's transcripts, readable only by the people in its chat, and proposes decisions, lessons, and facts for them to confirm; anyone in the meeting can write \"@Aerugo don't capture\" to end it and remove what it kept."
   },
   "icons": {
     "color": "color.png",
@@ -27,7 +27,8 @@
       "botId": "{{APP_ID}}",
       "scopes": [
         "team",
-        "personal"
+        "personal",
+        "groupChat"
       ],
       "supportsFiles": false,
       "isNotificationOnly": false
@@ -103,6 +104,22 @@
         },
         {
           "name": "TeamSettings.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "ChatMessage.Read.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "ChatMember.Read.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "OnlineMeeting.ReadBasic.Chat",
+          "type": "Application"
+        },
+        {
+          "name": "OnlineMeetingTranscript.Read.Chat",
           "type": "Application"
         }
       ]

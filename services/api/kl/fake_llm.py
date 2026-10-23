@@ -110,7 +110,7 @@ ADMIN_PAGE = 2
 # client assertion this fake verifies as Entra does: PS256, the certificate's SHA-256 thumbprint, this token address
 # as its audience, the app as issuer and subject. Pages are small and come with @odata.nextLink, as Graph's do.
 MICROSOFT = os.environ.get("KL_FAKE_MICROSOFT", "http://fake-llm:8080/microsoft")
-GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False, "sites": {}, "teams": {}}
+GRAPH: dict = {"apps": {}, "users": [], "deleted": [], "groups": {}, "next_elsewhere": False, "sites": {}, "teams": {}, "chats": {}}
 # Teams (C1a): teams, each consented to by the apps its owner installed (resource-specific consent), with members and
 # channels holding posts and their replies in Graph's own shapes; set through POST /microsoft/teams. A team an app has
 # no consent for answers 403, as Graph does.
@@ -1018,6 +1018,47 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+        if parts[0] == "chats" and len(parts) >= 2:  # a meeting's chat (C3a): only for an app added to that meeting
+            from urllib.parse import unquote
+            chat = GRAPH["chats"].get(unquote(parts[1]))
+            if chat is None or app not in chat.get("installed", []):
+                return self._json(403 if chat else 404, {"error": {"code": "Forbidden", "message": "Missing role permissions"}})
+            if len(parts) == 2:
+                return self._json(200, {"id": unquote(parts[1]), "chatType": chat.get("type", "meeting"), "topic": chat.get("topic"),
+                                        "webUrl": f"https://teams.microsoft.com/l/chat/{parts[1]}",
+                                        **({"onlineMeetingInfo": {"joinWebUrl": chat["join"], "organizer": {"id": chat["organizer"]}}}
+                                           if chat.get("type", "meeting") == "meeting" else {})})
+            if parts[2:] == ["members"]:
+                return page(chat.get("members", []))
+            if len(parts) == 4 and parts[2] == "messages":
+                found = next((m for m in chat.get("messages", []) if m["id"] == parts[3]), None)
+                return self._json(200, found) if found else self._json(404, {"error": {"code": "NotFound"}})
+            return self._json(404, {"error": {"code": "NotFound"}})
+        if parts[0] == "users" and len(parts) >= 3 and parts[2] == "onlineMeetings":  # a meeting and its transcripts (C3a)
+            from urllib.parse import unquote
+            mine = [c for c in GRAPH["chats"].values() if c.get("organizer") == parts[1] and c.get("type", "meeting") == "meeting"]
+            if len(parts) == 3:
+                found = [c for c in mine if f"'{c['join']}'" in q.get("$filter", "")]
+                if found and app not in found[0].get("installed", []):
+                    return self._json(403, {"error": {"code": "Forbidden"}})
+                return self._json(200, {"value": [{"id": c["meeting"], "subject": c.get("topic")} for c in found]})
+            chat = next((c for c in mine if c["meeting"] == unquote(parts[3])), None)
+            if chat is None or app not in chat.get("installed", []):
+                return self._json(403 if chat else 404, {"error": {"code": "Forbidden"}})
+            if parts[4:] == ["transcripts"]:
+                return page([{"id": t["id"], "meetingId": chat["meeting"], "createdDateTime": t["created"]}
+                             for t in chat.get("transcripts", [])])
+            t = next((t for t in chat.get("transcripts", []) if len(parts) == 7 and parts[4] == "transcripts"
+                      and t["id"] == unquote(parts[5]) and parts[6] == "content"), None)
+            if t is None or q.get("$format") != "text/vtt":
+                return self._json(404, {"error": {"code": "NotFound"}})
+            data = t["vtt"].encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/vtt")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if parts[0] == "teams" and len(parts) >= 2:  # Teams (C1a): only for an app the team's owner consented to
             team = GRAPH["teams"].get(parts[1])
             if team is None or app not in team.get("consented", []):
@@ -1260,6 +1301,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/microsoft/teams":  # smoke sets Teams' teams, who consented, members, channels, and posts (C1a)
             GRAPH["teams"] = self._body()["teams"]
             return self._json(200, {})
+        if path == "/microsoft/chats":  # smoke sets meetings' chats: who organized each, who's in it, apps added, transcripts (C3a)
+            GRAPH["chats"] = self._body()["chats"]
+            return self._json(200, {})
         if path == "/botframework/sign":  # smoke makes a token as Bot Framework signs one for a bot (C1a)
             return self._json(200, {"token": bot_token(self._body())})
         if path == "/teams-bot/setup":  # smoke sets who Teams knows, by their Teams id (C1b)
@@ -1269,6 +1313,11 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import unquote
             app, body = bot_app(self.headers.get("Authorization") or ""), self._body()
             chat = unquote(path[len("/teams-bot/v3/conversations/"):-len("/activities")])
+            if chat.startswith("19:meeting_"):  # capture's notice in a meeting's chat the app was added to (C3a)
+                if not app or app not in GRAPH["chats"].get(chat, {}).get("installed", []):
+                    return self._json(403 if app else 401, {"error": {"code": "BotNotInConversationRoster"}})
+                TEAMS_BOT["posted"].append({"chat": chat, "text": body.get("text", ""), "meeting": True, "app": app})
+                return self._json(201, {"id": str(len(TEAMS_BOT["posted"]))})
             person = next((p for p in TEAMS_BOT["people"].values() if chat == "a:" + p["id"][3:]), None)
             if not app or person is None:
                 return self._json(404 if app else 401, {"error": {"code": "ConversationNotFound"}})

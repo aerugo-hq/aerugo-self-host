@@ -5381,6 +5381,226 @@ def teams_asks_are_answered_privately_and_saves_kept_for_the_team():
 
 
 @check
+def a_meeting_is_captured_only_by_its_organizer_and_ended_by_anyone_in_it():
+    """C3a, meetings: a Teams meeting is captured only when its organizer writes "@Aerugo capture on" in its chat, with the app added to the meeting and the connection's team admin having turned meetings on (a presenter, an ordinary group chat, a meeting with a guest, and the setting off each capture nothing); the bot posts one notice in the chat when capture starts and one when it stops, and nothing else; each transcript reaches exactly the chat's members, a sensitive line kept nowhere; what it proposes is read only by them, and one of them who curates nothing confirms or dismisses it while someone outside the meeting can't see it; a guest joining keeps nothing; anyone in the chat ending it, the admin turning meetings off, or removing the connection removes every transcript and every unit from it, confirmed or not"""
+    from .authz import fga
+    from .meetings import key_of
+    tag = secrets.token_hex(3).upper()
+    tenant, outside = str(uuid.uuid4()), str(uuid.uuid4())
+    app = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    someone_else = httpx.post(f"{FAKE_MICROSOFT}/app", json={"tenant_id": tenant}, timeout=30).json()
+    people = ("alice", "bob", "carol", "dave")
+    ids = {u: str(uuid.uuid4()) for u in (*people, "vendor")}
+    principal = lambda u: f"ext:microsoft.{u}@acme.test"
+    room, group, guested = (f"19:meeting_{k}{tag.lower()}@thread.v2" for k in ("room", "group", "guest"))
+    meeting, transcript = f"MSo{tag}room", f"tr{tag}1"
+    decision = f"We decided to move the refund cutoff to 4 pm for the {tag} stores."
+    pilot = f"The {tag} pilot starts with the Denver stores on Monday."
+    said = (f"refund cutoff to 4 pm for the {tag} stores", f"{tag} pilot starts with the Denver stores")  # as a unit states them too
+    surgery = f"Sam is having surgery on Tuesday ({tag})"
+    vtt = (f"WEBVTT\n\n00:00:05.000 --> 00:00:09.000\n<v Alice>{decision}</v>\n\n00:00:12.000 --> 00:00:15.000\n<v Carol>{surgery}</v>\n\n"
+           f"00:01:30.000 --> 00:01:34.000\n<v Carol>{pilot}</v>\n")
+    mid = lambda n: f"17610000{n:05d}"
+    member = lambda u: {"userId": ids[u], "email": f"{u}@{'else.test' if u == 'vendor' else 'acme.test'}", "displayName": u.title(),
+                        "roles": ["guest"] if u == "vendor" else [], "tenantId": outside if u == "vendor" else tenant}
+    wrote = lambda n, who, text: {"id": mid(n), "messageType": "message", "from": {"user": {"id": ids[who], "displayName": who.title()}},
+                                 "body": {"contentType": "html", "content": f'<at id="0">Aerugo</at> {text}'},
+                                 "mentions": [{"id": 0, "mentioned": {"application": {"id": app["client_id"]}}}]}
+    messages = [wrote(1, "alice", "capture on"), wrote(2, "carol", "capture on"), wrote(3, "alice", "capture on"),
+                wrote(4, "carol", "don't capture"), wrote(5, "alice", "capture on"), wrote(6, "alice", "what's the refund cutoff?"),
+                wrote(10, "alice", "capture on")]
+
+    def chats(members=("alice", "carol", "dave"), installed=True):
+        apps = [app["client_id"]] if installed else []
+        return {"chats": {
+            room: {"type": "meeting", "topic": f"Refunds sync {tag}", "organizer": ids["alice"], "meeting": meeting,
+                   "join": f"https://teams.microsoft.com/l/meetup-join/{tag}room", "installed": apps,
+                   "members": [member(u) for u in members], "messages": messages,
+                   "transcripts": [{"id": transcript, "created": "2026-10-20T15:00:00Z", "vtt": vtt}]},
+            group: {"type": "group", "topic": "Lunch", "installed": apps, "members": [member("alice"), member("carol")],
+                    "messages": [wrote(7, "alice", "capture on")]},
+            guested: {"type": "meeting", "topic": f"Vendor call {tag}", "organizer": ids["alice"], "meeting": f"MSo{tag}guest",
+                      "join": f"https://teams.microsoft.com/l/meetup-join/{tag}guest", "installed": apps,
+                      "members": [member("alice"), member("vendor")], "messages": [wrote(8, "alice", "capture on")], "transcripts": []}}}
+
+    name = f"meet-{tag.lower()}"
+    path = f"/v1/workspaces/payments/connections/{name}"
+    service = f"{FAKE_LLM}/teams-bot"
+    body = {"name": name, "api_base": FAKE_MICROSOFT, "tenant_id": tenant, "client_id": app["client_id"], "certificate": app["certificate"],
+            "team_ids": [], "bot_service": service, "every_minutes": 10080}
+    links = {(f"user:{u}", "owner", f"identity:{principal(u)[4:]}") for u in people}
+    links -= {(t["user"], t["relation"], t["object"]) for _, _, o in links for t in fga.read({"object": o})}  # only what isn't there
+    key = key_of(room, transcript)
+
+    def hits(u):
+        return {h["id"] for h in api("GET", "/v1/search", u, params={"q": tag, "scope": "org", "limit": 50}).json()["results"]}
+
+    def posted(chat=room):
+        return [p for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json() if p.get("chat") == chat and p.get("meeting")]
+
+    def told(who):
+        return [p["text"] for p in httpx.get(f"{FAKE_LLM}/teams-bot/posted", timeout=10).json()
+                if p.get("private") and p.get("user") == f"29:{ids[who]}"]
+
+    def units():
+        with psycopg.connect(OWNER_DB) as conn:
+            return conn.execute("SELECT u.id::text, u.status, u.created_by FROM kl.knowledge_units u JOIN kl.documents d ON d.id = ANY(u.evidence) "
+                                "WHERE d.external_key = %s ORDER BY u.title", (key,)).fetchall()
+
+    def captured():
+        with psycopg.connect(OWNER_DB) as conn:
+            return [r[0] for r in conn.execute("SELECT external_id FROM kl.connection_containers WHERE connection_id = %s "
+                                               "AND container_kind = 'meeting'", (cid,)).fetchall()]
+
+    def kept_anywhere():
+        return sorted({t for words in said for t in stored_anywhere(words)})
+
+    def until(ok, seconds=180):
+        deadline = time.monotonic() + seconds
+        while not ok() and time.monotonic() < deadline:
+            time.sleep(3)
+        return ok()
+
+    def mention(n, who, chat=room, auth=None):
+        activity = {"type": "message", "id": mid(n), "serviceUrl": service + "/", "text": "Aerugo",
+                    "from": {"id": f"29:{ids[who]}", "aadObjectId": ids[who]},
+                    "conversation": {"id": chat, "conversationType": "groupChat"}, "channelData": {"tenant": {"id": tenant}},
+                    "entities": [{"type": "mention", "mentioned": {"id": f"28:{app['client_id']}"}}]}
+        if auth is None:
+            auth = "Bearer " + httpx.post(f"{FAKE_LLM}/botframework/sign", json={"aud": app["client_id"], "serviceurl": service + "/"},
+                                          timeout=10).json()["token"]
+        return httpx.post(f"{API}/v1/hooks/teams/{cid}/messages", json=activity, timeout=15, headers={"Authorization": auth})
+
+    def answered(who, count):  # each command's outcome reaches whoever wrote it, privately
+        return until(lambda: len(told(who)) >= count, 120)
+
+    with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+        org = conn.execute("SELECT id FROM kl.orgs WHERE slug = 'acme'").fetchone()[0]
+        for u in people:  # each has linked their Microsoft account
+            conn.execute("INSERT INTO kl.principal_aliases (org_id, source, canonical, verified_by) VALUES (%s, %s, %s, 'smoke') "
+                         "ON CONFLICT DO NOTHING", (org, principal(u), f"user:{u}"))
+    if links:
+        fga.write(writes=links)
+    ensure_fake_models()
+    assert httpx.post(f"{FAKE_LLM}/teams-bot/setup", timeout=10, json={"people": {
+        f"29:{ids[u]}": {"id": f"29:{ids[u]}", "aadObjectId": ids[u], "tenantId": tenant, "email": f"{u}@acme.test", "userRole": "user"}
+        for u in people}}).status_code == 200
+    cid = handbook = None
+    try:
+        assert httpx.post(f"{FAKE_MICROSOFT}/chats", json=chats(), timeout=10).status_code == 200
+        r = api("POST", "/v1/workspaces/payments/connections/teams", "alice", json=body)
+        assert r.status_code == 201, f"a Teams connection for meetings alone was refused: {r.status_code} {r.text[:200]}"
+        cid = r.json()["id"]
+        assert api("GET", path + "/meetings", "alice").json() == {"meetings": False, "captured": 0}
+
+        forged = httpx.post(f"{FAKE_LLM}/botframework/sign", timeout=10, json={"aud": someone_else["client_id"], "serviceurl": service + "/"}).json()["token"]
+        assert mention(1, "alice", auth=f"Bearer {forged}").status_code == 401, "a meeting command on another app's token was taken"
+        assert mention(1, "alice").status_code == 200
+        assert answered("alice", 1) and "isn't turned on" in told("alice")[-1], f"capture began with meetings off: {told('alice')}"
+        assert api("PUT", path + "/meetings", "carol", json={"meetings": True}).status_code == 403, "someone not the team's admin turned meetings on"
+        assert api("PUT", path + "/meetings", "alice", json={"meetings": True}).json()["meetings"] is True
+        assert mention(2, "carol").status_code == 200
+        assert answered("carol", 1) and "organizer" in told("carol")[-1], f"someone not the organizer turned capture on: {told('carol')}"
+        assert mention(7, "alice", chat=group).status_code == 200
+        assert answered("alice", 2) and "never other group chats" in told("alice")[-1], f"an ordinary group chat was taken: {told('alice')}"
+        assert mention(8, "alice", chat=guested).status_code == 200
+        assert answered("alice", 3) and "guest" in told("alice")[-1], f"a meeting with a guest was captured: {told('alice')}"
+        assert mention(9, "alice").status_code == 200  # a message Graph doesn't hold: taken by no one, told nothing
+        assert captured() == [] and not posted() and not posted(group) and not posted(guested), "capture began without both keys"
+
+        assert api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": "smoke-fake"}).status_code == 200
+        assert mention(3, "alice").status_code == 200
+        assert answered("alice", 4) and told("alice")[-1].startswith("Capture is on"), told("alice")
+        assert until(lambda: len(posted()) == 1), "the meeting's chat wasn't told capture started"
+        assert "don't capture" in posted()[0]["text"], posted()
+        assert until(lambda: key in hits("alice") and key in hits("dave")), "the meeting's transcript never arrived"
+        assert key not in hits("bob"), "a transcript reached someone outside the meeting"
+        assert not stored_anywhere(surgery), f"a sensitive line of a transcript was kept: {stored_anywhere(surgery)}"
+        with psycopg.connect(OWNER_DB) as conn:
+            acl = conn.execute("SELECT acl_principals FROM kl.documents WHERE external_key = %s", (key,)).fetchone()[0]
+        assert sorted(acl) == [principal(u) for u in ("alice", "carol", "dave")], f"a transcript's readers aren't exactly its chat's members: {acl}"
+        assert until(lambda: len(units()) == 2, 240), f"the transcript's two minutes weren't proposed from: {units()}"
+        first, second = (u[0] for u in units())
+        assert api("GET", f"/v1/units/{first}", "bob").status_code == 404, "someone outside the meeting read what it proposed"
+        review = api("GET", "/v1/meetings/review", "dave").json()["units"]
+        assert {u["id"] for u in review} == {first, second}, f"dave's review doesn't list his meeting's proposals: {review}"
+        assert api("GET", "/v1/meetings/review", "bob").json()["units"] == [], "someone outside the meeting was asked to review it"
+        assert api("POST", f"/v1/units/{first}/confirm", "bob").status_code == 404, "someone outside the meeting confirmed what it proposed"
+        got = api("POST", f"/v1/units/{first}/confirm", "dave")
+        assert got.status_code == 200 and got.json()["trust"] == "confirmed", f"someone in the meeting couldn't confirm it: {got.text[:200]}"
+        assert api("POST", f"/v1/units/{second}/retire", "dave").json()["status"] == "retired"
+        history = api("GET", f"/v1/units/{first}", "dave").json()["history"]
+        assert history and history[-1]["reason"] == "confirmed by someone in its meeting" and history[-1]["by"] == "dave", history
+        handbook = api("POST", "/v1/workspaces/payments/units", "alice", json={
+            "kind": "fact", "topic": f"handbook-{tag.lower()}", "title": f"From the handbook {tag}", "text": f"The handbook says so {tag}.",
+            "evidence": [{"document": "handbook"}]}).json()["id"]
+        assert api("POST", f"/v1/units/{handbook}/confirm", "dave").status_code == 403, \
+            "someone who reads a unit not from a meeting, and curates nothing of its team's, confirmed it"
+
+        def changes_as(user, unit):  # as the API's role, naming no team, as it does for one of a meeting's people
+            groups = {"dave": "group:legal", "bob": "group:finance"}[user]
+            with psycopg.connect(APP_DB) as conn:
+                conn.execute("SELECT set_config('kl.org_id', %s, false), set_config('kl.principals', %s, false), "
+                             "set_config('kl.teams', '', false)", (str(org), f"user:{user},{groups},org:acme,{principal(user)}"))
+                n = conn.execute("UPDATE kl.knowledge_units SET status = status WHERE id = %s", (unit,)).rowcount
+                conn.rollback()
+            return n
+        found = {"dave, his meeting's unit": changes_as("dave", first), "bob, a meeting he wasn't in": changes_as("bob", first),
+                 "dave, a handbook unit he reads but isn't his team's": changes_as("dave", handbook)}
+        assert found == {"dave, his meeting's unit": 1, "bob, a meeting he wasn't in": 0, "dave, a handbook unit he reads but isn't his team's": 0}, \
+            f"the database's rule for a meeting's people is wrong: {found}"
+
+        assert httpx.post(f"{FAKE_MICROSOFT}/chats", json=chats(members=("alice", "carol", "dave", "vendor")), timeout=10).status_code == 200
+        assert api("POST", path + "/refresh", "alice").status_code in (200, 202)
+        assert until(lambda: key not in hits("alice")), "a meeting whose chat a guest joined still keeps its transcript"
+        assert units() == [] and not kept_anywhere(), f"a meeting whose chat a guest joined kept what it proposed: {kept_anywhere()}"
+        assert httpx.post(f"{FAKE_MICROSOFT}/chats", json=chats(), timeout=10).status_code == 200
+        assert api("POST", path + "/refresh", "alice").status_code in (200, 202)
+        assert until(lambda: key in hits("alice")), "the guest left, and the transcript didn't come back"
+        assert until(lambda: len(units()) >= 1, 240)
+
+        assert mention(4, "carol").status_code == 200
+        assert answered("carol", 2) and told("carol")[-1].startswith("Capture is off"), told("carol")
+        assert until(lambda: len(posted()) == 2), "ending capture wasn't told to the meeting's chat"
+        assert posted()[1]["text"].startswith("Aerugo no longer captures"), posted()
+        assert captured() == [] and units() == [] and key not in hits("alice"), "anyone ending capture left something kept"
+        assert not kept_anywhere(), f"a transcript's words outlived its meeting's capture: {kept_anywhere()}"
+
+        assert mention(5, "alice").status_code == 200
+        assert until(lambda: len(posted()) == 3 and key in hits("alice")), "the organizer couldn't capture the meeting again"
+        assert api("GET", path + "/meetings", "alice").json() == {"meetings": True, "captured": 1}
+        assert api("PUT", path + "/meetings", "alice", json={"meetings": False}).json()["meetings"] is False
+        assert until(lambda: len(posted()) == 4 and captured() == []), "turning meetings off didn't end the meeting it captured"
+        assert key not in hits("alice") and posted()[3]["text"].startswith("Aerugo no longer captures"), posted()
+        assert mention(6, "alice").status_code == 200  # a question in a meeting's chat is never answered there
+        assert answered("alice", 6) and "1:1 chat" in told("alice")[-1], told("alice")
+        assert len(posted()) == 4 and not posted(group) and not posted(guested), \
+            f"the bot posted something besides capture's notices: {posted()}"
+
+        assert api("PUT", path + "/meetings", "alice", json={"meetings": True}).status_code == 200
+        assert mention(10, "alice").status_code == 200
+        assert until(lambda: len(units()) == 2, 240), f"the meeting captured again proposed nothing: {units()}"
+        assert api("POST", f"/v1/units/{units()[0][0]}/confirm", "dave").status_code == 200
+        assert api("DELETE", path, "alice").status_code in (200, 202, 204)
+        cid = None
+        assert until(lambda: not kept_anywhere()), f"a removed connection's meeting left what it kept: {kept_anywhere()}"
+    finally:
+        api("PUT", "/v1/workspaces/payments/extraction", "alice", json={"model": None})
+        if cid:
+            api("DELETE", path, "alice")
+        if links:
+            fga.write(deletes=links)
+        with psycopg.connect(OWNER_DB, autocommit=True) as conn:
+            conn.execute("DELETE FROM kl.principal_aliases WHERE source = ANY(%s)", ([principal(u) for u in people],))
+            if handbook:
+                conn.execute("DELETE FROM kl.knowledge_units WHERE id = %s", (handbook,))
+        stale = {(t["user"], t["relation"], t["object"]) for u in people for t in fga.read({"object": f"identity:{principal(u)[4:]}"})
+                 if t["user"] == f"user:{u}"}
+        if stale:  # a link sign-in matching made from the chat's members
+            fga.write(deletes=stale)
+
+
+@check
 def save_to_aerugo_keeps_a_message_for_its_channel_and_its_rules():
     """C2c, Save to Aerugo: a message someone saves becomes a proposed unit for the team's curators, readable by the channel's members and no one else; your own message saves anywhere the bot reads, someone else's only once the channel's capture is on; a saver outside the channel, a marked or sensitive message, a forged delivery, and a pointer connection save nothing, and a replay saves once; a message newer than the last sync is saved once it's read; the person who saved is told privately, and the bot writes nothing else; /aerugo save only says how; a mark later removes that message's save alone, and switching to pointers removes every unconfirmed save"""
     import hashlib

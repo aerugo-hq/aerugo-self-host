@@ -44,7 +44,7 @@ def test_each_person_reads_only_what_the_sources_grant(world):
     assert "pay-ranges" in ivy and "QUAL-9" in kai
     assert not {"leave-requests", "hr-warning"} & gus                               # People is a private team
     assert "teams-forklift" in world.visible("eli") and "teams-forklift" not in ana  # a Teams channel: its team alone (C1a)
-    assert "meeting-recall-standup" not in world.visible("kai")                     # not loaded until C3
+    assert "meeting-recall-standup" in world.visible("kai") and "meeting-recall-standup" not in ana  # its meeting's people (C3a)
 
 
 def test_the_truth_holds_every_kind_of_trap(world):
@@ -54,7 +54,7 @@ def test_the_truth_holds_every_kind_of_trap(world):
     assert facts["recall-decision"].kind == "decision"
     kinds = {q.kind for q in world.questions}
     assert {"stale", "decision", "location", "permission", "undocumented", "sensitive", "capture", "two-source"} <= kinds
-    assert "C3" in {q.needs for q in world.questions} and "C1" not in {q.needs for q in world.questions}  # C1a's count now
+    assert not {"C1", "C3"} & {q.needs for q in world.questions}  # C1's and C3's questions count now
     max_weber = next(p for p in world.people if p.name == "Max Weber")
     assert not max_weber.active and not any(max_weber.email in members for members in world.groups.values())
 
@@ -95,3 +95,20 @@ def test_the_teams_channel_is_served_as_graph_lists_it(world):
     posts = team["channels"][company.TEAMS_CHANNEL]["messages"]
     assert [teams.key_of(company.TEAMS_CHANNEL, p["id"]) for p in posts] == [world.doc("teams-forklift").key]
     assert teams.CHANNEL.fullmatch(company.TEAMS_CHANNEL) and all(teams.kept(p) for p in posts)
+
+
+def test_the_meeting_is_served_as_graph_lists_it(world):
+    """C3a: the company's app is added to the meeting, its organizer is its team's lead, its chat's members are exactly
+    the transcript's readers, the organizer's capture on is in its chat, and its transcript's key is the one the connector
+    makes, each line kept with who said it."""
+    from kl import meetings, teams
+    chat = company.meeting_chats(world, "app-1")["chats"][company.MEETING_CHAT]
+    doc = world.doc("meeting-recall-standup")
+    assert chat["installed"] == ["app-1"] and chat["type"] == "meeting" and teams.MEETING_CHAT.fullmatch(company.MEETING_CHAT)
+    assert chat["organizer"] == world.person("kai").entra and {m["email"] for m in chat["members"]} == doc.readers
+    assert not meetings.outsiders(chat["members"], company.TENANT)
+    assert [m["id"] for m in chat["messages"]] == [company.capture_message(company.MEETING_CHAT)]
+    (transcript,) = chat["transcripts"]
+    assert meetings.key_of(company.MEETING_CHAT, transcript["id"]) == doc.key
+    kept = meetings.sections_of(transcript["vtt"])
+    assert [line.split(": ", 1)[0] for _, body in kept for line in body.split("\n")] == [author for author, _, _ in doc.messages]

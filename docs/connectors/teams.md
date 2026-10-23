@@ -91,6 +91,50 @@ asks for. What's saved becomes a proposed unit for the connection's team's curat
 answers nothing until a curator confirms it. The person who saved is told privately, in their 1:1 chat with the bot.
 A saved message deleted or edited in Teams takes its unconfirmed save with it on the next sync.
 
+## Meetings
+
+A Teams connection can keep the transcripts of scheduled meetings whose organizers opt in, and propose decisions,
+lessons, and facts from them, for the people in each meeting to confirm. A connection may name no teams at all and
+capture meetings alone. It takes two keys:
+
+1. **The connection's team admin turns Meetings on**, in its Meetings panel in Aerugo (off until they do). Turning it
+   off later ends every meeting it captures, as a veto does (below), and tells each meeting's chat.
+2. **A meeting's organizer adds the app to the meeting and writes "@Aerugo capture on" in its chat.** Adding the app
+   grants it these permissions for that meeting's chat only:
+
+| Permission (resource-specific) | Why |
+|---|---|
+| `OnlineMeetingTranscript.Read.Chat` | To read the meeting's transcripts, once Teams has them |
+| `OnlineMeeting.ReadBasic.Chat` | To find the meeting the chat belongs to |
+| `ChatMember.Read.Chat` | To read who's in the meeting's chat, which is who may read its transcripts |
+| `ChatMessage.Read.Chat` | To read back the one message that mentions the bot, by its id |
+
+Teams lets an organizer or a presenter add the app; Aerugo goes further and reads back from Graph that whoever wrote
+"capture on" is the meeting's organizer. A presenter adding the app captures nothing.
+
+- **Everyone is told.** The bot posts one notice in the meeting's chat when capture starts and one when it stops, and
+  nothing else there. (Teams shows its own banner while a meeting is transcribed.)
+- **Anyone in the meeting can end it.** "@Aerugo don't capture" (or "capture off") from anyone in the meeting's chat
+  ends capture for that meeting (a recurring series shares one chat) and removes every transcript Aerugo kept from it
+  and everything proposed from them, confirmed or not. Teams keeps its own transcript. The organizer can turn it on
+  again, and the chat is told again.
+- **Who reads a transcript:** the people in the meeting's chat, as Teams lists them now, which is who Teams shows the
+  transcript to, each as their company email. Each line keeps who said it; a line speaking of one person's health,
+  discipline, performance, or pay, or holding personal data, is kept nowhere.
+- **Never captured:** a meeting whose chat holds a guest or someone from another organization (and a captured one keeps
+  nothing while one is there, proposals included), ordinary group chats, 1:1 chats, channel meetings (no permission
+  covers their transcripts), and recordings: Aerugo reads Teams' transcript and never transcribes audio itself. Of a
+  meeting's chat it reads only the messages that mention the bot.
+- **Confirmed by its people.** Only the people in a meeting can read what it proposed, so they, not the connection's
+  team's curators, confirm or dismiss it: anyone in the meeting, in Aerugo (`GET /v1/meetings/review` lists theirs).
+  Nothing a meeting proposes answers a question until one of them confirms it.
+- **Transcripts are indexed** and read on the connection's cadence: a captured meeting is one of the connection's
+  containers, so the sync, the readers refresh, and removing the connection carry it.
+
+The app's bot needs the group chat scope (in `deploy/teams/manifest.json`) to be added to a meeting. Microsoft's own
+answers disagree on whether an app holding only these chat permissions may read transcripts at Graph's
+`/users/{organizer}/onlineMeetings` address, which Aerugo uses; try one meeting in your tenant before relying on it.
+
 ## How the bot's deliveries are checked
 
 Bot Framework signs no HMAC over a delivery. It sends a token Microsoft signs, which Aerugo checks before anything else:
@@ -103,4 +147,5 @@ it acts on. The bot posts only to the service address the connection names, neve
 
 ## Not built yet
 
-Follow-up questions in a thread, pointer and live-only modes, private and shared channels, and meeting transcripts (C3).
+Follow-up questions in a thread, pointer and live-only modes, private and shared channels, confirming a meeting's
+proposals in Teams itself (C3b), channel meetings, and Zoom.

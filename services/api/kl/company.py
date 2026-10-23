@@ -36,11 +36,12 @@ COMPANY = "Acme Outfitters"
 DOMAIN = "acme.test"
 MIN_STORES = 3
 EVERYONE = "everyone"
-LOADED = ("confluence", "jira", "slack", "teams")  # what kl.company_eval loads; meetings wait for C3
+LOADED = ("confluence", "jira", "slack", "teams", "meeting")  # what kl.company_eval loads
 SLACK_TEAM = "T0RETAIL"
 TENANT = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://acme.test/entra"))
 TEAMS_CHANNEL = "19:renodchandover@thread.tacv2"  # the Reno DC team's Shift handover channel, in Teams' own form (C1a)
 TEAMS_APP = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://acme.test/teams-app"))  # the company's Teams app's id
+MEETING_CHAT = "19:meeting_recallstandups@thread.v2"  # the recall stand-ups' Teams meeting chat, in Teams' own form (C3a)
 
 TEAMS = (  # slug, name, who can find it: org (anyone in the org can search it, within their own permissions) or private
     ("company", COMPANY, "org"),
@@ -77,8 +78,10 @@ KEY_SPOTS = ("in the key box in the manager's office, on hook 4", "in the front 
 SENSITIVE_MESSAGES = (("medical-thread", 0), ("hr-warning", 0))
 # C2b: the Slack channels captured, each turned on in the channel by its creator and confirmed by its team's admin; their
 # threads may be proposed from, as pages and tickets are. CO201's holds a sensitive message, never proposed from. C1a:
-# the Teams channel, whose team's owner (its lead) consented to the company's app, confirmed by its team's admin.
-CAPTURED = ("CRTSCO201", TEAMS_CHANNEL)
+# the Teams channel, whose team's owner (its lead) consented to the company's app, confirmed by its team's admin. C3a:
+# the recall stand-ups' meeting, its organizer (its team's lead) writing "capture on" in its chat, meetings turned on by
+# its team's admin.
+CAPTURED = ("CRTSCO201", TEAMS_CHANNEL, MEETING_CHAT)
 # C2c: messages saved to Aerugo, as (thread, message), each by the thread's first author: someone else's message, so
 # only in a captured channel; it becomes a proposed unit with exactly its channel's readers.
 SAVES = (("key-thread-CO201", 1),)
@@ -398,7 +401,7 @@ def _containers(places: tuple[Place, ...]) -> tuple[Container, ...]:
             + tuple(Container("jira", key, name, team, readers) for key, name, team, readers in projects)
             + tuple(Container("slack", cid, name, team, readers) for cid, name, team, readers in channels)
             + (Container("teams", TEAMS_CHANNEL, "Reno DC / Shift handover", "distribution", ("team-distribution",)),
-               Container("meeting", "recall-standups", "TrailLite 2 recall stand-ups", "product-quality", ("team-product-quality",))))
+               Container("meeting", MEETING_CHAT, "TrailLite 2 recall stand-ups", "product-quality", ("team-product-quality",))))
 
 
 def _ts(when: str, n: int = 0) -> str:
@@ -415,6 +418,16 @@ def _ms(when: str, n: int = 0) -> str:
 def teams_key(channel: str, post: str) -> str:
     """A Teams post's key, as the connector makes it: the channel by a hash, then the post's id."""
     return f"teams-{hashlib.sha256(channel.encode()).hexdigest()[:10]}-{post}"
+
+
+def meeting_key(chat: str, transcript: str) -> str:
+    """A meeting's transcript's key, as the connector makes it (C3a): its chat and its id, each by a hash."""
+    return f"meeting-{hashlib.sha256(chat.encode()).hexdigest()[:10]}-{hashlib.sha256(transcript.encode()).hexdigest()[:16]}"
+
+
+def transcript_of(when: str) -> str:
+    """A meeting's transcript's id: one a day."""
+    return f"transcript-{when[:10]}"
 
 
 def teams_team(channel: str) -> str:
@@ -445,7 +458,7 @@ def _docs(people: tuple[Person, ...], places: tuple[Place, ...]) -> list[Doc]:
 
     def thread(name, channel, title, when, messages, source="slack"):
         key = (f"slack-{channel}-{_ts(when)}" if source == "slack" else teams_key(channel, _ms(when)) if source == "teams"
-               else f"{source}-{channel}-{when[:10]}")
+               else meeting_key(channel, transcript_of(when)))
         docs.append(Doc(name, key, source, channel, title, when[:10],
                         messages=tuple((author, f"{when[:10]}T{when[11:]}", text) for author, text in messages)))
 
@@ -784,11 +797,11 @@ LOAD_STG_WMS_INV waited for the WMS extract until 04:10, so LOAD_INV_DAILY finis
         (who(place="CO201", title="Assistant store manager"), "Sam Rivera is having surgery on Tuesday, so I'm covering Sam's shifts all next week."),
         ("Dara Singh", "Thanks. Wishing Sam a quick recovery.")))
 
-    # A Teams channel (C1a); a meeting's transcript, not loaded until C3
+    # A Teams channel (C1a); a meeting's transcript (C3a)
     thread("teams-forklift", TEAMS_CHANNEL, "Shift handover", "2026-10-13 14:00", (
         ("Eli Brooks", "Forklift 3 is out of service until the hydraulic part arrives on Thursday. Use forklift 5 for dock 2."),),
         source="teams")
-    thread("meeting-recall-standup", "recall-standups", "TrailLite 2 recall stand-up", "2026-05-14 09:00", (
+    thread("meeting-recall-standup", MEETING_CHAT, "TrailLite 2 recall stand-up", "2026-05-14 09:00", (
         ("Kai Moreno", "Northpeak confirmed the replacement poles ship on 20 May."),
         ("Priya Shah", "Then stores should have them by 27 May."),
         ("Tess Ward", "We'll update the contact center script once they're in.")), source="meeting")
@@ -952,7 +965,7 @@ def _questions() -> tuple[Question, ...]:
         Q("recall-regulator-hidden", "cora", "Has the regulator been notified about the TrailLite 2 recall?", "permission", (), ("QUAL-9",)),
         Q("recall-regulator", "kai", "Has the regulator been notified about the TrailLite 2 recall?", "lookup", ("QUAL-9",), facts=("recall-regulator",)),
         Q("recall-delisted", "jon", "Was the TrailLite 2 delisted from the website?", "lookup", ("ECOM-210",), facts=("recall-delisted",)),
-        Q("recall-poles", "kai", "When do the replacement poles for the TrailLite 2 ship?", "capture", ("meeting-recall-standup",), needs="C3",
+        Q("recall-poles", "kai", "When do the replacement poles for the TrailLite 2 ship?", "capture", ("meeting-recall-standup",),
           facts=("poles-ship",)),
         Q("recall-lesson", "kai", "What did we learn from the last recall?", "lesson", ("recall-playbook",), facts=("recall-lesson",)),
         Q("recall-reports", "fay", "How many customers reported the TrailLite 2 poles cracking?", "lookup", ("QUAL-7",), facts=("recall-reports",)),
@@ -1019,8 +1032,9 @@ def problems(world: World) -> list[str]:
     out = [f"fact {f.id}: no page {e}" for f in world.facts for e in f.evidence if e not in names]
     out += [f"sensitive message: no {n}, or no message {i} in it" for n, i in SENSITIVE_MESSAGES
             if n not in names or len(world.doc(n).messages) <= i]
-    chats = {c.id: c for c in world.containers if c.source in ("slack", "teams")}
-    out += [f"captured channel {c}: not a Slack channel with a creator, or a Teams channel with an owner" for c in CAPTURED
+    chats = {c.id: c for c in world.containers if c.source in ("slack", "teams", "meeting")}
+    out += [f"captured channel {c}: not a Slack channel with a creator, a Teams channel with an owner, or a meeting with an organizer"
+            for c in CAPTURED
             if c not in chats or not creator_of(world, chats[c])]
     out += [f"save {n}/{i}: not someone else's message in a captured channel" for n, i in SAVES
             if n not in names or world.doc(n).container not in CAPTURED or len(world.doc(n).messages) <= i
@@ -1175,6 +1189,38 @@ def teams_tenant(world: World, app: str = TEAMS_APP) -> dict:
         team = teams.setdefault(teams_team(c.id), {"name": c.name.split(" / ")[0], "consented": [app], "members": members, "channels": {}})
         team["channels"][c.id] = {"name": c.name.split(" / ", 1)[1], "membershipType": "standard", "messages": posts}
     return {"teams": teams}
+
+
+def meeting_chats(world: World, app: str = TEAMS_APP) -> dict:
+    """Meetings' chats (C3a), as Graph lists them: each meeting's, the company's app added to it, organized by its team's
+    lead, its members exactly the meeting's readers, the organizer's "capture on" message, and a transcript a day, each a
+    WebVTT whose lines are what was said, each by its speaker."""
+    chats: dict = {}
+    for c in (c for c in world.containers if c.source == "meeting"):
+        organizer = creator_of(world, c)
+        readers = frozenset().union(*(world.groups[g] for g in c.readers))
+        members = [{"userId": p.entra, "email": p.email, "displayName": p.name, "roles": [], "tenantId": TENANT}
+                   for p in world.people if p.active and p.email in readers]
+        transcripts = []
+        for d in (d for d in world.docs if d.source == "meeting" and d.container == c.id):
+            cues = [f"00:00:{5 + 10 * i:02d}.000 --> 00:00:{9 + 10 * i:02d}.000\n<v {author}>{text}</v>"
+                    for i, (author, _, text) in enumerate(d.messages)]
+            transcripts.append({"id": transcript_of(d.messages[0][1]), "created": f"{d.messages[0][1]}:00Z",
+                                "vtt": "WEBVTT\n\n" + "\n\n".join(cues) + "\n"})
+        chats[c.id] = {"type": "meeting", "topic": c.name, "organizer": organizer.entra, "installed": [app],
+                       "meeting": "MSo" + hashlib.sha256(c.id.encode()).hexdigest()[:24],
+                       "join": f"https://teams.microsoft.com/l/meetup-join/{hashlib.sha256(c.id.encode()).hexdigest()[:16]}",
+                       "members": members, "transcripts": transcripts,
+                       "messages": [{"id": capture_message(c.id), "messageType": "message",
+                                     "from": {"user": {"id": organizer.entra, "displayName": organizer.name}},
+                                     "body": {"contentType": "html", "content": '<at id="0">Aerugo</at> capture on'},
+                                     "mentions": [{"id": 0, "mentioned": {"application": {"id": app}}}]}]}
+    return {"chats": chats}
+
+
+def capture_message(chat: str) -> str:
+    """The id of the message in which a meeting's organizer turned capture on."""
+    return str(1760000000000 + int(hashlib.sha256(chat.encode()).hexdigest()[:8], 16))
 
 
 def manager_of(world: World, person: Person) -> Person | None:

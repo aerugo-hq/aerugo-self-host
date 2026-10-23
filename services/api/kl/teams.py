@@ -23,10 +23,11 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
-from . import privacy
+from . import privacy, source_http
 from .connectors import Container, Health
 from .directory import EMAIL, GUID, GraphClient
 from .principals import is_valid
@@ -41,6 +42,9 @@ USER_ID = re.compile(r"^29:[A-Za-z0-9_-]{1,400}$")  # a person's id in Teams' bo
 # A bot conversation: a 1:1 chat with the bot, or a channel's (with its post)
 CONVERSATION = re.compile(r"^(a:[A-Za-z0-9_-]{1,400}|19:[A-Za-z0-9_-]{1,100}@thread\.(tacv2|skype)(;messageid=[0-9]{10,20})?)$")
 HISTORY_DAYS = 365
+MEETING_CHAT = re.compile(r"^19:meeting_[A-Za-z0-9_-]{1,200}@thread\.v2$")  # a scheduled meeting's chat (C3a)
+MEETING_PART = re.compile(r"^[A-Za-z0-9+/=_-]{1,400}$")  # Graph's ids for an online meeting and its transcripts
+MAX_TRANSCRIPT_CHARS = 2_000_000  # ponytail: a transcript is read whole; a meeting longer than a day's talk is cut here
 
 
 class TeamsClient(GraphClient):
@@ -97,6 +101,65 @@ class TeamsClient(GraphClient):
             if e.response.status_code == 404:
                 return {}
             raise
+
+    # A meeting's chat (C3a), read through the consent its organizer gave when they added the app to the meeting
+    # (OnlineMeeting.ReadBasic.Chat, OnlineMeetingTranscript.Read.Chat, ChatMember.Read.Chat, ChatMessage.Read.Chat):
+    # Graph answers 403 for a meeting the app isn't in.
+    def chat(self, chat: str) -> dict:
+        """A chat as Graph holds it: its type, topic, and, for a meeting's, the meeting's organizer and join address."""
+        return self._get(f"{self.base}/v1.0/chats/{_meeting_chat(chat)}", None)
+
+    def chat_members(self, chat: str) -> list[dict]:
+        return self._pages(f"chats/{_meeting_chat(chat)}/members", {})
+
+    def chat_message(self, chat: str, message: str) -> dict:
+        """One message in a meeting's chat, as Graph holds it now; {} when it isn't there."""
+        if not MESSAGE.fullmatch(message):
+            raise ValueError("unexpected message")
+        try:
+            return self._get(f"{self.base}/v1.0/chats/{_meeting_chat(chat)}/messages/{message}", None)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return {}
+            raise
+
+    def meeting_of(self, organizer: str, join_url: str) -> dict:
+        """The online meeting a chat belongs to, found by its organizer and join address; {} when Graph lists none."""
+        if not GUID.fullmatch(organizer) or not join_url.startswith("https://") or "'" in join_url:
+            raise ValueError("unexpected organizer or join address")
+        found = self._get(f"{self.base}/v1.0/users/{organizer}/onlineMeetings", {"$filter": f"JoinWebUrl eq '{join_url}'"})
+        return next(iter(found.get("value") or []), {})
+
+    def transcripts(self, organizer: str, meeting: str) -> list[dict]:
+        return self._pages(f"users/{_organizer(organizer)}/onlineMeetings/{_meeting(meeting)}/transcripts", {})
+
+    def transcript_text(self, organizer: str, meeting: str, transcript: str) -> str:
+        """A transcript's WebVTT, speakers in its voice tags."""
+        if not MEETING_PART.fullmatch(transcript):
+            raise ValueError("unexpected transcript")
+        r = source_http.send("GET", f"{self.base}/v1.0/users/{_organizer(organizer)}/onlineMeetings/{_meeting(meeting)}/transcripts/"
+                                    f"{quote(transcript, safe='')}/content", params={"$format": "text/vtt"}, timeout=30,
+                             headers={"Authorization": f"Bearer {self._access_token()}"}, throttled=lambda r: r.status_code == 504)
+        r.raise_for_status()
+        return r.text[:MAX_TRANSCRIPT_CHARS]
+
+
+def _meeting_chat(chat: str) -> str:
+    if not MEETING_CHAT.fullmatch(chat or ""):
+        raise ValueError("not a meeting's chat")
+    return chat
+
+
+def _organizer(organizer: str) -> str:
+    if not GUID.fullmatch(organizer or ""):
+        raise ValueError("unexpected organizer")
+    return organizer
+
+
+def _meeting(meeting: str) -> str:
+    if not MEETING_PART.fullmatch(meeting or ""):
+        raise ValueError("unexpected meeting")
+    return quote(meeting, safe="")
 
 
 def client_for(connection: dict) -> TeamsClient:

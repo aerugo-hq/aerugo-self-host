@@ -493,7 +493,7 @@ class TeamsConnectionIn(IndexedOnly):
     client_id: str = Field(max_length=36)  # the company's Teams app: its app registration, and its bot's id
     certificate: str | None = Field(default=None, max_length=20000, repr=False)  # its private key and certificate (PEM)
     credential_ref: str | None = Field(default=None, max_length=300)
-    team_ids: list[str] = Field(min_length=1, max_length=200)  # the teams it may read, by id; each owner's consent decides
+    team_ids: list[str] = Field(max_length=200)  # the teams it may read, by id; each owner's consent decides (none: meetings only)
     channels: list[str] | None = Field(default=None, max_length=500)  # channel ids; None: every standard channel
     history_days: int | None = Field(default=None, ge=1, le=3650)  # how far back it reads; a year unless set
     api_base: str = directory.GRAPH
@@ -849,6 +849,49 @@ def set_answers(ws: str, name: str, body: AnswersIn, caller: Caller = Depends(au
     return answers_of({"config": cfg})
 
 
+class MeetingsIn(BaseModel):
+    meetings: bool  # the team admin's key for meeting capture (C3a)
+
+
+def meetings_of(conn, c) -> dict:
+    captured = conn.execute("SELECT count(*) AS n FROM connection_containers WHERE connection_id = %s AND container_kind = 'meeting'",
+                            (c["id"],)).fetchone()["n"]
+    return {"meetings": bool((c["config"] or {}).get("meetings")), "captured": captured}
+
+
+@router.get("/connections/{name}/meetings")
+def get_meetings(ws: str, name: str, caller: Caller = Depends(authenticate)):
+    """Whether a Teams connection captures meetings whose organizers opt in (C3a), and how many it captures now; never
+    which: a meeting's name is for the people in it."""
+    require_workspace_admin(caller, ws)
+    with scoped(resolve_org_id(config.ORG_SLUG), caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+        if c["kind"] != "teams":
+            raise HTTPException(422, "only a Teams connection captures meetings")
+        return meetings_of(conn, c)
+
+
+@router.put("/connections/{name}/meetings")
+def set_meetings(ws: str, name: str, body: MeetingsIn, caller: Caller = Depends(authenticate)):
+    """The team admin's key for meeting capture (C3a, decided 2026-10-22): once it's on, a meeting is captured when its
+    organizer writes "@Aerugo capture on" in its chat. Turning it off ends every meeting it captures, as a veto does:
+    each one's transcripts and everything proposed from them are removed, and its chat is told."""
+    require_workspace_admin(caller, ws)
+    org_id = resolve_org_id(config.ORG_SLUG)
+    with scoped(org_id, caller.principals) as conn:
+        c = owned_connection(conn, ws, name)
+        if c["kind"] != "teams":
+            raise HTTPException(422, "only a Teams connection captures meetings")
+        cfg = {k: v for k, v in (c["config"] or {}).items() if k != "meetings"} | ({"meetings": True} if body.meetings else {})
+        conn.execute("UPDATE connections SET config = %s, updated_at = now() WHERE id = %s", (Jsonb(cfg), c["id"]))
+        if not body.meetings:
+            conn.execute("INSERT INTO jobs (org_id, kind, payload) SELECT %s, 'meetings.stop', "
+                         "jsonb_build_object('connection_id', %s::text, 'chat', external_id) FROM connection_containers "
+                         "WHERE connection_id = %s AND container_kind = 'meeting'", (org_id, str(c["id"]), c["id"]))
+        audit(conn, org_id, caller.username, "connection.meetings", [ws], {"name": name, "meetings": body.meetings})
+        return meetings_of(conn, {**c, "config": cfg})
+
+
 class CaptureIn(BaseModel):
     action: Literal["confirm", "off"]  # the second key, or stopping capture
 
@@ -867,7 +910,8 @@ def list_capture(ws: str, name: str, caller: Caller = Depends(authenticate)):
         if c["kind"] not in CAPTURE_KINDS:
             raise HTTPException(422, "only a Slack or Teams connection's channels are captured")
         rows = conn.execute("SELECT external_id, display_name, capture, capture_changed_at FROM connection_containers "
-                            "WHERE connection_id = %s AND selected ORDER BY external_id", (c["id"],)).fetchall()
+                            "WHERE connection_id = %s AND selected AND container_kind <> 'meeting' ORDER BY external_id",  # C3a's meetings aren't channels
+                            (c["id"],)).fetchall()
     return {"channels": [{"channel": r["external_id"], "name": r["display_name"], "capture": r["capture"],
                           "changed_at": r["capture_changed_at"].isoformat() if r["capture_changed_at"] else None} for r in rows]}
 
@@ -1051,7 +1095,7 @@ class ConnectionPatch(BaseModel):
     page_trees: list[str] | None = Field(default=None, max_length=100)  # Confluence: only these trees
     channels: list[str] | None = Field(default=None, max_length=500)  # Slack: the channels it brings in, by id
     sites: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Microsoft 365: the sites it reads
-    team_ids: list[str] | None = Field(default=None, min_length=1, max_length=200)  # Teams: the teams it may read
+    team_ids: list[str] | None = Field(default=None, max_length=200)  # Teams: the teams it may read (none: meetings only)
     history_days: int | None = Field(default=None, ge=1, le=3650)     # Slack, Teams: how far back it reads
     catalogs: list[str] | None = Field(default=None, max_length=200)    # Unity Catalog: the catalogs it reads
     databases: list[str] | None = Field(default=None, max_length=500)   # Glue: the databases it reads
