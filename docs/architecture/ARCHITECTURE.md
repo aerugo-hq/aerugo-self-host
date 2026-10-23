@@ -205,7 +205,9 @@ people the handover names see only counts (`kl.handover_progress`). Each shared 
 (the team plus the named successor and lead, or the whole company), becomes a document of kind `handover`, headed by its
 kind of prompt and never its subject, and a proposed unit that the successor or lead confirms (`kl.handover_confirmer`
 and the policy `settle_from_its_handover`). They can withdraw an answer until they leave; when a directory says they've
-left, their unshared drafts are deleted and the handover closes.
+left, their unshared drafts are deleted and the handover closes. In the web app (C4b), Handovers lists what's waiting
+for your review, your own handovers (with Accept and Decline on one asked of you), and those naming you, as counts; the
+interview is a numbered page of prompts, each with its draft, its audience, and Save draft, Share, and Withdraw.
 
 ## 7. The engineering and data pack
 

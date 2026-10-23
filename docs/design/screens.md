@@ -11,6 +11,7 @@ Every screen in the web app: what it's for, its one primary action, and what eac
 | Ask | `#/ask[/<conversation>]` | Everyone | Ask (the composer) | Your history (grouped by day, searchable over your own questions), model and scope, Delete (confirmed) | An answer's Sources and its Graph; a node's panel with Ask about this and Open | `G Q`; ⌘K "Ask" |
 | Concept | `#/concepts/<id>` | Its readers | Read it | Open the source | History timeline, related concepts, sources | Raw OKF disclosure; copy id |
 | Proposals | `#/proposals[/<id>]` | Curators, admins | Draft from a topic | Filter by state | Draft beside its sources; PR timeline | ⌘K |
+| Handovers | `#/handovers[/<id>]` | Everyone | Start a handover | Accept or decline one asked of you; Confirm or Not right (confirmed) on what was handed to you | The interview: each prompt's draft, who reads it once shared, Save draft, Share, Withdraw (confirmed); how far each handover naming you has come, as counts | ⌘K "Handovers" |
 | Alerts | `#/alerts` | Admins | Act on the firing alert | Acknowledge | Alert history; webhook destination | ⌘K "Alerts" |
 | Admin, Sources | `#/admin/sources` | Team admins | **Import** an export | Re-sync a connection | Each repo's team (Repos); run results | ⌘K "Import a Confluence or Notion export"; `G A` |
 | Admin, People | `#/admin/people` | Team admins | Add a member | Remove a role | Create a team (org admins) | ⌘K "Admin: People" |
@@ -49,6 +50,8 @@ A novice reaches every feature in at most three taps (sidebar, section, action).
 | Access review | Sidebar "Compliance", tab "Access review", "Run" (3) | ⌘K "Compliance: Access review" |
 | Rate limits, reranker, Google sign-in | Sidebar "Compliance", tab "Platform" (2) | ⌘K "Compliance: Platform" |
 | Link GitHub or Google | Sidebar "Connected accounts", "Link …" (2) | `G L` |
+| Hand over what you know | Sidebar "Handovers", "Start a handover" (2) | ⌘K "Handovers" |
+| Confirm what was handed to you | Sidebar "Handovers", "Confirm" (2) | ⌘K "Handovers" |
 | Alerts | Sidebar "Alerts" (1) | ⌘K "Alerts" |
 | Every shortcut | Palette footer hint (2) | `?` |
 
@@ -190,6 +193,32 @@ Compliance uses the identical frame with its own tabs: Retention (default), Lega
     <div class="flex gap-2"><button class="…primary…">Link GitHub</button><!-- Link Google: secondary, only once an org admin sets up sign-in --></div>
   </div>
   <!-- Empty: "No accounts linked yet. Synced documents stay hidden until you link the accounts they're shared with." -->
+</section>
+```
+
+### Handovers (`#/handovers`, and the interview at `#/handovers/<id>`)
+
+The list is one column of panels: what's waiting for your review (only when there's something), your handovers (a
+request asked of you carries Accept and Decline in its row), and the ones naming you or asked by you, as counts only,
+since drafts are their person's alone. "Start a handover" is the one primary action; it opens the form in place (whose,
+team, why, successor, lead), whose submit becomes the primary while it's open. The interview is a reading page (800px):
+the prompts are a sequence, so they're numbered, each question set a size up (15/26), its draft below it, then who reads
+it once shared (the team and the people named, or everyone at acme), Save draft (disabled until something changed), and
+Share. A shared answer sits behind the accent's single-sided bar with its status ("Shared with Payments and carol") and
+Withdraw, which asks first. Someone else opening an interview's address is told only its person can read its drafts.
+
+```html
+<section class="max-w-[800px]">
+  <div class="page-head"><div><h1>Your handover</h1><p class="lede">Payments, changing roles. Successor: carol.</p></div>
+    <a class="btn btn-sm btn-ghost" href="#/handovers">All handovers</a></div>
+  <p>Only you can read your drafts. Share an answer when it's ready: it's kept for the people you choose, and carol confirms it.</p>
+  <ol class="handover-prompts">
+    <li><p class="handover-question" id="q1">Who should your successor call, and for what?</p>
+      <textarea aria-labelledby="q1"></textarea>
+      <div class="handover-bar"><span id="q1-to">Share with</span>
+        <div class="seg" role="group" aria-labelledby="q1-to"><button aria-pressed="true">Payments and carol</button><button>Everyone at acme</button></div>
+        <button class="btn btn-sm" disabled>Save draft</button><button class="btn btn-sm">Share</button></div></li>
+  </ol>
 </section>
 ```
 

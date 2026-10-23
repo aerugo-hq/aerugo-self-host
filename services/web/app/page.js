@@ -15,6 +15,7 @@ import ComplianceView from "./compliance-view.js";
 import ConceptView from "./concept-view.js";
 import DeveloperView from "./developer-view.js";
 import DocumentsView, { SpaceView } from "./documents-view.js";
+import HandoversView from "./handovers-view.js";
 import HealthView from "./health-view.js";
 import HomeView from "./home-view.js";
 import { Icon } from "./icons.js";
@@ -29,7 +30,7 @@ import { Empty, Status } from "./ui.js";
 // G then a letter, from anywhere but a text field: the same places the sidebar goes, in the scope you're in.
 const GO = { h: "home", m: "map", s: "search", q: "ask", d: "documents", p: "proposals", a: "admin", c: "compliance", v: "developer", l: "accounts" };
 const TEAM_PAGES = { home: "Overview", documents: "Documents", ask: "Ask", search: "Search", map: "Map", proposals: "Proposals", settings: "Team settings", health: "Knowledge health", concepts: "Document" };
-const ORG_PAGES = { home: "Home", documents: "Documents", ask: "Ask", search: "Search", map: "Map", proposals: "Proposals", admin: "Admin", alerts: "Alerts",
+const ORG_PAGES = { home: "Home", documents: "Documents", ask: "Ask", search: "Search", map: "Map", proposals: "Proposals", handovers: "Handovers", admin: "Admin", alerts: "Alerts",
                     compliance: "Compliance", developer: "Developer", accounts: "Connected accounts", concepts: "Document" };
 
 const initials = (name) => name.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join("");
@@ -190,6 +191,7 @@ export default function App() {
       case "developer": return h(DeveloperView, { me });
       case "concepts": return h(ConceptView, { id: where.arg });
       case "proposals": return h(ProposalsView, { me, id: where.arg });
+      case "handovers": return h(HandoversView, { me, id: where.arg, names }); // yours, and the ones naming you (C4b)
       case "admin": return h(AdminView, { me, section: where.arg });
       case "alerts": return h(AlertsView, { me, onCount: setAlerts });
       case "compliance": return h(ComplianceView, { me, section: where.arg });
@@ -225,6 +227,7 @@ export default function App() {
           group("Assist"),
           item("ask", "ask", "Ask"),
           item("proposals", "draft", "Proposals"),
+          item("handovers", "handover", "Handovers"),
           admin ? group("Admin") : null,
           admin ? h("a", { href: "#/alerts", className: "sb-item", title: "Alerts", "aria-current": where.view === "alerts" ? "page" : undefined },
             h(Icon, { name: "bell" }), h("span", { className: "sb-text" }, "Alerts"),

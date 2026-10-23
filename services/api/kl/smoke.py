@@ -5752,6 +5752,7 @@ def a_handover_is_the_persons_to_start_answer_and_share_and_its_successor_or_lea
     """C4a, handovers: someone starts their own handover, or one of their team's admins asks and it begins only when they accept (someone else can't ask, someone off the team can't start one, declining ends it); its prompts come from what they own (a page they vouched for, a question routed to them) and the open ones; their drafts are theirs alone, the lead seeing only how far it's come; a shared answer reaches exactly the team and the successor and lead it names, or the whole company, never naming what its prompt was about, and an answer about someone's surgery is never kept; the named successor confirms it while someone else can't, in the API and in the database; withdrawing takes its unit, confirmed or not; and when the directory says they've left, their unshared drafts are deleted and their shared answers stay"""
     tag = secrets.token_hex(3).upper()
     name = f"okta-c4-{tag.lower()}"
+    from . import handover as handover_module  # its open prompts, in order
     question = f"How do we reverse a duplicated refund batch {tag}?"
     named_answer = f"Reverse the {tag} batch from the settlement console before 4 pm, then tell the finance desk."
     org_answer = f"The {tag} settlement console lives behind the payments VPN, not the office network."
@@ -5807,8 +5808,10 @@ def a_handover_is_the_persons_to_start_answer_and_share_and_its_successor_or_lea
         own = handover("alice", {})
         assert own.status_code == 201 and own.json()["status"] == "open", f"alice couldn't start her own handover: {own.text[:200]}"
         started.append(own.json()["id"])
-        prompts = [a["prompt"] for a in answers("alice", own.json()["id"]).json()["answers"]]
+        mine = answers("alice", own.json()["id"]).json()["answers"]
+        prompts = [a["prompt"] for a in mine]
         assert any("Declaring a payments Sev1" in p for p in prompts), f"a page alice vouched for wasn't among her prompts: {prompts}"
+        assert [a["kind"] for a in mine[-len(handover_module.OPEN_PROMPTS):]] == [k for k, _ in handover_module.OPEN_PROMPTS]             and all(a["kind"] in ("owned", "asked") for a in mine[:-len(handover_module.OPEN_PROMPTS)]),             f"alice's prompts aren't in their order (what she owns, then the open ones): {[a['kind'] for a in mine]}"
 
         asked = handover("alice", {"person": "carol", "successor": "dave"})
         assert asked.status_code == 201 and asked.json()["status"] == "requested" and asked.json()["lead"] == "alice", asked.text[:200]

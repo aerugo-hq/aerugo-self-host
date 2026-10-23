@@ -1,8 +1,8 @@
 # Handovers
 
 When someone leaves or changes roles, a handover turns what they know into knowledge their successor can find. It's a
-guided interview in the web app: prompts built from what they own, answered in their own words, and shared only when
-and with whom they choose. The decisions behind it are in `docs/ENTERPRISE_PLAN.md` (C4).
+guided interview in the web app (Handovers, in the sidebar): prompts built from what they own, answered in their own
+words, and shared only when and with whom they choose. The decisions behind it are in `docs/ENTERPRISE_PLAN.md` (C4).
 
 ## Who starts one
 

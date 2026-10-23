@@ -175,9 +175,9 @@ def summary(conn, row: dict, me: str) -> dict:
 
 def open_prompts(conn, org_id: str, caller: Caller, handover: str) -> int:
     rows = build_prompts(conn, org_id, caller)
-    for kind, prompt, subject in rows:
-        conn.execute("INSERT INTO handover_answers (org_id, handover_id, kind, prompt, subject) VALUES (%s, %s, %s, %s, %s)",
-                     (org_id, handover, kind, prompt, subject))
+    for n, (kind, prompt, subject) in enumerate(rows):  # a microsecond apart, so they're read back in this order
+        conn.execute("INSERT INTO handover_answers (org_id, handover_id, kind, prompt, subject, created_at) "
+                     "VALUES (%s, %s, %s, %s, %s, now() + %s * interval '1 microsecond')", (org_id, handover, kind, prompt, subject, n))
     return len(rows)
 
 

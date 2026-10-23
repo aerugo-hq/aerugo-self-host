@@ -1045,3 +1045,40 @@ img.source-icon { box-sizing: content-box; padding: 1px; border-radius: 3px; bac
   .reader-actions { margin-left: 0; }
 }
 .tb-theme { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; color: var(--muted); font-size: 12px; }  /* slice D2 */
+
+/* ------------------------------------------------------------------ handovers (C4b) */
+.handover-done { margin-bottom: 16px; }
+.handover-form { display: grid; gap: 16px; max-width: 720px; }
+.handover-form .seg { align-self: flex-start; }
+.handover-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.handover-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.handover-review { list-style: none; margin: 0; padding: 0; }
+.handover-review li { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 14px; }
+.handover-review li + li { border-top: 1px solid var(--border); }
+.handover-review-text { display: grid; gap: 4px; min-width: 0; }
+.handover-review-text p { color: var(--fg-2); max-width: 68ch; white-space: pre-wrap; }
+.handover-review-text .sub { color: var(--muted); font-size: 12px; }
+.handover-intro { color: var(--fg-2); max-width: 68ch; }
+.handover-progress { margin-top: 8px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* The interview is a sequence, so its prompts are numbered; each question is set for reading, a size up. */
+.handover-prompts { display: grid; gap: 24px; margin: 20px 0 0; padding-left: 28px; }
+.handover-prompts > li::marker { color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+.handover-question { margin-bottom: 8px; font: 400 15px/26px var(--serif); color: var(--fg); max-width: 68ch; }
+.handover-answer {
+  display: block; width: 100%; min-height: 72px; resize: vertical; padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: var(--r-control); background: var(--surface); line-height: 20px; transition: border-color var(--ease);
+}
+.handover-answer::placeholder { color: var(--faint); }
+.handover-answer:hover { border-color: var(--border-strong); }
+.handover-answer:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.handover-answer:disabled { background: var(--bg); color: var(--faint); cursor: not-allowed; }
+/* A shared answer is kept knowledge now: the accent's single-sided bar says so, beside the status that names who reads it. */
+.handover-shared > p { padding: 10px 12px; border-left: 2px solid var(--accent); background: var(--surface); color: var(--fg-2); white-space: pre-wrap; }
+.handover-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.handover-bar .spacer { flex: 1; }
+.handover-to { color: var(--muted); font-size: 12px; }
+@media (max-width: 640px) {
+  .handover-fields { grid-template-columns: 1fr; }
+  .handover-review li { flex-direction: column; }
+  .handover-prompts { padding-left: 20px; }
+}
