@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aerugo prototype (D0)</title>
+  <!-- The app's own stylesheet, so every token and component is the app's (docs/design/DESIGN.md); then only what's new. -->
+  <link rel="stylesheet" href="../../../services/web/app/globals.css">
+  <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+  <a class="skip" href="#view">Skip to the page</a>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Navigation">
+      <div class="sb-head"><span class="mark" aria-hidden="true">Ae</span><span class="sb-name sb-fade">Aerugo</span></div>
+      <nav class="sb-nav" id="nav" aria-label="Pages"></nav>
+      <nav class="sb-foot" id="foot" aria-label="Prototype flows"></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <button type="button" class="btn btn-ghost btn-icon topbar-menu" id="menu" aria-label="Open menu">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+        </button>
+        <div id="crumbs"></div>
+        <div class="tb-spacer"></div>
+        <label class="persona"><span>Viewing as</span><select class="select" id="persona"></select></label>
+        <div class="seg" role="group" aria-label="Theme" id="theme">
+          <button type="button" data-theme="light" aria-pressed="true">Light</button><button type="button" data-theme="dark" aria-pressed="false">Dark</button>
+        </div>
+      </header>
+      <div id="view" tabindex="-1"></div>
+    </main>
+  </div>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

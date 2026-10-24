@@ -2857,6 +2857,45 @@ eval-teams` no leak, every team at its baseline; the retailer as pointers Recall
 27, and live only Recall@10 99%, MRR 0.62, Ask right for 25 of 27, each with no leak and no regression; no planted text
 in the services' logs; `make e2e` 45 passed (the two handover tests among them); `make test-web` 7 passed; the lint at 0
 errors and 43 warnings. No baseline changed, so none was recorded again.
+D0, the UI revamp's design (the plan approved 2026-10-23 with five decisions: one Review inbox; Home fitted to role and
+location; Knowledge as one place with kinds as filters, each kind its own page; the prototype as static HTML in
+`docs/design/prototype/`; its scope D1's screens, the onboarding flows, and the frontline view). `docs/design/IA.md`:
+where every entity lives (the organization, you, a colleague, a team as a space, a source and its containers with their
+capture, a document, a knowledge unit, a review item, a gap, a handover, a system), its address, who sees it, and what
+its page shows; the navigation by role (Home; Know: Ask, Knowledge, Who to call, Documents, Map; Act: Review, shown only
+with something waiting, and Handovers; Admin: Settings, and for org admins Organization, Compliance, Alerts), and how
+today's addresses move (Proposals into Review's Drafts, Knowledge health's queue into Review, `#/admin` to
+`#/settings`); Home's blocks and what each is built on; Knowledge's list and each kind's page; the procedure runner, the
+one bold screen; Review's six tabs (to confirm, conflicts, due for review, corrections, gaps, drafts), who sees each
+item, and its actions; Ask's unit cards; the four onboarding flows (the organization, a team, a person's first sign-in,
+connecting a source), step by step; the frontline view; and, per screen, the APIs that exist and the ones D1 adds
+(`GET /v1/review`, `GET /v1/changes/for-me`, `GET /v1/contacts`, the runner's progress). The prototype
+(`index.html`, `app.js`, `data.js`, `prototype.css`): every screen for five people (Ana, a store associate in Portland;
+Cora, a store manager in San Francisco and Stores' curator; Fay, a contact center agent; Kai, product quality's lead
+and admin; Olivia, the org admin), switched at the top, its content the synthetic retailer's own (its units, their
+evidence, and the real managers F8 resolves: Darius Ellis and Uma Jensen for Ana, Zane Svensson for Cora), shaped as
+`GET /v1/units/{id}` returns them. It links the app's own `globals.css`, so its tokens and components are the app's, and
+reuses the app's patterns where they exist (`dl.facts`, `.chip`, `.tbl`, the shell); `prototype.css` adds only what's
+new. A unit applies by the person's role and place, so California's extra injury step appears for Cora and not for Ana;
+Review appears only for someone with something waiting; Settings only for admins. Every action is a delegated
+`data-` handler and every value goes through one escape function, so no text becomes markup or code. No dependency, no
+backend, never shipped; deleted once D1 lands. `DESIGN.md` gains the runner, the unit card, the kind filter, the inbox
+item, and a status that wraps; `screens.md` gains the designed screens; the plan's D0 note records the decisions.
+Check: `docs/design/prototype/check_prototype.py`, Playwright in the browser tests' image against the repository mounted
+read-only (24 tests): every one of 54 screens for each of the five people at 375, 768, and 1440 pixels renders a page,
+never "Not found", raises no script error, and scrolls no wider than the window; every link on every screen leads to a
+screen; the first Tab reaches the skip link and focus shows; the runner steps through and fits the place (7 steps for
+Oregon, 8 for California); Review appears only with something waiting and settles an item; connecting a source walks
+its six steps; switching person changes Home and the navigation. Red first: its first run failed 6 of 24, the five
+phone-width runs (Ask's confidence sentence and a source's channels table widened the page by up to 258 pixels) and the
+skip link (the test's own: switching person moves focus to the page's heading, as intended); fixed (a status that's a
+sentence wraps; the table's `sr-only` header, positioned, escaped its scroll box, so `.tbl-wrap` is now its containing
+block, a fix the app's admin tables need too and D1 makes), then 24 passed. Screenshots at the three widths, reviewed:
+they caught Ask's answer as a card holding cards (now the answer sits on the canvas), the Knowledge list's titles cut to
+a word, the runner's crumb repeating its title, and two of the app's own patterns re-made by hand (the label and value
+list, the filter chips), each fixed. Not run: the app's own checks, since nothing in the app changed. Not built: dark
+mode screenshots (every color is a token, so it follows), a working "Applies to me" beyond the five people, and the
+engineering screens (O3).
 **Next, in order:** `docs/BUILD_PLAN.md` says how to build what's left (the rules, a map of the code, the verification
 loop, the recipe every source follows, and each item's design), and `docs/ROADMAP.md` is the checklist: step V is
 done, and so are G1, S2 to S8, Q1 to Q8, E1 to E3, A1 to A4, G2, and G3. Before deployment, the production review's
@@ -2874,8 +2913,9 @@ answers privately, as the asker), which completes C2, F6's evidence by its text,
 source, with capture) and C1b (the Teams bot's private answers and Save to Aerugo), which complete C1, with the
 fresh-stack loop over the three, and C3a (Teams meeting transcripts, opted in by each organizer) and C3b (confirming a
 meeting's proposals in Teams), which complete C3, with the fresh-stack loop over the two, and C4a (handover
-interviews behind the API) and C4b (its screens), which complete C4; next, the fresh-stack loop over the two,
-then D0 (C5, announcement mailboxes, deferred until a pack needs it).
+interviews behind the API) and C4b (its screens), which complete C4, with the fresh-stack loop over the two; and
+D0, the UI revamp's design (`docs/design/IA.md` and its prototype), built and waiting for review; next, D1 once the
+prototype is reviewed (C5, announcement mailboxes, deferred until a pack needs it).
 The direction after that: `docs/ENTERPRISE_PLAN.md`, a self-evolving knowledge layer for every team (knowledge
 units of every kind, with evidence, owners, scope, perspectives, and freshness; capture from opted-in Teams and Slack
 channels, meetings, and handovers; answers fitted to each person's role and location; scenario packs per team:

@@ -304,7 +304,10 @@ and in the stack, recorded in `CLAUDE.md`, ticked here, stopping for review afte
 - [ ] **D0.** The UI revamp's design (decided 2026-10-17: after F1, so it reflects real knowledge units, and before
       D1): the information architecture for every entity (the organization and its sign-in, people, teams as spaces,
       sources and the chat channels mapped to them, knowledge, systems, reviews), the onboarding flows, and a
-      clickable prototype reviewed before any D1 screen is built; then built alongside D1.
+      clickable prototype reviewed before any D1 screen is built; then built alongside D1. (Decided 2026-10-23: one
+      Review inbox; Home fitted to role and location; Knowledge as one place with kinds as filters and each kind its
+      own page; the prototype as static HTML in `docs/design/prototype/`; its scope D1's screens, the onboarding flows,
+      and the frontline view. `docs/design/IA.md` and the prototype: built, waiting for review.)
 - [ ] **D1.** The Knowledge, unit, policy, procedure runner, who-to-call, gaps, and review screens.
 - [ ] **D2.** Teams and Slack as places to ask, save, and follow procedures; change notices to affected roles.
 - [ ] **D3.** The frontline view.
