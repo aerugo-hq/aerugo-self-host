@@ -27,7 +27,21 @@ Every screen in the web app: what it's for, its one primary action, and what eac
 | Command palette | overlay | Everyone | Run the highlighted command | Arrow keys, mouse | Shortcut list (`?`) | It *is* the power layer |
 | Confirmation | overlay | Anyone removing something | Cancel (focused first) | The destructive confirm | n/a | Esc cancels |
 
-Status: everything above is **built**, except the drawers (Activity event details; a search result preview), Ask in the palette, and the Map legend's replay shortcut, which are **specified**.
+The revamp (D0, `IA.md`) designs these, in its prototype; D1 builds them:
+
+| Screen | Address | Who | Primary action | Secondary (visible, subordinate) | Expanded (L2) | Power (L3) |
+|---|---|---|---|---|---|---|
+| Home | `#/home` | Everyone | Ask (the box) | This week for you; your checklists; waiting for you; who to call here | Getting started, for admins | ⌘K |
+| Knowledge | `#/knowledge[?kind=]` | Everyone | Open a unit | Kind chips; "Applies to me" | Team and status filters | ⌘K |
+| A unit | `#/knowledge/<id>` | Whoever reads all its evidence | Its kind's (Start the checklist; none for a policy) | This is wrong; Confirm, New version for its owners | Versions, perspectives, conflicts, history | Copy id |
+| Procedure runner | `#/run/<id>` | Its readers | Done, next step | Back, Start over | Who you'll call | n/a |
+| Who to call | `#/people` | Everyone | Reach the holder | Filter by place and team | The contact's unit | ⌘K |
+| Review | `#/review/<tab>` | Anyone with something waiting | Each item's first action | Its second | The item's evidence | ⌘K |
+| Settings, a source | `#/settings/sources/<id>` | Team admins | Sync now | Confirm or turn off a channel's capture | Storage mode, freshness | ⌘K |
+| Onboarding | `#/setup`, `#/setup/team`, `#/welcome`, `#/connect` | Admins; anyone on first sign-in | Continue | Back | Each step's detail | n/a |
+| Frontline view | `#/frontline` | Store and DC roles, on a phone | Ask | Incident, Policies, Call | The runner | n/a |
+
+Status: everything in the first table is **built**, except the drawers (Activity event details; a search result preview), Ask in the palette, and the Map legend's replay shortcut, which are **specified**.
 
 ## Navigation map
 

@@ -174,6 +174,11 @@ Every interactive element has designed **hover**, **focus-visible** (a 2px accen
 | Command palette | The universal power layer: ⌘K or Ctrl K from anywhere. It lists only what the person can use, matches letters in order, and turns anything typed into a search. |
 | Breadcrumbs | In the top bar on every page but the org's Home: `acme › Payments › Documents`. |
 | Keyboard | `/` search · `G` then `H M S Q D P A C V L` to go somewhere · `?` the shortcut list · `Esc` closes. Shortcuts never fire while typing in a field. |
+| Procedure runner (D0, built in D1) | The one bold screen: the current step a size up (18/28, semibold) in a panel, with its role, condition, and form; done steps muted above with a filled accent check, steps to come quiet below; the contacts it names beside it (below it on a phone). One primary: "Done, next step". |
+| Unit card (D0, built in D1) | How Ask shows knowledge: its kind in words (12px, muted) before its title, then its kind's shape (a procedure's first steps and Start, a contact's holder, a policy's effective date, a definition's other views). The unit that leads the answer has an accent border; the rest a plain one. Never inside another card. |
+| Kind filter (D0, built in D1) | The app's filter chip as a link with `aria-current="page"`, since each filter has its own address; its count in muted tabular figures. |
+| Inbox item (D0, built in D1) | What it is, its text, then one meta line: what proposed it, why it's yours, how old. Two actions, secondary then ghost; the result said in place ("Confirmed: done"). |
+| Status, as a sentence | A status longer than a few words wraps (`.status.wrap`, the dot top-aligned) rather than widening the page. |
 
 ## Disclosure: three levels on every screen
 
@@ -195,6 +200,14 @@ Every interactive element has designed **hover**, **focus-visible** (a 2px accen
 - More than one primary button on a screen; destructive actions without a confirmation.
 - Settings buried behind unlabeled overflow menus; more than two levels of navigation to any action.
 - Generic copy ("Submit", "Click here", "Error occurred").
+
+## The revamp (D0)
+
+`IA.md` says where every entity lives and how each role finds it; `prototype/` is the clickable prototype, which links
+this stylesheet so it can't drift from it. What the prototype adds is in its own `prototype.css`; D1 moves what survives
+review into the app. One fix it found applies to the app as it is: an `sr-only` table header is positioned, so inside a
+`.tbl-wrap` it escapes the scroll box and widens a phone's page by its column (the admin tables' "Actions"); `.tbl-wrap`
+needs `position: relative`, which D1 adds.
 
 ## Assumptions
 

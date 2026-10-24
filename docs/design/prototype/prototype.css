@@ -1,0 +1,153 @@
+/* Only what the revamp adds to the app's stylesheet (services/web/app/globals.css, linked first): every color is one of
+   its tokens, every size on its scale (docs/design/DESIGN.md). D1 moves what survives review into globals.css. */
+:root { --font-sans: "Inter"; --font-mono: "JetBrains Mono"; }  /* next/font sets these in the app */
+
+.skip { position: absolute; left: 8px; top: -40px; z-index: 100; padding: 6px 10px; border-radius: var(--r-control); background: var(--surface); }
+.skip:focus { top: 8px; }
+.stack { display: grid; gap: 16px; align-content: start; }
+.stack > .panel + .panel { margin-top: 0; }
+#view h1:focus { outline: none; }  /* focused on arrival so a screen reader starts there; a heading isn't a control */
+.persona { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.persona .select { max-width: 280px; }
+.sb-badge.count { background: var(--tint-strong); color: var(--fg); }
+.panel-foot.between { justify-content: space-between; }
+.status.wrap { white-space: normal; align-items: flex-start; }
+.status.wrap .dot { margin-top: 6px; }
+/* An sr-only header is positioned: without this, it escapes the table's scroll box and widens a phone's page (the app's
+   admin tables share it; D1 moves this into globals.css). */
+.tbl-wrap { position: relative; }
+fieldset.plain { margin: 0; padding: 0; border: 0; }
+
+/* Home */
+.ask-home { display: grid; gap: 8px; }
+.ask-box { height: 40px; background: var(--surface); }
+.ask-box input { font-size: 14px; }
+.suggest { color: var(--muted); font-size: 12px; }
+.changes, .counts, .callers, .evidence, .inbox { list-style: none; margin: 0; padding: 0; }
+.changes li { padding: 12px 14px; }
+.changes li + li, .inbox > li + li { border-top: 1px solid var(--border); }
+.change-what { display: grid; gap: 4px; }
+.change-title { font-weight: 500; color: var(--fg); }
+.change-title:hover { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
+.counts a { display: flex; justify-content: space-between; gap: 12px; padding: 9px 14px; transition: background var(--ease); }
+.counts li + li a { border-top: 1px solid var(--border); }
+.counts a:hover { background: var(--tint); }
+.callers li { display: grid; gap: 2px; padding: 10px 14px; }
+.callers li + li { border-top: 1px solid var(--border); }
+.callers b { font-weight: 500; }
+.callers span { color: var(--fg-2); }
+.callers small { color: var(--muted); font-size: 12px; }
+.setup { list-style: none; margin: 0; padding: 4px 0; }
+.setup li { display: grid; grid-template-columns: 20px 1fr; gap: 10px; padding: 8px 14px; }
+.setup li div { display: grid; gap: 2px; }
+.setup li span:not(.setup-mark) { color: var(--muted); font-size: 12px; line-height: 16px; }
+.setup-mark { display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; border: 1.5px solid var(--border-strong); border-radius: 50%; }
+.setup li.done .setup-mark { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.setup li.done b { color: var(--muted); font-weight: 500; }
+
+/* Ask */
+.msg-q { justify-self: end; margin: 0 0 12px auto; max-width: 80%; padding: 8px 12px; border-radius: var(--r-card); background: var(--tint-strong); width: fit-content; }
+.unit-cards { display: grid; gap: 12px; margin-top: 16px; }
+.unit-card { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); }
+.unit-card.lead { border-color: var(--accent); }
+.unit-card > .btn { justify-self: start; }
+.uc-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.uc-title { font-weight: 600; }
+.uc-title:hover { text-decoration: underline; text-underline-offset: 3px; }
+.kind { color: var(--muted); font-size: 12px; font-weight: 500; }
+.uc-steps { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.uc-steps li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
+.perspective { padding: 8px 10px; border-left: 2px solid var(--border-strong); background: var(--surface-2); color: var(--fg-2); }
+.said:empty { display: none; }
+
+/* Knowledge */
+/* Kinds as the app's filter chips (button.chip in E1 and E2), as links, since each filter has its own address. */
+.chips { margin-bottom: 16px; }
+a.chip { gap: 6px; padding: 0 10px; transition: background var(--ease); }
+a.chip:hover { background: var(--tint); }
+a.chip[aria-current="page"] { border-color: var(--accent); background: var(--accent-tint); color: var(--accent-press); }
+.chip .num { color: var(--muted); font-size: 12px; }
+
+/* a unit's page */
+.rule { font: 400 15px/26px var(--serif); max-width: 68ch; }
+.changed { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--fg-2); }
+.block { display: block; }
+.k-title { min-width: 280px; }
+.k-title .sub { white-space: normal; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+.evidence a { display: grid; gap: 2px; padding: 10px 14px; transition: background var(--ease); }
+.evidence li + li a { border-top: 1px solid var(--border); }
+.evidence a:hover { background: var(--tint); }
+.evidence b { font-weight: 500; }
+.evidence span { color: var(--muted); font-size: 12px; }
+.versions { padding: 12px 14px 0; }
+.proc-steps { margin: 0; padding: 4px 14px 4px 36px; }
+.proc-steps li { display: grid; gap: 4px; padding: 8px 0; }
+.proc-steps li + li { border-top: 1px solid var(--border); }
+.proc-steps li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
+.proc-steps b { font-weight: 500; }
+.contact-big { display: grid; gap: 4px; }
+.contact-big b { font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -0.02em; }
+
+/* The procedure runner: the one bold screen. The current step a size up, the rest quiet; contacts beside it. */
+.progress { height: 3px; margin: -8px 0 20px; border-radius: 2px; background: var(--tint-strong); overflow: hidden; }
+.progress span { display: block; height: 100%; background: var(--accent); transition: width var(--ease); }
+.run-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.run-steps li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; padding: 10px 12px; border-radius: var(--r-card); }
+.run-mark { display: grid; place-items: center; width: 24px; height: 24px; border: 1.5px solid var(--border-strong); border-radius: 50%; color: var(--muted); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.run-steps li.done .run-mark { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.run-steps li.done .run-text { color: var(--muted); }
+.run-steps li.next .run-text { color: var(--fg-2); }
+.run-steps li.current { padding: 16px 12px; border: 1px solid var(--border); background: var(--surface); }
+.run-steps li.current .run-mark { border-color: var(--accent); color: var(--accent); }
+.run-steps li.current .run-text { font-size: 18px; line-height: 28px; font-weight: 600; letter-spacing: -0.01em; color: var(--fg); }
+.run-body { display: grid; gap: 10px; min-width: 0; }
+.run-body .actions .btn { height: 36px; padding: 0 14px; }
+
+/* Review */
+.inbox > li { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; align-items: start; padding: 12px 14px; }
+.inbox-text { display: grid; gap: 4px; min-width: 0; }
+.inbox-text b { font-weight: 500; }
+.inbox-text b a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.inbox-text p { color: var(--fg-2); max-width: 68ch; }
+.inbox .said { grid-column: 1 / -1; }
+.section-nav .num { margin-left: 6px; color: var(--muted); font-size: 12px; }
+
+/* Onboarding */
+.welcome-go { display: flex; gap: 8px; margin-top: 16px; }
+.stepper { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 16px; padding: 0; list-style: none; counter-reset: step; color: var(--muted); font-size: 12px; }
+.stepper li { counter-increment: step; }
+.stepper li::before { content: counter(step) ". "; font-variant-numeric: tabular-nums; }
+.stepper li.done { color: var(--fg-2); }
+.stepper li.current { color: var(--fg); font-weight: 600; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.gallery-item { height: 44px; border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface); font-weight: 500; cursor: pointer; transition: border-color var(--ease), background var(--ease); }
+.gallery-item:hover { border-color: var(--border-strong); background: var(--tint); }
+.gallery-item[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-tint); }
+
+/* The frontline view: a phone, as a store associate holds it. 44px targets, the reading size for answers. */
+.phone { width: 100%; max-width: 390px; }
+.phone-screen { display: grid; grid-template-rows: auto 1fr auto; height: 720px; max-height: calc(100vh - 160px); min-height: 520px; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 24px; background: var(--bg); }
+.phone-bar { display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.phone-body { display: grid; gap: 12px; align-content: start; padding: 16px; overflow-y: auto; }
+.fl-input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); font-size: 15px; }
+.fl-q { color: var(--muted); font-size: 12px; }
+.fl-label { font-weight: 600; }
+.fl-big { height: 44px; font-size: 14px; }
+.fl-row { display: grid; gap: 2px; min-height: 56px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); }
+.fl-row b { font-weight: 600; font-size: 14px; }
+.fl-row span { color: var(--fg-2); }
+.phone-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--border); background: var(--surface); }
+.phone-tabs button { display: grid; justify-items: center; gap: 2px; min-height: 56px; padding: 8px 0; border: 0; background: none; color: var(--muted); font-size: 11px; font-weight: 500; cursor: pointer; }
+.phone-tabs button[aria-current="page"] { color: var(--accent); }
+
+@media (max-width: 900px) {
+  .run-contacts { position: sticky; bottom: 0; }
+  .run-contacts .panel { border-radius: var(--r-card) var(--r-card) 0 0; }
+}
+@media (max-width: 640px) {
+  .persona > span { display: none; }
+  .persona .select { max-width: 160px; }
+  .topbar #theme { display: none; }
+  .inbox > li { grid-template-columns: 1fr; }
+  .phone-screen { height: auto; max-height: none; border-radius: var(--r-card); }
+}
